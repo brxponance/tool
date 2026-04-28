@@ -1,0 +1,2259 @@
+"""
+Flask backend for the Aapryl Clone Tool
+Results are cached to disk so browser refreshes don't lose data.
+"""
+import os, json, threading, pickle
+import numpy as np
+import pandas as pd
+from flask import Flask, request, jsonify, send_from_directory
+from werkzeug.utils import secure_filename
+from data_loader import (load_factor_returns, load_manager_returns, load_weights,
+                         run_cloning, build_portfolio_view, fuzzy_match,
+                         diagnose_clone_determinism)
+
+app = Flask(__name__, static_folder='static')
+app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')
+app.config['CACHE_FILE']    = os.path.join(os.path.dirname(__file__), 'cache', 'results.pkl')
+app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
+
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs(os.path.dirname(app.config['CACHE_FILE']), exist_ok=True)
+
+state = {
+    'clone_results': None, 'manager_dfs': None, 'weights': None,
+    'client_benchmarks': {},
+    'risk_data': None,
+    'universe_clone_results': None, 'universe_dfs': None,
+    'exposures_data': None,
+    'norm_skill_by_tab': {},
+    'progress': [], 'running': False, 'error': None, 'files': {},
+    'progress_current': 0, 'progress_total': 0, 'progress_phase': '',
+    # Basenames of the files used for the most recent buy-list clone run.
+    # Compared against currently-uploaded filenames to surface a staleness
+    # warning when the user has uploaded new files but not yet re-run clones.
+    'clone_run_files': {},   # {'manager_returns': basename, 'factor_returns': basename}
+    # Stock-level risk data from FactSet Security-Level Risk DNA export.
+    # {managers: {mgr: [stocks]}, benchmarks: {bmk: {factor: val}}, ...}
+    'security_risk_data': None,
+}
+
+# ── Cache helpers ──────────────────────────────────────────────────────────
+def save_cache():
+    try:
+        with open(app.config['CACHE_FILE'], 'wb') as f:
+            pickle.dump({
+                'clone_results':           state['clone_results'],
+                'weights':                 state['weights'],
+                'client_benchmarks':       state['client_benchmarks'],
+                'risk_data':               state['risk_data'],
+                'universe_clone_results':  state['universe_clone_results'],
+                'exposures_data':          state['exposures_data'],
+                'norm_skill_by_tab':       state['norm_skill_by_tab'],
+                'files':                   state['files'],
+                'clone_run_files':         state['clone_run_files'],
+                'security_risk_data':      state['security_risk_data'],
+            }, f)
+        print("Cache saved.")
+    except Exception as e:
+        print(f"Cache save error: {e}")
+
+
+# Managers excluded from norm-skill computation due to known data errors.
+NORM_SKILL_EXCLUDE = set()   # Henry James SC returns have been corrected — no longer excluded
+
+
+# ── Style bucket post-processing ──────────────────────────────────────────
+_STYLE_BUCKET_KEYS = ['Core','Value','Growth','Yield','Quality',
+                      'Dynamic','Defensive','Low Vol']
+
+def absorb_regional_into_core(clone_results):
+    """For each manager, add any non-style weight (residual from summing the
+    8 style buckets) into the Core bucket so style_buckets always sums to
+    100%. This makes 'Core' include regional and country factors (UK, Japan,
+    Euro ex UK, etc.) that don't carry a style label.
+
+    Idempotent: re-running is a no-op because the residual is already zero.
+    Mutates the dicts in place so every consumer (peer table, portfolio
+    summary, market cycle, etc.) sees the same adjusted buckets."""
+    if not clone_results:
+        return
+    for tab, td in clone_results.items():
+        if not isinstance(td, dict):
+            continue
+        for _, d in td.items():
+            sb = d.get('style_buckets')
+            if not isinstance(sb, dict):
+                continue
+            style_sum = sum((sb.get(k, 0) or 0) for k in _STYLE_BUCKET_KEYS)
+            residual  = 1.0 - style_sum
+            if residual > 0.0005:
+                sb['Core'] = (sb.get('Core', 0) or 0) + residual
+
+
+def recompute_norm_skill(tabs=None):
+    """Recompute normalized-skill Z-scores for the given tabs (or all tabs
+    with clone results). Safe to call whenever clone_results or
+    universe_clone_results change. Silent no-op if there is nothing to do."""
+    try:
+        from skill_engine import compute_norm_skill_latest
+    except Exception as e:
+        print(f"skill_engine import failed: {e}")
+        return
+    cr  = state.get('clone_results') or {}
+    ucr = state.get('universe_clone_results') or {}
+    if tabs is None:
+        tabs = sorted(set(cr.keys()) | set(ucr.keys()))
+    if 'norm_skill_by_tab' not in state or state['norm_skill_by_tab'] is None:
+        state['norm_skill_by_tab'] = {}
+    for t in tabs:
+        try:
+            state['norm_skill_by_tab'][t] = compute_norm_skill_latest(
+                cr, ucr, t, exclude=NORM_SKILL_EXCLUDE
+            )
+            n = len(state['norm_skill_by_tab'][t])
+            print(f"Normalized skill recomputed for {t}: {n} managers.")
+        except Exception as e:
+            import traceback
+            print(f"Norm-skill compute failed for {t}: {e}\n{traceback.format_exc()}")
+
+def _resolve_cached_path(p):
+    """Cached file paths may have been saved as absolute paths on a different
+    machine, or as bare filenames after a zip round-trip. Try both: the path
+    as-is, then as a filename inside uploads/. Returns a resolved absolute
+    path if the file exists, otherwise None.
+    """
+    if not p:
+        return None
+    if os.path.isabs(p) and os.path.exists(p):
+        return p
+    # Relative path, try as-is (relative to cwd)
+    if os.path.exists(p):
+        return os.path.abspath(p)
+    # Fall back: interpret as a filename in the uploads folder
+    basename = os.path.basename(p)
+    alt = os.path.join(app.config['UPLOAD_FOLDER'], basename)
+    if os.path.exists(alt):
+        return os.path.abspath(alt)
+    return None
+
+
+def load_cache():
+    cf = app.config['CACHE_FILE']
+    if not os.path.exists(cf):
+        return
+    try:
+        with open(cf, 'rb') as f:
+            data = pickle.load(f)
+        state['clone_results']          = data.get('clone_results')
+        state['weights']                = data.get('weights')
+        state['client_benchmarks']      = data.get('client_benchmarks') or {}
+        state['risk_data']              = data.get('risk_data')
+        state['clone_run_files']        = data.get('clone_run_files') or {}
+        state['security_risk_data']     = data.get('security_risk_data')
+        state['universe_clone_results'] = data.get('universe_clone_results')
+        state['exposures_data']         = data.get('exposures_data')
+        state['norm_skill_by_tab']      = data.get('norm_skill_by_tab', {})
+        cached_files                    = data.get('files', {})
+
+        # Resolve each cached path. Drop entries whose files can no longer be
+        # located; rewrite survivors to their new absolute paths. This keeps
+        # /run from trying to open a ghost path and failing mysteriously.
+        resolved = {}
+        for key, val in (cached_files or {}).items():
+            if isinstance(val, dict):
+                # universe_returns is a {peer_tab: path} sub-dict
+                sub = {}
+                for pt, pp in val.items():
+                    rp = _resolve_cached_path(pp)
+                    if rp:
+                        sub[pt] = rp
+                if sub:
+                    resolved[key] = sub
+            else:
+                rp = _resolve_cached_path(val)
+                if rp:
+                    resolved[key] = rp
+        state['files'] = resolved
+
+        # Reload manager_dfs if the manager returns file resolved successfully
+        mgr_path = state['files'].get('manager_returns')
+        if mgr_path and os.path.exists(mgr_path):
+            state['manager_dfs'] = load_manager_returns(mgr_path)
+
+        n_mgrs = sum(len(v) for v in (state['clone_results'] or {}).values())
+        missing = [k for k in (cached_files or {}) if k not in resolved]
+        tail = f" (dropped unresolved paths: {missing})" if missing else ""
+        print(f"Cache loaded — {n_mgrs} managers.{tail}")
+        # Roll any non-style residual into Core so buckets sum to 100%
+        absorb_regional_into_core(state.get('clone_results'))
+        absorb_regional_into_core(state.get('universe_clone_results'))
+    except Exception as e:
+        print(f"Cache load error (will recompute): {e}")
+
+# Load cache on startup
+load_cache()
+
+# Recomputing normalized skill during module import can keep Flask from
+# binding its port for a long time when the cached clone panel is large.
+# Use the cached values at startup and refresh them after clone runs, or
+# lazily for a specific tab if a request needs a missing cache entry.
+if state.get('clone_results'):
+    cached_ns = state.get('norm_skill_by_tab') or {}
+    cached_ns_count = sum(len(v or {}) for v in cached_ns.values())
+    if cached_ns_count:
+        print(f"Using cached normalized skill on startup — {cached_ns_count} managers.")
+    else:
+        print("Normalized skill cache empty on startup — it will refresh on demand.")
+
+def cb(msg): state['progress'].append(msg)
+
+# Progress bookkeeping helpers ────────────────────────────────────────────
+import re as _re
+_PROGRESS_LINE_RE = _re.compile(r'^\[(?:universe\s+)?(\d+)\s*/\s*(\d+)\]')
+
+def reset_progress(phase='', total=0):
+    """Clear the progress log and counters at the start of a new run."""
+    state['progress']          = []
+    state['progress_current']  = 0
+    state['progress_total']    = int(total or 0)
+    state['progress_phase']    = phase or ''
+
+def set_progress_phase(phase, total=None, reset_current=False):
+    """Update the phase label (and optionally total / current counter)."""
+    state['progress_phase'] = phase or ''
+    if total is not None:
+        state['progress_total'] = int(total)
+    if reset_current:
+        state['progress_current'] = 0
+
+def cb_counting(msg):
+    """Like cb(), but also bumps progress_current whenever it sees a
+    `[done/total]` or `[universe done/total]` marker produced by the clone
+    engine. We parse `done` directly rather than simply incrementing on
+    every call because the total is authoritative and we don't want
+    ancillary "Loading..." messages to skew the counter.
+    """
+    state['progress'].append(msg)
+    if isinstance(msg, str):
+        m = _PROGRESS_LINE_RE.match(msg)
+        if m:
+            try:
+                done_here = int(m.group(1))
+                # The engine's `done` resets per tab in the consolidated
+                # universe path, so never let progress_current go backwards.
+                # We carry a per-phase offset so multi-tab runs aggregate.
+                base = state.get('_progress_phase_base', 0)
+                state['progress_current'] = max(
+                    state.get('progress_current', 0),
+                    base + done_here,
+                )
+            except Exception:
+                pass
+
+def advance_progress_base():
+    """Snapshot the current counter as the new base so that a subsequent
+    phase (e.g. the next peer tab) starts counting from where we left off
+    instead of resetting to zero when the engine emits `[1/N]` again."""
+    state['_progress_phase_base'] = state.get('progress_current', 0)
+
+
+# ── Routes ─────────────────────────────────────────────────────────────────
+@app.route('/')
+def index():
+    return send_from_directory('static', 'index.html')
+
+@app.route('/upload', methods=['POST'])
+def upload_files():
+    saved = []
+    warnings = {}   # {key: warning_dict} — surfaced to the UI
+    for key in ['manager_returns', 'factor_returns', 'weights']:
+        if key in request.files:
+            f = request.files[key]
+            if f.filename:
+                path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(f.filename))
+                f.save(path)
+                state['files'][key] = path
+                saved.append(key)
+                # Sniff the factor-returns file for missing expected factors.
+                # FACTOR_CATEGORIES enumerates every factor that any peer-tab
+                # clone can pick from. Anything in that union but absent from
+                # the uploaded file is silently dropped at clone time, which
+                # changes which factors LASSO can select and shifts both
+                # betas and R² versus the historical R workflow. Surfacing
+                # this at upload time lets the user fix the FactSet export
+                # before running a multi-minute clone.
+                if key == 'factor_returns':
+                    try:
+                        from clone_engine import FACTOR_CATEGORIES
+                        from data_loader import _resolve_factors_ci
+                        fdf = load_factor_returns(path)
+                        # Build a single union of all expected factors, then
+                        # check which ones the file actually provides using
+                        # the same case-insensitive matcher the clone engine
+                        # uses. Anything not resolvable is genuinely missing.
+                        expected = set()
+                        for cat_list in FACTOR_CATEGORIES.values():
+                            expected.update(cat_list)
+                        resolved = _resolve_factors_ci(sorted(expected), fdf.columns)
+                        # Map back: which expected names didn't resolve?
+                        def _k(s): return ' '.join(str(s).split()).lower()
+                        resolved_keys = {_k(c) for c in resolved}
+                        missing = sorted(f for f in expected if _k(f) not in resolved_keys)
+                        if missing:
+                            # Group by which peer tabs need each missing factor.
+                            # A factor can appear in both _full and _3factor for
+                            # the same tab — de-dup so the UI doesn't show the
+                            # same name twice.
+                            tab_impact = {}
+                            for cat_name, cat_list in FACTOR_CATEGORIES.items():
+                                tab = cat_name.split('_')[0]   # 'ISC_full' → 'ISC'
+                                for f_name in missing:
+                                    if f_name in cat_list:
+                                        tab_impact.setdefault(tab, set()).add(f_name)
+                            tab_impact = {t: sorted(v) for t, v in tab_impact.items()}
+                            warnings[key] = {
+                                'type':         'missing_factors',
+                                'missing':      missing,
+                                'missing_count': len(missing),
+                                'expected_count': len(expected),
+                                'tab_impact':   tab_impact,
+                            }
+                    except Exception as e:
+                        # A parse error here shouldn't block the upload; just
+                        # log it and let the clone run surface the problem.
+                        warnings[key] = {'type': 'sniff_error', 'message': str(e)}
+    return jsonify({'status': 'ok', 'saved': saved, 'warnings': warnings})
+
+
+@app.route('/upload_universe', methods=['POST'])
+def upload_universe():
+    """Stage a peer-universe return file on the server. Each file maps to
+    ONE peer tab via the 'peer_tab' form field (EAFE, ACWI, ISC, EM, US,
+    USSC). Cloning does NOT run automatically — the user must click
+    "Run Universe Clones" to trigger it via /run_universe.
+    """
+    if 'universe_returns' not in request.files:
+        return jsonify({'status': 'error', 'message': 'No file provided'})
+    f = request.files['universe_returns']
+    if not f.filename:
+        return jsonify({'status': 'error', 'message': 'Empty filename'})
+    peer_tab = request.form.get('peer_tab', '').strip().upper()
+    if peer_tab not in ['EAFE', 'ACWI', 'ISC', 'EM', 'US', 'USSC']:
+        return jsonify({'status': 'error',
+                        'message': f"peer_tab must be one of EAFE/ACWI/ISC/EM/US/USSC, got '{peer_tab}'"})
+    if 'factor_returns' not in state['files']:
+        return jsonify({'status': 'error',
+                        'message': 'Upload factor_returns first — universe cloning needs it.'})
+
+    safe_fn = secure_filename(f"universe_{peer_tab}_{f.filename}")
+    path = os.path.join(app.config['UPLOAD_FOLDER'], safe_fn)
+    f.save(path)
+    # Keep track of universe files per peer tab
+    uni_map = state['files'].get('universe_returns', {})
+    if not isinstance(uni_map, dict):
+        uni_map = {}
+    uni_map[peer_tab] = path
+    state['files']['universe_returns'] = uni_map
+    save_cache()
+    return jsonify({'status': 'staged', 'peer_tab': peer_tab,
+                    'message': f'{peer_tab} universe file staged — click Run Universe Clones to compute.'})
+
+
+@app.route('/upload_universe_consolidated', methods=['POST'])
+def upload_universe_consolidated():
+    """Upload ONE consolidated universe returns file with all peer groups on
+    separate sheets (US LC, US SC, ISC, EAFE, Global, EM). The file is
+    staged only — cloning is NOT auto-triggered. The user must click
+    "Run Universe Clones" to execute it via /run_universe.
+    """
+    if 'universe_returns' not in request.files:
+        return jsonify({'status': 'error', 'message': 'No file provided'})
+    f = request.files['universe_returns']
+    if not f.filename:
+        return jsonify({'status': 'error', 'message': 'Empty filename'})
+    if 'factor_returns' not in state['files']:
+        return jsonify({'status': 'error',
+                        'message': 'Upload factor_returns first — universe cloning needs it.'})
+
+    safe_fn = secure_filename(f"universe_consolidated_{f.filename}")
+    path = os.path.join(app.config['UPLOAD_FOLDER'], safe_fn)
+    f.save(path)
+
+    # Store under a reserved __all__ key so we remember the source file
+    uni_map = state['files'].get('universe_returns', {})
+    if not isinstance(uni_map, dict):
+        uni_map = {}
+    uni_map['__all__'] = path
+    state['files']['universe_returns'] = uni_map
+
+    # Peek at the sheets so we can tell the user what we recognised, without
+    # running any cloning yet. Cheap — just inspects sheet names.
+    try:
+        import pandas as pd
+        xl = pd.ExcelFile(path, engine='openpyxl')
+        from data_loader import _UNIVERSE_SHEET_TO_TAB
+        recognised = sorted({_UNIVERSE_SHEET_TO_TAB[s.strip()]
+                             for s in xl.sheet_names
+                             if s.strip() in _UNIVERSE_SHEET_TO_TAB})
+    except Exception:
+        recognised = []
+
+    save_cache()
+    return jsonify({
+        'status':    'staged',
+        'recognised_tabs': recognised,
+        'message':   ('Consolidated universe file staged — click '
+                      'Run Universe Clones to compute.')
+    })
+
+def _clone_results_stale():
+    """True if the current manager_returns or factor_returns file has a
+    different basename to what was used for the last buy-list clone run."""
+    if not state.get('clone_results'):
+        return False   # no clones yet — nothing to be stale
+    run_files = state.get('clone_run_files') or {}
+    if not run_files:
+        return False   # older cache without metadata — can't tell
+    for key in ('manager_returns', 'factor_returns'):
+        current = os.path.basename(state['files'].get(key, ''))
+        used    = run_files.get(key, '')
+        if current and used and current != used:
+            return True
+    return False
+
+
+@app.route('/status')
+def status():
+    """Tell the UI whether cached results are already available."""
+    ucr = state.get('universe_clone_results') or {}
+    uni_tabs_cached = sorted([t for t, m in ucr.items() if m])
+    uni_files = state.get('files', {}).get('universe_returns', {})
+    if not isinstance(uni_files, dict):
+        uni_files = {}
+    uni_files_staged = sorted(uni_files.keys())
+    return jsonify({
+        'has_results':   state['clone_results'] is not None,
+        'has_weights':   state['weights'] is not None,
+        'has_risk':      state['risk_data'] is not None,
+        'has_security_risk': state.get('security_risk_data') is not None,
+        'has_universe':  len(uni_tabs_cached) > 0,
+        'universe_tabs': uni_tabs_cached,
+        'universe_files_staged': uni_files_staged,
+        'has_exposures': state['exposures_data'] is not None,
+        'exposures_benchmark': (state['exposures_data'] or {}).get('benchmark_name', ''),
+        'exposures_managers':  (state['exposures_data'] or {}).get('manager_names', []),
+        'files': {k: os.path.basename(v) if isinstance(v, str) else v
+                  for k, v in state['files'].items()},
+        # Staleness signal: True when the currently-uploaded manager_returns
+        # or factor_returns file differs from what was used for the last clone
+        # run. Prompts the user to re-run buy-list clones.
+        'clone_stale': _clone_results_stale(),
+        'clone_run_files': state.get('clone_run_files') or {},
+    })
+
+@app.route('/run', methods=['POST'])
+def run():
+    if state['running']:
+        return jsonify({'status': 'already_running'})
+    missing = [k for k in ['manager_returns', 'factor_returns'] if k not in state['files']]
+    if missing:
+        return jsonify({'status': 'error', 'message': f'Missing: {missing}'})
+    reset_progress(phase='Loading input files', total=0)
+    # Snapshot the prior run's results before we nuke state so the
+    # determinism diagnostic can diff old-vs-new at the end. Cheap copy:
+    # the diagnostic only inspects each manager's betas + _input_hash, so
+    # we keep a reference rather than deep-copying the whole structure.
+    prev_clone_results = state.get('clone_results') or {}
+    state.update({'running': True, 'error': None, 'clone_results': None})
+
+    def worker():
+        try:
+            # Pre-count managers so the progress bar is meaningful from the
+            # first tick. Cheap: just opens the workbook and counts columns.
+            try:
+                from data_loader import load_manager_returns as _lmr
+                _pre_dfs = _lmr(state['files']['manager_returns'])
+                total_mgrs = sum(df.shape[1] for df in _pre_dfs.values())
+                set_progress_phase('Cloning managers', total=total_mgrs, reset_current=True)
+                state['_progress_phase_base'] = 0
+            except Exception:
+                # Non-fatal: bar will just run indeterminate if this fails.
+                pass
+            results = run_cloning(state['files']['manager_returns'],
+                                  state['files']['factor_returns'],
+                                  progress_callback=cb_counting)
+            state['clone_results'] = results
+            # Run-vs-run determinism diagnostic. Splits material beta
+            # changes into 'inputs SAME' (algorithmic non-determinism, e.g.
+            # threaded BLAS reordering FP ops and flipping a near-zero
+            # LASSO coefficient in/out of the active set) vs 'inputs
+            # CHANGED' (file drift from re-saved manager_returns or
+            # factor_returns). Output goes to both the progress log (so
+            # the user sees it in the UI) and stdout for grep-ability.
+            try:
+                diag_lines = diagnose_clone_determinism(prev_clone_results, results)
+                for line in diag_lines:
+                    state['progress'].append(line)
+                    print(line)
+            except Exception as e:
+                print(f"Determinism diagnostic skipped: {e}")
+            state['manager_dfs']   = load_manager_returns(state['files']['manager_returns'])
+            if 'weights' in state['files']:
+                state['weights'], state['client_benchmarks'] = load_weights(state['files']['weights'])
+            # Cache factor returns for benchmark lookups
+            from data_loader import load_factor_returns as lf
+            state['factor_df'] = lf(state['files']['factor_returns'])
+            set_progress_phase('Computing normalized skill')
+            absorb_regional_into_core(state['clone_results'])
+            recompute_norm_skill()
+            set_progress_phase('Saving cache')
+            save_cache()
+            # Record which files were used so the UI can warn if newer files
+            # have been uploaded without re-running clones.
+            state['clone_run_files'] = {
+                'manager_returns': os.path.basename(state['files'].get('manager_returns', '')),
+                'factor_returns':  os.path.basename(state['files'].get('factor_returns', '')),
+            }
+            set_progress_phase('Done')
+            if state.get('progress_total'):
+                state['progress_current'] = state['progress_total']
+            cb("DONE")
+        except Exception as e:
+            import traceback
+            state['error'] = str(e) + "\n" + traceback.format_exc()
+            cb(f"ERROR: {e}")
+        finally:
+            state['running'] = False
+
+    threading.Thread(target=worker, daemon=True).start()
+    return jsonify({'status': 'started'})
+
+@app.route('/reload_weights', methods=['POST'])
+def reload_weights():
+    """Re-read just the weights file without rerunning clones."""
+    if 'weights' not in state['files']:
+        return jsonify({'status': 'error', 'message': 'No weights file uploaded yet'})
+    try:
+        state['weights'], state['client_benchmarks'] = load_weights(state['files']['weights'])
+        save_cache()
+        return jsonify({'status': 'ok', 'clients': list(state['weights'].keys()),
+                        'client_benchmarks': state['client_benchmarks']})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)})
+
+
+@app.route('/reload_inputs', methods=['POST'])
+def reload_inputs():
+    """Re-read the weights file, the FactSet Risk Summary, and the FactSet
+    Exposures file from their cached paths without rerunning clones. Useful
+    while iterating on any of those input files — edit the xlsx, hit
+    'Reload Inputs' in the UI, and the tool refreshes without the 5-15 min
+    universe clone run.
+
+    Returns a status dict indicating which inputs were refreshed.
+    """
+    status = {'weights': 'skipped', 'risk': 'skipped', 'exposures': 'skipped'}
+    errors = {}
+
+    # Weights
+    if 'weights' in state['files'] and os.path.exists(state['files']['weights']):
+        try:
+            state['weights'], state['client_benchmarks'] = load_weights(state['files']['weights'])
+            status['weights'] = 'ok'
+        except Exception as e:
+            status['weights'] = 'error'
+            errors['weights'] = str(e)
+
+    # Risk summary
+    if 'risk_summary' in state['files'] and os.path.exists(state['files']['risk_summary']):
+        try:
+            state['risk_data'] = parse_risk_summary(state['files']['risk_summary'])
+            status['risk'] = 'ok'
+        except Exception as e:
+            status['risk'] = 'error'
+            errors['risk'] = str(e)
+
+    # Exposures
+    if 'exposures' in state['files'] and os.path.exists(state['files']['exposures']):
+        try:
+            from exposures_engine import parse_exposures_file
+            state['exposures_data'] = parse_exposures_file(state['files']['exposures'])
+            status['exposures'] = 'ok'
+        except Exception as e:
+            status['exposures'] = 'error'
+            errors['exposures'] = str(e)
+
+    save_cache()
+    return jsonify({
+        'status':     'ok',
+        'refreshed':  status,
+        'errors':     errors,
+        'clients':    list((state.get('weights') or {}).keys()),
+    })
+
+@app.route('/clear_cache', methods=['POST'])
+def clear_cache():
+    """Wipe saved results so next run starts fresh."""
+    cf = app.config['CACHE_FILE']
+    if os.path.exists(cf):
+        os.remove(cf)
+    state.update({'clone_results': None, 'manager_dfs': None, 'weights': None, 'files': {}})
+    return jsonify({'status': 'ok'})
+
+@app.route('/progress')
+def progress():
+    # `done` means "the in-flight run finished" — i.e. we're no longer
+    # running AND we have some clone_results on hand. The previous
+    # definition (`clone_results is not None`) made the poller stop
+    # immediately on universe runs, because clone_results is already
+    # populated before a universe run begins.
+    is_done = (not state['running']) and (state['clone_results'] is not None)
+    total   = int(state.get('progress_total', 0) or 0)
+    current = int(state.get('progress_current', 0) or 0)
+    if total and current > total:
+        current = total
+    pct = (100.0 * current / total) if total > 0 else None
+    return jsonify({
+        'messages': state['progress'][-30:],
+        'running':  state['running'],
+        'done':     is_done,
+        'error':    state['error'],
+        'progress_current': current,
+        'progress_total':   total,
+        'progress_phase':   state.get('progress_phase', ''),
+        'progress_pct':     pct,   # None when total unknown; UI falls back to indeterminate animation
+    })
+
+@app.route('/clients')
+def clients():
+    if not state['weights']:
+        return jsonify({'clients': [], 'benchmarks': {}})
+    return jsonify({
+        'clients':    list(state['weights'].keys()),
+        'benchmarks': state.get('client_benchmarks') or {},
+    })
+
+def _ensure_norm_skill_for_tab(tab):
+    """Populate normalized skill for one tab only when the cache is missing.
+
+    This keeps startup fast while preserving skill data for tabs that were
+    absent from older cache files.
+    """
+    if not tab or state.get('running') or not state.get('clone_results'):
+        return
+    ns_by_tab = state.get('norm_skill_by_tab') or {}
+    if ns_by_tab.get(tab):
+        return
+    try:
+        print(f"Lazy normalized skill recompute for {tab}...")
+        recompute_norm_skill(tabs=[tab])
+        save_cache()
+    except Exception as e:
+        print(f"Lazy norm-skill compute skipped for {tab}: {e}")
+
+def _norm_skill_for(tab, name):
+    """Return normalized-skill fields for a manager.
+
+    Uses an exact-key lookup first, then a whitespace-stripped / lower-cased
+    fallback so minor name variants (e.g. trailing space from Excel) never
+    cause a silent miss.
+    """
+    _ensure_norm_skill_for_tab(tab)
+    ns_tab = (state.get('norm_skill_by_tab') or {}).get(tab, {})
+    # 1 — exact match
+    rec = ns_tab.get(name)
+    # 2 — whitespace-normalised fallback
+    if rec is None:
+        key_norm = str(name or '').strip().lower()
+        for k, v in ns_tab.items():
+            if str(k or '').strip().lower() == key_norm:
+                rec = v
+                break
+    if not rec:
+        return {'ns_z': None, 'ns_skill': None, 'ns_n_obs': None,
+                'ns_n_peers': None, 'ns_adj_method': None,
+                'ns_last_month': None}
+    return {
+        'ns_z':          rec.get('z'),
+        'ns_skill':      rec.get('skill'),
+        'ns_n_obs':      rec.get('n_obs'),
+        'ns_n_peers':    rec.get('n_peers'),
+        'ns_adj_method': rec.get('adj_method'),
+        'ns_last_month': rec.get('last_month'),
+    }
+
+
+def _resolve_manager_record(tab, mgr_name):
+    """Return (resolved_name, clone_result_dict) for a manager lookup."""
+    cr_tab = (state.get('clone_results') or {}).get(tab, {})
+    if not isinstance(cr_tab, dict):
+        return None, None
+    d = cr_tab.get(mgr_name)
+    exact_key = mgr_name
+    if d is None:
+        key_norm = str(mgr_name or '').strip().lower()
+        for k, v in cr_tab.items():
+            if str(k or '').strip().lower() == key_norm:
+                d = v
+                exact_key = k
+                break
+    return exact_key, d
+
+
+def _safe_metric(value):
+    """Return a finite float or None for downstream scoring."""
+    try:
+        f = float(value)
+        if np.isnan(f) or np.isinf(f):
+            return None
+        return f
+    except (TypeError, ValueError):
+        return None
+
+
+def _filled_manager_returns(manager_result, max_months=36):
+    """Return recent manager returns, back-filling holes with the static clone."""
+    mgr = manager_result.get('manager_returns') or []
+    clone = manager_result.get('static_clone_full') or []
+    out = []
+    for idx in range(max(len(mgr), len(clone))):
+        mv = _safe_metric(mgr[idx]) if idx < len(mgr) else None
+        if mv is None and idx < len(clone):
+            mv = _safe_metric(clone[idx])
+        if mv is None:
+            continue
+        out.append(mv)
+        if len(out) >= max_months:
+            break
+    return out
+
+
+def _annualized_volatility(returns):
+    if len(returns) < 12:
+        return None
+    arr = np.array(returns, dtype=float)
+    return float(np.std(arr, ddof=0) * np.sqrt(12.0))
+
+
+def _annualized_downside_dev(returns):
+    if len(returns) < 12:
+        return None
+    arr = np.minimum(np.array(returns, dtype=float), 0.0)
+    return float(np.sqrt(np.mean(arr ** 2)) * np.sqrt(12.0))
+
+
+def _manager_recommender_features(tab, name, manager_result):
+    """Build one comparable feature bundle for manager-to-manager ranking."""
+    style_buckets = {
+        bucket: float((manager_result.get('style_buckets') or {}).get(bucket, 0) or 0)
+        for bucket in _STYLE_BUCKET_KEYS
+    }
+    recent = _filled_manager_returns(manager_result, max_months=36)
+    record = {
+        'name': name,
+        'tab': tab,
+        'style_buckets': style_buckets,
+        'vg_full': _safe_metric(manager_result.get('vg_full')) or 0.0,
+        'pct_small': _safe_metric(manager_result.get('pct_small')) or 0.0,
+        'pct_em': _safe_metric(manager_result.get('pct_em')) or 0.0,
+        'r2_full': _safe_metric(manager_result.get('r2_full')),
+        'vol_36m': _annualized_volatility(recent),
+        'downside_dev_36m': _annualized_downside_dev(recent),
+    }
+    record.update(_norm_skill_for(tab, name))
+    return record
+
+
+def _bounded_similarity(gap, scale, default=0.5):
+    if gap is None:
+        return default
+    if scale <= 0:
+        return default
+    return max(0.0, 1.0 - min(abs(gap) / scale, 1.0))
+
+
+def _relative_similarity(left, right, floor=0.02, default=0.5):
+    if left is None or right is None:
+        return default
+    denom = max(abs(left), abs(right), floor)
+    return max(0.0, 1.0 - min(abs(left - right) / denom, 1.0))
+
+
+def _manager_recommendation_payload(reference, candidate):
+    """Rank a candidate versus the reference manager using current clone metrics."""
+    style_gap = sum(
+        abs(reference['style_buckets'].get(bucket, 0.0) - candidate['style_buckets'].get(bucket, 0.0))
+        for bucket in _STYLE_BUCKET_KEYS
+    ) / 2.0
+    style_similarity = max(0.0, 1.0 - min(style_gap, 1.0))
+    vg_gap = candidate['vg_full'] - reference['vg_full']
+    small_gap = candidate['pct_small'] - reference['pct_small']
+    em_gap = candidate['pct_em'] - reference['pct_em']
+    vol_gap = None if reference['vol_36m'] is None or candidate['vol_36m'] is None else candidate['vol_36m'] - reference['vol_36m']
+    downside_gap = None if reference['downside_dev_36m'] is None or candidate['downside_dev_36m'] is None else candidate['downside_dev_36m'] - reference['downside_dev_36m']
+    ns_delta = None if reference['ns_z'] is None or candidate['ns_z'] is None else candidate['ns_z'] - reference['ns_z']
+    r2_delta = None if reference['r2_full'] is None or candidate['r2_full'] is None else candidate['r2_full'] - reference['r2_full']
+
+    vg_similarity = _bounded_similarity(vg_gap, 0.75)
+    small_similarity = _bounded_similarity(small_gap, 0.35)
+    em_similarity = _bounded_similarity(em_gap, 0.35)
+    risk_similarity = (
+        _relative_similarity(reference['vol_36m'], candidate['vol_36m']) +
+        _relative_similarity(reference['downside_dev_36m'], candidate['downside_dev_36m'])
+    ) / 2.0
+    footprint_similarity = (
+        0.6 * style_similarity +
+        0.2 * vg_similarity +
+        0.1 * small_similarity +
+        0.1 * em_similarity
+    )
+    skill_component = 0.5 if ns_delta is None else max(0.0, min(1.0, 0.5 + (ns_delta / 2.0)))
+    overall_score = 100.0 * (
+        0.6 * footprint_similarity +
+        0.25 * risk_similarity +
+        0.15 * skill_component
+    )
+
+    reasons = []
+    if footprint_similarity >= 0.88:
+        reasons.append('Very similar style footprint')
+    elif footprint_similarity >= 0.76:
+        reasons.append('Close style footprint')
+    if ns_delta is not None and ns_delta >= 0.2:
+        reasons.append('Higher normalized skill')
+    if vol_gap is not None and vol_gap <= -0.01:
+        reasons.append('Lower trailing volatility')
+    if downside_gap is not None and downside_gap <= -0.01:
+        reasons.append('Lower downside deviation')
+    if not reasons:
+        reasons.append('Closest overall match in this peer tab')
+
+    return {
+        'name': candidate['name'],
+        'tab': candidate['tab'],
+        'score': round(overall_score, 1),
+        'footprint_similarity': round(footprint_similarity * 100, 1),
+        'risk_similarity': round(risk_similarity * 100, 1),
+        'vg_full': candidate['vg_full'],
+        'vg_gap': round(vg_gap, 4),
+        'pct_small': candidate['pct_small'],
+        'pct_small_gap': round(small_gap, 4),
+        'pct_em': candidate['pct_em'],
+        'pct_em_gap': round(em_gap, 4),
+        'r2_full': candidate['r2_full'],
+        'r2_delta': None if r2_delta is None else round(r2_delta, 4),
+        'ns_z': candidate['ns_z'],
+        'ns_z_delta': None if ns_delta is None else round(ns_delta, 4),
+        'vol_36m': candidate['vol_36m'],
+        'vol_delta': None if vol_gap is None else round(vol_gap, 4),
+        'downside_dev_36m': candidate['downside_dev_36m'],
+        'downside_delta': None if downside_gap is None else round(downside_gap, 4),
+        'reasons': reasons,
+    }
+
+
+@app.route('/manager_recommendations/<tab>/<path:mgr_name>')
+def manager_recommendations(tab, mgr_name):
+    """Return same-tab manager alternatives ranked by footprint, risk, and skill."""
+    if not state.get('clone_results'):
+        return jsonify({'error': 'No results'})
+
+    exact_key, base_record = _resolve_manager_record(tab, mgr_name)
+    if not base_record:
+        return jsonify({'error': f'{tab}/{mgr_name} not found'})
+
+    reference = _manager_recommender_features(tab, exact_key, base_record)
+    peer_tab = (state.get('clone_results') or {}).get(tab, {}) or {}
+    candidates = []
+    for cand_name, cand_record in peer_tab.items():
+        if cand_name == exact_key:
+            continue
+        features = _manager_recommender_features(tab, cand_name, cand_record)
+        candidates.append(_manager_recommendation_payload(reference, features))
+
+    closest_matches = sorted(
+        candidates,
+        key=lambda row: (-row['score'], -(row['footprint_similarity']), row['name'].lower()),
+    )[:5]
+    skill_upgrades = sorted(
+        [
+            row for row in candidates
+            if row['ns_z_delta'] is not None and row['ns_z_delta'] >= 0.15 and row['footprint_similarity'] >= 72.0
+        ],
+        key=lambda row: (
+            -(0.65 * row['footprint_similarity'] + 35.0 * (row['ns_z_delta'] or 0.0)),
+            row['name'].lower(),
+        ),
+    )[:3]
+    lower_risk_matches = sorted(
+        [
+            row for row in candidates
+            if row['footprint_similarity'] >= 72.0 and (
+                (row['vol_delta'] is not None and row['vol_delta'] <= -0.01) or
+                (row['downside_delta'] is not None and row['downside_delta'] <= -0.01)
+            )
+        ],
+        key=lambda row: (
+            -(0.55 * row['footprint_similarity'] + 0.45 * row['risk_similarity']),
+            row['name'].lower(),
+        ),
+    )[:3]
+
+    return jsonify({
+        'reference': reference,
+        'closest_matches': closest_matches,
+        'skill_upgrades': skill_upgrades,
+        'lower_risk_matches': lower_risk_matches,
+        'scope': 'same_tab_only',
+    })
+
+
+@app.route('/portfolio/<client_name>')
+def portfolio(client_name):
+    if not state['clone_results']:
+        return jsonify({'error': 'No results'})
+    if not state['weights'] or client_name not in state['weights']:
+        return jsonify({'error': 'Client not found'})
+    data = build_portfolio_view(client_name, state['weights'][client_name],
+                                state['clone_results'], state['manager_dfs'],
+                                universe_clone_results=state.get('universe_clone_results'))
+    # Enrich each manager with normalized-skill fields
+    for m in data.get('managers', []):
+        m.update(_norm_skill_for(m['tab'], m['matched_name']))
+    # Surface the client's benchmark (as given in the weights file) so the
+    # UI can label the risk/exposures tables with the right benchmark name.
+    data['client_benchmark'] = (state.get('client_benchmarks') or {}).get(client_name)
+    return jsonify(data)
+
+@app.route('/all_managers')
+def all_managers():
+    if not state['clone_results']:
+        return jsonify({'managers': []})
+    out = []
+    for tab, td in state['clone_results'].items():
+        for name, d in td.items():
+            row = {'name': name, 'tab': tab, 'peer_group': tab,
+                   'vg_full': d.get('vg_full', 0), 'vg_3factor': d.get('vg_3factor', 0),
+                   'r2_full': d.get('r2_full')}
+            row.update(_norm_skill_for(tab, name))
+            out.append(row)
+    return jsonify({'managers': out})
+
+@app.route('/manager_detail/<tab>/<path:mgr_name>')
+def manager_detail(tab, mgr_name):
+    if not state['clone_results']:
+        return jsonify({'error': 'No results'})
+    exact_key, d = _resolve_manager_record(tab, mgr_name)
+    if not d:
+        return jsonify({'error': f'{tab}/{mgr_name} not found'})
+    out = dict(d)
+    out.update(_norm_skill_for(tab, exact_key))
+    return jsonify(out)
+
+@app.route('/peer_group_view/<tab>')
+def peer_group_view(tab):
+    if not state['clone_results']:
+        return jsonify({'error': 'No results'})
+    td = state['clone_results'].get(tab, {})
+    out = []
+    for name, d in td.items():
+        row = {
+            'name': name, 'r2_full': d.get('r2_full'), 'r2_3factor': d.get('r2_3factor'),
+            'vg_full': d.get('vg_full', 0), 'vg_3factor': d.get('vg_3factor', 0),
+            'style_buckets': d.get('style_buckets', {}),
+            'pct_small': d.get('pct_small', 0), 'pct_em': d.get('pct_em', 0),
+            'betas_full': d.get('betas_full', {}), 'betas_3factor': d.get('betas_3factor', {}),
+            'dates': d.get('dates', [])[:24],
+            'manager_returns': d.get('manager_returns', [])[:24],
+            'static_clone_full': d.get('static_clone_full', [])[:24],
+        }
+        row.update(_norm_skill_for(tab, name))
+        out.append(row)
+    return jsonify({'tab': tab, 'managers': out})
+
+@app.route('/compute_portfolio_stats', methods=['POST'])
+def compute_portfolio_stats():
+    managers = request.json.get('managers', [])
+    def agg(wkey):
+        keys = ['vg_full','vg_3factor','Core','Growth','Value','Yield',
+                'Quality','Dynamic','Defensive','Low Vol','pct_small','pct_em']
+        stats = {k: 0.0 for k in keys}
+        total = sum(m.get(wkey, 0) for m in managers)
+        if not total: return stats
+        for m in managers:
+            w = m.get(wkey, 0) / total
+            stats['vg_full']    += w * m.get('vg_full', 0)
+            stats['vg_3factor'] += w * m.get('vg_3factor', 0)
+            stats['pct_small']  += w * m.get('pct_small', 0)
+            stats['pct_em']     += w * m.get('pct_em', 0)
+            sb = m.get('style_buckets', {})
+            for b in ['Core','Growth','Value','Yield','Quality','Dynamic','Defensive','Low Vol']:
+                stats[b] += w * sb.get(b, 0)
+        return stats
+    cur  = agg('current_weight')
+    prop = agg('proposed_weight')
+
+    # Portfolio Edge = weighted-average Normalized Skill Z, computed over
+    # managers with a valid z score. Missing-z managers are excluded from the
+    # weighted average (their weight is dropped), and we report the covered
+    # weight so the UI can flag coverage gaps.
+    def wavg_z(wkey):
+        wz_sum  = 0.0
+        w_cov   = 0.0
+        w_total = 0.0
+        for m in managers:
+            w = float(m.get(wkey, 0) or 0)
+            w_total += w
+            z = m.get('ns_z')
+            if z is None: continue
+            w_cov  += w
+            wz_sum += z * w
+        z = (wz_sum / w_cov) if w_cov > 1e-9 else None
+        return {'z': z, 'covered_weight': w_cov, 'total_weight': w_total}
+
+    return jsonify({
+        'current': cur, 'proposed': prop,
+        'delta':   {k: prop[k]-cur[k] for k in cur},
+        'edge_current':  wavg_z('current_weight'),
+        'edge_proposed': wavg_z('proposed_weight'),
+    })
+
+# ── New endpoints for Manager Detail tab ──────────────────────────────────
+@app.route('/manager_skill_summary/<tab>/<path:mgr_name>')
+def manager_skill_summary(tab, mgr_name):
+    """Return skill periods + cumulative skill + period returns for detail tab."""
+    import math, pandas as pd
+    from data_loader import (compute_skill_periods, compute_cumulative_skill,
+                             compute_manager_period_returns, get_benchmark,
+                             load_factor_returns)
+    if not state['clone_results']:
+        return jsonify({'error': 'No results'})
+    d = state['clone_results'].get(tab, {}).get(mgr_name)
+    if not d:
+        return jsonify({'error': f'{tab}/{mgr_name} not found'})
+
+    mgr_rets_all   = d.get('manager_returns', [])
+    clone_rets_all = d.get('static_clone_full', [])
+    dates_all      = d.get('dates', [])
+
+    # Trim to manager inception: find last index where manager has valid data
+    # (most recent first, so find the last non-None value)
+    last_valid = len(mgr_rets_all) - 1
+    while last_valid >= 0 and (mgr_rets_all[last_valid] is None or
+          (isinstance(mgr_rets_all[last_valid], float) and math.isnan(mgr_rets_all[last_valid]))):
+        last_valid -= 1
+    # Also trim where clone starts (first 24 months have backfilled clone)
+    first_clone = 0
+    while first_clone < len(clone_rets_all) and (clone_rets_all[first_clone] is None or
+          (isinstance(clone_rets_all[first_clone], float) and math.isnan(clone_rets_all[first_clone]))):
+        first_clone += 1
+
+    # Use the range where both manager and clone are valid
+    inception_idx = min(last_valid, len(mgr_rets_all) - 1)
+    mgr_rets   = mgr_rets_all[:inception_idx + 1]
+    clone_rets = clone_rets_all[:inception_idx + 1]
+    dates      = dates_all[:inception_idx + 1]
+
+    # Ensure factor_df is loaded
+    if state.get('factor_df') is None and 'factor_returns' in state['files']:
+        state['factor_df'] = load_factor_returns(state['files']['factor_returns'])
+
+    # Get benchmark returns
+    bench_name = get_benchmark(tab, mgr_name)
+    bench_rets = []
+    if state.get('factor_df') is not None and bench_name in state['factor_df'].columns:
+        fdf = state['factor_df']
+        for ds in dates_all:
+            try:
+                dt = pd.Timestamp(ds)
+                if dt in fdf.index:
+                    v = fdf.loc[dt, bench_name]
+                    bench_rets.append(None if (v is None or math.isnan(float(v))) else float(v))
+                else:
+                    bench_rets.append(None)
+            except:
+                bench_rets.append(None)
+        bench_rets = bench_rets[:inception_idx + 1]
+    else:
+        bench_rets = [None] * len(dates)
+
+    skill_periods  = compute_skill_periods(mgr_rets, clone_rets)
+    cumulative     = compute_cumulative_skill(mgr_rets, clone_rets)
+    period_returns = compute_manager_period_returns(mgr_rets, clone_rets, bench_rets)
+
+    return jsonify({
+        'name': mgr_name, 'tab': tab,
+        'benchmark_name': bench_name,
+        'skill_periods': skill_periods,
+        'cumulative_skill': cumulative,
+        'dates': dates,
+        'period_returns': period_returns,
+        'betas_full': d.get('betas_full', {}),
+        'style_buckets': d.get('style_buckets', {}),
+        'r2_full': d.get('r2_full'),
+    })
+
+
+@app.route('/peer_skill_summary/<tab>')
+def peer_skill_summary(tab):
+    """Return skill periods for all managers in a tab — for the sortable table."""
+    from data_loader import compute_skill_periods
+    if not state['clone_results']:
+        return jsonify({'error': 'No results'})
+    td = state['clone_results'].get(tab, {})
+    out = []
+    for name, d in td.items():
+        sp = compute_skill_periods(d.get('manager_returns', []),
+                                   d.get('static_clone_full', []))
+        row = {
+            'name': name,
+            'r2_full': d.get('r2_full'),
+            'vg_full': d.get('vg_full', 0),
+            'style_buckets': d.get('style_buckets', {}),
+            'pct_small': d.get('pct_small', 0),
+            'pct_em': d.get('pct_em', 0),
+            'betas_full': d.get('betas_full', {}),
+            'betas_3factor': d.get('betas_3factor', {}),
+            't1_skill':  sp.get('t1'),
+            't3_skill':  sp.get('t3'),
+            't5_skill':  sp.get('t5'),
+            'si_skill':  sp.get('si'),
+        }
+        row.update(_norm_skill_for(tab, name))
+        out.append(row)
+    return jsonify({'tab': tab, 'managers': out})
+
+
+# ── Portfolio contribution stats endpoint ─────────────────────────────────
+@app.route('/portfolio_contribution/<client_name>')
+def portfolio_contribution(client_name):
+    """
+    Per-manager stats for Portfolio Contribution tables.
+    Returns manager_return, benchmark_excess, passive_style, skill
+    for QTD, T1, T3 for each manager in the client portfolio.
+    """
+    import math, pandas as pd
+    from data_loader import (load_factor_returns, get_benchmark,
+                             build_portfolio_view, fuzzy_match)
+    from clone_engine import FACTOR_CATEGORIES, clone_fun
+
+    if not state['clone_results']:
+        return jsonify({'error': 'No results'})
+    if not state['weights'] or client_name not in state['weights']:
+        return jsonify({'error': 'Client not found'})
+
+    # Ensure factor_df loaded
+    if state.get('factor_df') is None and 'factor_returns' in state['files']:
+        state['factor_df'] = load_factor_returns(state['files']['factor_returns'])
+
+    fdf = state.get('factor_df')
+    portfolio = build_portfolio_view(client_name, state['weights'][client_name],
+                                     state['clone_results'], state['manager_dfs'],
+                                     universe_clone_results=state.get('universe_clone_results'))
+
+    def period_stats(mgr, clone, bench, n):
+        pairs = [(mgr[i], clone[i], bench[i])
+                 for i in range(min(n, len(mgr), len(clone), len(bench)))
+                 if mgr[i] is not None and clone[i] is not None and bench[i] is not None
+                 and not math.isnan(float(mgr[i])) and not math.isnan(float(clone[i]))
+                 and not math.isnan(float(bench[i]))]
+        if len(pairs) < max(1, n // 2):
+            return None, None, None, None
+        m_tot = float(np.prod([1 + p[0] for p in pairs]) - 1)
+        c_tot = float(np.prod([1 + p[1] for p in pairs]) - 1)
+        b_tot = float(np.prod([1 + p[2] for p in pairs]) - 1)
+        nm = len(pairs)
+        if nm >= 12:
+            ann = lambda r: (1 + r) ** (12 / nm) - 1
+            m_tot, c_tot, b_tot = ann(m_tot), ann(c_tot), ann(b_tot)
+        return m_tot, m_tot - b_tot, c_tot - b_tot, m_tot - c_tot
+
+    managers_out = []
+    for m in portfolio['managers']:
+        tab      = m['tab']
+        mgr_name = m['matched_name']
+        weight   = m['current_weight']
+        d        = state['clone_results'].get(tab, {}).get(mgr_name, {})
+
+        mgr_rets   = d.get('manager_returns', [])
+        clone_rets = d.get('static_clone_full', [])
+        dates      = d.get('dates', [])
+
+        # Build benchmark return series aligned to dates
+        bench_name = get_benchmark(tab, mgr_name)
+        bench_rets = []
+        if fdf is not None and bench_name in fdf.columns:
+            for ds in dates:
+                try:
+                    dt = pd.Timestamp(ds)
+                    v  = fdf.loc[dt, bench_name] if dt in fdf.index else None
+                    bench_rets.append(None if (v is None or math.isnan(float(v))) else float(v))
+                except:
+                    bench_rets.append(None)
+        else:
+            bench_rets = [None] * len(dates)
+
+        row = {
+            'name':           mgr_name,
+            'weight':         weight,
+            'benchmark_name': bench_name,
+            'vg_full':        m.get('vg_full', 0),
+        }
+        for label, n in [('qtd', 3), ('t1', 12), ('t3', 36)]:
+            mr, be, ps, sk = period_stats(mgr_rets, clone_rets, bench_rets, n)
+            row[f'{label}_mgr']   = round(mr * 100, 4) if mr is not None else None
+            row[f'{label}_bench'] = round(be * 100, 4) if be is not None else None
+            row[f'{label}_style'] = round(ps * 100, 4) if ps is not None else None
+            row[f'{label}_skill'] = round(sk * 100, 4) if sk is not None else None
+
+        managers_out.append(row)
+
+    return jsonify({'managers': managers_out, 'unmatched': portfolio.get('unmatched', [])})
+
+
+# ── FactSet Risk Summary ──────────────────────────────────────────────────
+STYLE_FACTORS = [
+    'Beta', 'Book to Price', 'Dividend Yield', 'Earnings Yield',
+    'Growth', 'Leverage', 'Liquidity', 'Momentum',
+    'Profitability', 'Size', 'Volatility'
+]
+
+# Section markers that appear in column A of the Risk Summary export. These
+# delineate the top-level groups of factor rows.
+_RISK_SECTIONS = ('Style', 'Industry', 'Country', 'Currency')
+
+# Benchmark-name heuristics (same families used by the exposures parser).
+_RISK_BENCH_PREFIXES = ('MSCI ', 'FTSE ', 'RUSSELL ', 'S&P ', 'BLOOMBERG ',
+                         'STOXX ', 'NIKKEI ', 'TOPIX ')
+_RISK_BENCH_KEYWORDS = ('BENCHMARK', 'INDEX')
+
+
+def _is_risk_bench_name(nm):
+    """Match the convention FactSet uses in portfolio lists: any column
+    whose header starts with a known index-family prefix, or contains
+    'Benchmark'/'Index', is treated as a benchmark row. Everything else
+    is a manager portfolio."""
+    if not nm:
+        return False
+    up = str(nm).upper()
+    return up.startswith(_RISK_BENCH_PREFIXES) or any(k in up for k in _RISK_BENCH_KEYWORDS)
+
+
+def parse_risk_summary(filepath):
+    """Parse a FactSet Risk Summary export into a structured dict.
+
+    The export is expected to list managers AND candidate benchmarks as
+    columns on the same sheet (in the 'Active vs USD' configuration, which
+    is equivalent to absolute exposure for our purposes — see risk doc).
+    Row structure:
+      Row ~7:  column header names (managers + benchmarks mixed)
+      Row 10:  'Active Risk Factor Decomp'
+      Row 11:  'Active Exposure'
+      Rows 12+: Market / Global Market / Style (aggregate) / 11 style factors
+               / Industry (aggregate) + individual industries
+               / Country (aggregate) + individual countries
+               / Currency (aggregate) + individual currencies
+
+    Returns:
+      {
+        'manager_names':   [str, ...],              # in file order
+        'benchmark_names': [str, ...],              # ditto
+        'style_factors':   {factor: {col_name: float or None}},
+        'industries':      {industry: {col_name: float or None}},
+        'countries':       {country:  {col_name: float or None}},
+        'currencies':      {currency: {col_name: float or None}},
+      }
+    Downstream code combines managers' absolute exposures by weight and
+    subtracts the client benchmark's absolute exposures to produce true
+    portfolio-vs-benchmark active exposures (the 'bottom-up' computation).
+    """
+    from openpyxl import load_workbook
+    wb = load_workbook(filepath, read_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    wb.close()
+
+    # Find the header row: first row where col B is a non-empty string
+    # other than 'Data'. The FactSet export repeats the header — use the
+    # first occurrence.
+    col_names = []
+    for row in rows:
+        if len(row) < 2 or not row[1]:
+            continue
+        if str(row[1]).strip().lower() == 'data':
+            continue
+        non_none = [x for x in row[1:] if x is not None and str(x).strip() != '']
+        if non_none and isinstance(non_none[0], str):
+            col_names = [str(x).strip() if x is not None else None
+                         for x in row[1:]]
+            # Trim trailing Nones (columns past the last named one)
+            while col_names and not col_names[-1]:
+                col_names.pop()
+            break
+
+    if not col_names:
+        return {'manager_names': [], 'benchmark_names': [],
+                'style_factors': {}, 'industries': {}, 'countries': {},
+                'currencies': {}}
+
+    # Classify each column
+    manager_names   = [c for c in col_names if c and not _is_risk_bench_name(c)]
+    benchmark_names = [c for c in col_names if c and _is_risk_bench_name(c)]
+
+    def _coerce(v):
+        if v is None or v == '':
+            return None
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return None
+
+    def _row_to_map(row):
+        """Given a data row, return {col_name: float or None} keyed by the
+        column headers (skipping unlabelled columns)."""
+        out = {}
+        # row[0] is the label, row[1:] align with col_names
+        vals = list(row[1:1 + len(col_names)])
+        for name, v in zip(col_names, vals):
+            if not name:
+                continue
+            out[name] = _coerce(v)
+        return out
+
+    # Walk the file, tracking which section we're in. The aggregate rows
+    # labelled exactly 'Style'/'Industry'/'Country'/'Currency' flip the
+    # section; every subsequent non-empty label until the next marker is a
+    # member row of that section.
+    style_factors = {}
+    industries    = {}
+    countries     = {}
+    currencies    = {}
+
+    section = None
+    buckets = {
+        'Style':    style_factors,
+        'Industry': industries,
+        'Country':  countries,
+        'Currency': currencies,
+    }
+
+    for row in rows:
+        if not row or row[0] is None:
+            continue
+        label = str(row[0]).strip()
+        if label in _RISK_SECTIONS:
+            # Start of a new section; skip the aggregate row itself.
+            section = label
+            continue
+        if section is None:
+            continue
+        # Ignore section-level aggregate labels that repeat header text.
+        if label in ('Market', 'Global Market', 'Active Exposure',
+                     'Active Risk Factor Decomp'):
+            continue
+        # If the row has no numeric data under any column, treat it as
+        # stray padding and skip.
+        data_map = _row_to_map(row)
+        if not any(v is not None for v in data_map.values()):
+            continue
+        buckets[section][label] = data_map
+
+    return {
+        'manager_names':   manager_names,
+        'benchmark_names': benchmark_names,
+        'style_factors':   style_factors,
+        'industries':      industries,
+        'countries':       countries,
+        'currencies':      currencies,
+    }
+
+
+@app.route('/upload_risk', methods=['POST'])
+def upload_risk():
+    if 'risk_summary' not in request.files:
+        return jsonify({'status': 'error', 'message': 'No file'})
+    f = request.files['risk_summary']
+    if not f.filename:
+        return jsonify({'status': 'error', 'message': 'No filename'})
+    path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(f.filename))
+    f.save(path)
+    try:
+        parsed = parse_risk_summary(path)
+        state['risk_data'] = parsed
+        state['files']['risk_summary'] = path
+        save_cache()
+        return jsonify({
+            'status':    'ok',
+            'managers':  parsed['manager_names'],
+            'benchmarks': parsed['benchmark_names'],
+            'factors':   list(parsed['style_factors'].keys()),
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)})
+
+@app.route('/upload_security_risk', methods=['POST'])
+def upload_security_risk():
+    """Upload a FactSet Security-Level Risk DNA workbook. Parses manager
+    holdings (stock weights + raw factor exposures + country) and benchmark
+    absolute factor exposures from the Risk Summary tab. Stores in
+    state['security_risk_data'] for use by /compute_security_risk_exposures."""
+    if 'security_risk' not in request.files:
+        return jsonify({'status': 'error', 'message': 'No file provided'})
+    f = request.files['security_risk']
+    if not f.filename:
+        return jsonify({'status': 'error', 'message': 'Empty filename'})
+    path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(f.filename))
+    f.save(path)
+    try:
+        from security_risk_engine import parse_security_risk_file
+        parsed = parse_security_risk_file(path)
+        if not parsed['managers']:
+            return jsonify({'status': 'error',
+                            'message': 'No manager sections found. Check the '
+                                       'file has a Security-Level Risk DNA sheet.'})
+        state['security_risk_data'] = parsed
+        state['files']['security_risk'] = path
+        save_cache()
+        return jsonify({
+            'status':      'ok',
+            'managers':    list(parsed['managers'].keys()),
+            'benchmarks':  parsed['available_benchmarks'],
+            'factors':     parsed['factors'],
+            'as_of_date':  parsed.get('as_of_date'),
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({'status': 'error', 'message': str(e),
+                        'detail': traceback.format_exc()})
+
+
+@app.route('/sleeve_options', methods=['POST'])
+def sleeve_options():
+    """Return the available sleeve breakdown options for a client given their
+    benchmark and the benchmarks present in the uploaded security risk file."""
+    data = request.get_json(silent=True) or {}
+    client_name = data.get('client_name')
+    bench_str   = (state.get('client_benchmarks') or {}).get(client_name or '')
+    available   = (state.get('security_risk_data') or {}).get('available_benchmarks', [])
+    from security_risk_engine import get_sleeve_options
+    options = get_sleeve_options(bench_str or '', available)
+    return jsonify({'options': options, 'benchmark': bench_str})
+
+
+@app.route('/compute_security_risk_exposures', methods=['POST'])
+def compute_security_risk_exposures():
+    """Stock-level (bottom-up) active factor exposure computation.
+
+    Accepts JSON:
+      { managers: [...], client_name: str, sleeve: str|null, bench: str|null }
+
+    sleeve is one of: null (full portfolio), 'US', 'Non-US', 'EM'
+    bench is the exact benchmark column name from the Risk Summary tab.
+
+    Returns the same response shape as /compute_risk_exposures so the
+    frontend's renderRiskExposures() works unchanged, with an extra
+    'sleeve_info' key carrying coverage % and country flags.
+    """
+    if not state.get('security_risk_data'):
+        return jsonify({'error': 'No security risk data loaded. Upload a '
+                                 'Security-Level Risk DNA file on the Setup tab.'})
+    payload     = request.get_json(silent=True) or {}
+    managers    = payload.get('managers', [])
+    client_name = payload.get('client_name')
+    sleeve      = payload.get('sleeve')   # None | 'US' | 'Non-US' | 'EM'
+    bench_name  = payload.get('bench')    # exact column name from file
+    if not managers:
+        return jsonify({'error': 'No managers provided.'})
+    # Fall back to client benchmark from weights file if bench not supplied
+    if not bench_name and client_name:
+        from security_risk_engine import get_sleeve_options
+        bench_str = (state.get('client_benchmarks') or {}).get(client_name or '')
+        avail     = state['security_risk_data'].get('available_benchmarks', [])
+        opts      = get_sleeve_options(bench_str or '', avail)
+        bench_name = opts[0]['bench'] if opts else None
+    from security_risk_engine import compute_exposures
+    try:
+        result = compute_exposures(
+            portfolio_managers=managers,
+            security_data=state['security_risk_data'],
+            benchmark_name=bench_name,
+            sleeve=sleeve,
+        )
+        return jsonify(result)
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'detail': traceback.format_exc()})
+
+
+@app.route('/compute_risk_exposures', methods=['POST'])
+def compute_risk_exposures():
+    """
+    Compute portfolio-vs-client-benchmark active style exposures from the
+    bottom up, using the new FactSet Risk Summary format where both managers
+    AND candidate benchmarks sit side-by-side as absolute exposures
+    (active vs USD, which is mathematically equivalent to absolute for
+    our purposes).
+
+    For each style factor:
+      portfolio_current_abs  = Σ(w_current_i  × manager_i_abs)
+      portfolio_proposed_abs = Σ(w_proposed_i × manager_i_abs)
+      benchmark_abs          = risk_file[factor][client_benchmark]
+      current_active  = portfolio_current_abs  − benchmark_abs
+      proposed_active = portfolio_proposed_abs − benchmark_abs
+      delta           = proposed_active − current_active    (same as
+                        proposed_abs − current_abs — benchmark cancels)
+
+    The client benchmark is resolved from state['client_benchmarks'] (the
+    weights file). If that benchmark doesn't match a column in the risk
+    file, we fall back to computing without a benchmark (i.e. raw portfolio
+    absolute) and flag the condition so the UI can show a warning.
+
+    Weights are renormalised across the managers that DID match the risk
+    file, so a portfolio with one un-matched manager still produces a
+    meaningful active number for the rest — matching the old endpoint's
+    behaviour.
+    """
+    if not state['risk_data']:
+        return jsonify({'error': 'No risk data loaded'})
+
+    data        = request.json or {}
+    managers    = data.get('managers', [])
+    client_name = data.get('client_name')
+    rd          = state['risk_data']
+
+    # Backwards compat: if the loaded cache is from the OLD parser (which
+    # returned {'managers': [...], 'style_factors': {factor: [list]}}),
+    # refuse to run rather than produce garbage. User needs to re-upload.
+    if 'manager_names' not in rd:
+        return jsonify({'error': 'Risk summary cache is in the old format. '
+                                 'Re-upload the Risk Summary file to use the '
+                                 'new bottom-up computation.'})
+
+    mgr_cols   = rd.get('manager_names', [])
+    bench_cols = rd.get('benchmark_names', [])
+    factors    = rd.get('style_factors', {})   # {factor: {col_name: value}}
+
+    # ── Manager-name matching ────────────────────────────────────────────
+    # Matching is a three-tier cascade designed to handle two situations
+    # the previous implementation got wrong:
+    #   (1) The risk file may contain BOTH 'Mgr EAFE' and 'Mgr EAFE SC' for
+    #       the same firm's LC and SC sleeves — our normaliser strips
+    #       'eafe sc' and 'eafe' both to nothing, so naive dict-comprehension
+    #       lookups silently dropped one variant and returned the wrong
+    #       sleeve's data. Client 1's size exposure flipped from -0.32 to
+    #       +0.17 because of this.
+    #   (2) A buy-list manager's name may differ in its regional tag from
+    #       the risk-file column ('Ballina ISC' in the buy-list vs 'Ballina
+    #       EAFE SC' in the risk file).
+    #
+    # The fix: keep a LIST of candidates per normalised key (not a dict that
+    # overwrites collisions) and break ties by the manager's peer tab. ISC
+    # and USSC tabs prefer risk columns whose name carries a small-cap
+    # marker; EAFE/US/ACWI/EM tabs prefer columns without one.
+    import re
+    def norm(s):
+        s = str(s).lower().strip()
+        s = re.sub(r'\([^)]*\)', '', s)
+        s = re.sub(r'[\./\-_,]+', ' ', s)
+        suffixes = [
+            'international small cap equity',
+            'international small cap',
+            'international small company',
+            'non us small cap',
+            'non us equity',
+            'international equity',
+            'smid cap', 'small/mid cap', 'small mid cap', 'small cap',
+            'small company', 'micro cap', 'emerging markets', 'emerging mkts',
+            'eafe sc', 'acwi sc', 'xus sc', 'em sc',
+            'eafe', 'acwi', 'xus', 'em', 'us', 'global', 'isc',
+            'non us', 'international',
+            'equity', 'equities',
+            'composite', 'portfolio', 'strategy', 'fund',
+            'mid cap', 'large cap',
+            'growth', 'value', 'blend', 'core',
+            'sc', 'lc',
+        ]
+        for suffix in suffixes:
+            s = re.sub(r'\b' + re.escape(suffix) + r'\b', '', s)
+        return re.sub(r'\s+', ' ', s).strip()
+
+    # Normalised key → LIST of candidate column names (not just the last one)
+    mgr_key_to_cols = {}
+    for c in mgr_cols:
+        mgr_key_to_cols.setdefault(norm(c), []).append(c)
+    mgr_raw_lower = [(n, str(n).lower().strip()) for n in mgr_cols]
+
+    _SC_TOKENS = (' sc', ' small cap', ' smallcap', ' small-cap', ' isc')
+
+    def _col_is_smallcap(col):
+        """Is this risk-file column a small-cap sleeve? Token-match on the
+        column name so 'Ballina EAFE SC' → True, 'Ballina EAFE' → False."""
+        c = ' ' + str(col).lower() + ' '
+        return any(tok + ' ' in c or tok == c.rstrip() for tok in _SC_TOKENS)
+
+    def _pick_by_tab(candidates, tab):
+        """When a normalised key has multiple candidate columns, use the
+        manager's peer tab to pick the right one. Falls back to the first
+        candidate if the tab doesn't disambiguate."""
+        if len(candidates) == 1:
+            return candidates[0]
+        prefer_sc = tab in ('ISC', 'USSC')
+        sc_cands    = [c for c in candidates if _col_is_smallcap(c)]
+        nonsc_cands = [c for c in candidates if not _col_is_smallcap(c)]
+        if prefer_sc and sc_cands:
+            return sc_cands[0]
+        if (not prefer_sc) and nonsc_cands:
+            return nonsc_cands[0]
+        return candidates[0]
+
+    def match_manager_col(mgr):
+        """Return the exact manager-column name in the risk file that best
+        matches this buy-list manager, or None. `mgr` is the dict from the
+        frontend, with 'matched_name' (or 'name') and 'tab' fields."""
+        name = mgr.get('matched_name') or mgr.get('name', '')
+        tab  = mgr.get('tab')
+        if not name:
+            return None
+        raw_lower = str(name).lower().strip()
+
+        # (1) Exact raw (case-insensitive) match — preserves LC/SC distinction
+        # in the common case where buy-list and risk-file use identical names.
+        for orig, rl in mgr_raw_lower:
+            if rl == raw_lower:
+                return orig
+
+        # (2) Normalised-key match with collision-aware selection
+        key = norm(name)
+        cands = mgr_key_to_cols.get(key)
+        if cands:
+            return _pick_by_tab(cands, tab)
+
+        # (3) Short-stem prefix / word-boundary match
+        if key and len(key) <= 5:
+            hits = []
+            for orig, rl in mgr_raw_lower:
+                if rl.startswith(key + ' ') or rl == key \
+                   or (' ' + key + ' ') in (' ' + rl + ' '):
+                    hits.append(orig)
+            if hits:
+                return _pick_by_tab(hits, tab)
+
+        # (4) Fuzzy fallback — WRatio handles partial/length-asymmetric matches
+        from rapidfuzz import process, fuzz
+        candidates = [k for k in mgr_key_to_cols.keys() if k]
+        if candidates and key:
+            m = process.extractOne(key, candidates,
+                                   scorer=fuzz.WRatio, score_cutoff=75)
+            if m:
+                return _pick_by_tab(mgr_key_to_cols[m[0]], tab)
+        return None
+
+    # ── Benchmark-column matching ────────────────────────────────────────
+    # Client's benchmark comes from the weights file (state['client_benchmarks']).
+    # Risk-file benchmark columns are things like 'MSCI EAFE', 'MSCI EAFE SC',
+    # 'MSCI EAFE + Canada' etc. Names in the weights file may differ slightly
+    # ('MSCI EAFE+CANADA' vs 'MSCI EAFE + Canada') — normalise whitespace and
+    # punctuation before matching.
+    def _bench_norm(s):
+        t = str(s or '').lower()
+        for ch in ['+', '-', '/', ',', '.']:
+            t = t.replace(ch, ' ')
+        return re.sub(r'\s+', ' ', t).strip()
+
+    bench_lookup = {_bench_norm(b): b for b in bench_cols}
+
+    client_bench_str = (state.get('client_benchmarks') or {}).get(client_name or '')
+    matched_bench_col = None
+    if client_bench_str:
+        key = _bench_norm(client_bench_str)
+        matched_bench_col = bench_lookup.get(key)
+        if matched_bench_col is None:
+            # Fuzzy fallback — handles 'MSCI EAFE SC' vs 'MSCI EAFE Small Cap'
+            from rapidfuzz import process, fuzz
+            cand = list(bench_lookup.keys())
+            if cand:
+                m = process.extractOne(key, cand, scorer=fuzz.WRatio,
+                                        score_cutoff=80)
+                if m:
+                    matched_bench_col = bench_lookup[m[0]]
+
+    # Per-factor benchmark absolute values (None if benchmark not found)
+    def bench_val(factor):
+        if not matched_bench_col:
+            return None
+        return factors.get(factor, {}).get(matched_bench_col)
+
+    # ── Per-manager factor lookups ───────────────────────────────────────
+    def mgr_val(mgr, factor):
+        col = match_manager_col(mgr)
+        if not col:
+            return None
+        return factors.get(factor, {}).get(col)
+
+    # ── Bottom-up sumproduct → active ────────────────────────────────────
+    def sumproduct(weight_key):
+        """Weighted-average absolute exposures across matched managers.
+        Weights are renormalised across matched managers only — an
+        unmatched manager doesn't poison the aggregate."""
+        out = {}
+        for factor in STYLE_FACTORS:
+            matched_pairs = []   # list of (w, value) for matched managers
+            for m in managers:
+                w = m.get(weight_key, 0) or 0
+                if w <= 0:
+                    continue
+                v = mgr_val(m, factor)
+                if v is None:
+                    continue
+                matched_pairs.append((w, v))
+            total_w = sum(w for w, _ in matched_pairs)
+            if total_w <= 0:
+                out[factor] = None
+                continue
+            out[factor] = sum((w / total_w) * v for w, v in matched_pairs)
+        return out
+
+    cur_abs  = sumproduct('current_weight')
+    prop_abs = sumproduct('proposed_weight')
+
+    # Active = absolute − benchmark_absolute. When benchmark is unavailable
+    # we fall back to absolute (matches legacy behaviour and keeps the UI
+    # responsive — warning is surfaced separately).
+    current  = {}
+    proposed = {}
+    for f in STYLE_FACTORS:
+        b = bench_val(f)
+        if cur_abs[f] is None:
+            current[f] = None
+        elif b is None:
+            current[f] = round(cur_abs[f], 6)
+        else:
+            current[f] = round(cur_abs[f] - b, 6)
+        if prop_abs[f] is None:
+            proposed[f] = None
+        elif b is None:
+            proposed[f] = round(prop_abs[f], 6)
+        else:
+            proposed[f] = round(prop_abs[f] - b, 6)
+    delta = {f: round(proposed[f] - current[f], 6)
+             if proposed[f] is not None and current[f] is not None else None
+             for f in STYLE_FACTORS}
+
+    # Flag managers with non-zero weight whose exposures couldn't be matched
+    unmatched = []
+    for m in managers:
+        if (m.get('current_weight', 0) or 0) > 0 or (m.get('proposed_weight', 0) or 0) > 0:
+            display_name = m.get('matched_name') or m.get('name', '?')
+            if mgr_val(m, 'Beta') is None:
+                unmatched.append(display_name)
+
+    # Benchmark-resolution notes for the UI
+    benchmark_info = {
+        'requested':         client_bench_str,
+        'matched_column':    matched_bench_col,
+        'available_columns': bench_cols,
+        'fallback_absolute': bool(client_bench_str and not matched_bench_col),
+    }
+
+    return jsonify({
+        'factors':     STYLE_FACTORS,
+        'current':     current,
+        'proposed':    proposed,
+        'delta':       delta,
+        'unmatched':   unmatched,
+        'rd_managers': mgr_cols,
+        'benchmark':   benchmark_info,
+    })
+
+
+# ── Risk analysis endpoint (Scenario / Marginal Contribution / Regime) ────
+@app.route('/risk_analysis', methods=['POST'])
+def risk_analysis():
+    """
+    Accepts JSON: { managers: [{matched_name, tab, current_weight, proposed_weight}, ...] }
+    Returns the full risk analysis payload.
+    Sending managers from the frontend (rather than reading from state) lets
+    the user edit proposed weights and see updated numbers without reloading.
+    """
+    from risk_engine import compute_risk_analysis
+    from data_loader import load_factor_returns
+
+    if not state['clone_results']:
+        return jsonify({'error': 'Run the clone engine first.'})
+
+    # Ensure factor_df is loaded
+    if state.get('factor_df') is None:
+        if 'factor_returns' not in state['files']:
+            return jsonify({'error': 'Factor returns file missing.'})
+        state['factor_df'] = load_factor_returns(state['files']['factor_returns'])
+
+    payload = request.get_json(silent=True) or {}
+    managers = payload.get('managers', [])
+    client_name = payload.get('client_name')
+    peer_benchmark = payload.get('peer_benchmark')
+    if not managers:
+        return jsonify({'error': 'No managers provided.'})
+
+    # If the frontend didn't pick an explicit peer benchmark, try the
+    # client's benchmark from the weights file. This supersedes the
+    # hardcoded CLIENT_BENCHMARK_OVERRIDE inside compute_risk_analysis.
+    if not peer_benchmark and client_name:
+        from data_loader import resolve_peer_group
+        bench_str = (state.get('client_benchmarks') or {}).get(client_name)
+        resolved  = resolve_peer_group(bench_str)
+        if resolved:
+            peer_benchmark = resolved
+
+    # Defensive coercion — the frontend should already send clean floats
+    clean = []
+    for m in managers:
+        clean.append({
+            'matched_name':    m.get('matched_name') or m.get('name', ''),
+            'tab':             m.get('tab'),
+            'current_weight':  float(m.get('current_weight', 0) or 0),
+            'proposed_weight': float(m.get('proposed_weight', 0) or 0),
+        })
+
+    try:
+        result = compute_risk_analysis(
+            clean, state['clone_results'], state['factor_df'],
+            client_name=client_name, peer_benchmark=peer_benchmark,
+        )
+    except Exception as e:
+        import traceback
+        return jsonify({'error': f'{e}', 'trace': traceback.format_exc()})
+    return jsonify(result)
+
+
+# ── Market Cycle chart endpoint ───────────────────────────────────────────
+# Map each peer tab to its core benchmark for downside-capture comparisons.
+MARKET_CYCLE_BENCH = {
+    'EAFE': 'MSCI EAFE NR USD',
+    'ACWI': 'MSCI ACWI NR USD',
+    'ISC':  'MSCI ACWI Ex USA Small NR USD',
+    'EM':   'MSCI EM NR USD',
+    'US':   'Russell 1000 TR USD',
+    'USSC': 'Russell 2000 TR USD',
+}
+# Temporary per-client override, matches risk_engine.CLIENT_BENCHMARK_OVERRIDE
+CLIENT_CYCLE_BENCH = {
+    'Client 1': 'MSCI EAFE Small Cap NR USD',
+    'Client 2': 'MSCI EAFE NR USD',
+}
+
+
+@app.route('/reset_universe', methods=['POST'])
+def reset_universe():
+    """Wipe all universe clone results and normalised-skill data from state
+    and cache. Used when you want to re-run universe clones from scratch
+    (e.g. after uploading a new universe file with different managers or a
+    new factor file). Buy-list clone results are NOT affected."""
+    if state.get('running'):
+        return jsonify({'status': 'error',
+                        'message': 'A run is in progress — wait for it to finish first.'})
+    state['universe_clone_results'] = None
+    state['universe_dfs']           = None
+    state['norm_skill_by_tab']      = {}
+    # Remove staged universe file paths so the user must re-upload
+    if isinstance(state['files'].get('universe_returns'), dict):
+        state['files'].pop('universe_returns', None)
+    save_cache()
+    cb("Universe clone results and normalized-skill data cleared.")
+    return jsonify({'status': 'ok',
+                    'message': 'Universe clones and normalized skill cleared. '
+                               'Re-upload your universe file and click Run Universe Clones.'})
+
+
+
+@app.route('/debug_portfolio_ns/<client_name>/<path:wt_name>')
+def debug_portfolio_ns(client_name, wt_name):
+    """Diagnostic: trace exactly how a weight-file manager name resolves
+    through fuzzy_match → clone_results → norm_skill_by_tab.
+    Open in browser: http://localhost:5050/debug_portfolio_ns/Client%201/EAM%20EAFE%20SC
+    """
+    from data_loader import fuzzy_match
+    out = {'wt_name': wt_name, 'client': client_name}
+
+    # 1. fuzzy_match result
+    tab, mgr_name = fuzzy_match(wt_name, state['manager_dfs'])
+    out['fuzzy_tab']       = tab
+    out['fuzzy_name']      = mgr_name
+    out['fuzzy_name_repr'] = repr(mgr_name)
+
+    # 2. clone_results lookup
+    cr_tab  = (state['clone_results'] or {}).get(tab or '', {})
+    key_norm = (mgr_name or '').strip().lower()
+    ci_cr   = next((k for k in cr_tab  if k.strip().lower() == key_norm), None)
+    out['in_clone_results_exact'] = mgr_name in cr_tab
+    out['in_clone_results_ci']    = ci_cr
+    out['cr_eam_keys'] = [repr(k) for k in cr_tab  if 'eam' in str(k).lower()]
+
+    # 3. universe lookup
+    ucr_tab = (state.get('universe_clone_results') or {}).get(tab or '', {})
+    ci_ucr  = next((k for k in ucr_tab if k.strip().lower() == key_norm), None)
+    out['in_ucr_exact'] = mgr_name in ucr_tab
+    out['in_ucr_ci']    = ci_ucr
+
+    # 4. resolved exact_key and data source
+    d, exact_key = None, mgr_name
+    if tab:
+        if mgr_name in cr_tab:
+            d, exact_key = cr_tab[mgr_name], mgr_name
+        elif ci_cr:
+            d, exact_key = cr_tab[ci_cr], ci_cr
+        elif mgr_name in ucr_tab:
+            d, exact_key = ucr_tab[mgr_name], mgr_name
+        elif ci_ucr:
+            d, exact_key = ucr_tab[ci_ucr], ci_ucr
+    out['exact_key']      = exact_key
+    out['exact_key_repr'] = repr(exact_key)
+    out['data_source']    = ('clone_results' if (mgr_name in cr_tab or ci_cr)
+                             else 'universe' if d else 'not_found')
+    out['r2_full'] = d.get('r2_full') if d else None
+
+    # 5. norm_skill lookup
+    ns_tab  = (state.get('norm_skill_by_tab') or {}).get(tab or '', {})
+    ek_norm = (exact_key or '').strip().lower()
+    ci_ns   = next((k for k in ns_tab if k.strip().lower() == ek_norm), None)
+    out['ns_exact_match']      = exact_key in ns_tab
+    out['ns_ci_match']         = ci_ns
+    out['ns_ci_match_repr']    = repr(ci_ns)
+    rec = ns_tab.get(exact_key) or (ns_tab.get(ci_ns) if ci_ns else None)
+    out['ns_z']    = rec.get('z')    if rec else None
+    out['ns_n_obs'] = rec.get('n_obs') if rec else None
+    out['ns_eam_keys'] = [repr(k) for k in ns_tab if 'eam' in str(k).lower()]
+
+    return jsonify(out)
+
+
+def universe_status():
+    """Tell the UI which peer tabs have universe data loaded."""
+    ucr = state.get('universe_clone_results') or {}
+    tabs_with_data = {tab: len(mgrs) for tab, mgrs in ucr.items() if mgrs}
+    return jsonify({
+        'tabs':            tabs_with_data,
+        'managers_by_tab': tabs_with_data,   # alias consumed by runUniverseClones confirm
+    })
+
+
+@app.route('/universe_files')
+def universe_files():
+    """Tell the UI which peer-tab universe files have been staged on the
+    server (whether or not they have cached clone results yet). Used to
+    enable the 'Run Universe Clones' button on the Setup tab.
+    """
+    uni_map = state.get('files', {}).get('universe_returns', {})
+    if not isinstance(uni_map, dict):
+        uni_map = {}
+    # Present the consolidated file as 'consolidated' (not '__all__') for UX
+    tabs = sorted(['consolidated' if k == '__all__' else k for k in uni_map.keys()])
+    return jsonify({'tabs': tabs})
+
+
+@app.route('/run_universe', methods=['POST'])
+def run_universe():
+    """Re-run the clone engine against every staged universe file. Each peer
+    tab is loaded and cloned in turn; results merge into universe_clone_results
+    per-tab (so a partial failure on one tab doesn't wipe others).
+    """
+    uni_map = state.get('files', {}).get('universe_returns', {})
+    if not isinstance(uni_map, dict) or not uni_map:
+        return jsonify({'status': 'error',
+                        'message': 'No universe files staged. Upload at least one universe file first.'})
+    if 'factor_returns' not in state['files']:
+        return jsonify({'status': 'error',
+                        'message': 'Factor returns not loaded.'})
+    if state['running']:
+        return jsonify({'status': 'error', 'message': 'Another run is in progress'})
+    reset_progress(phase='Preparing universe clone run', total=0)
+    state.update({'running': True, 'error': None})
+
+    def worker():
+        try:
+            from data_loader import (load_universe_returns,
+                                     load_universe_returns_consolidated,
+                                     load_factor_returns, run_universe_cloning)
+            if state.get('factor_df') is None:
+                set_progress_phase('Loading factor returns')
+                state['factor_df'] = load_factor_returns(state['files']['factor_returns'])
+            if state['universe_clone_results'] is None:
+                state['universe_clone_results'] = {}
+            if state['universe_dfs'] is None:
+                state['universe_dfs'] = {}
+
+            # Pre-load everything first so we know the grand total up front.
+            # This makes the progress bar meaningful from the first manager;
+            # otherwise we'd only know per-tab totals as they streamed in.
+            set_progress_phase('Loading universe files')
+            loaded_tabs = []   # list of (peer_tab, tab_df) in run order
+            consolidated_path = uni_map.get('__all__')
+            if consolidated_path and os.path.exists(consolidated_path):
+                cb("Loading consolidated universe file...")
+                cons_map = load_universe_returns_consolidated(consolidated_path)
+                if not cons_map:
+                    cb("WARNING: consolidated file had no recognised sheets")
+                else:
+                    cb(f"Parsed {len(cons_map)} peer tab(s): {sorted(cons_map.keys())}")
+                    for peer_tab in sorted(cons_map.keys()):
+                        loaded_tabs.append((peer_tab, cons_map[peer_tab]))
+
+            for peer_tab, p in sorted(uni_map.items()):
+                if peer_tab == '__all__':
+                    continue
+                cb(f"Loading universe file for {peer_tab}...")
+                if not os.path.exists(p):
+                    cb(f"WARNING: file missing for {peer_tab}: {p}")
+                    continue
+                one_map = load_universe_returns(p, peer_tab)
+                if not one_map or peer_tab not in one_map:
+                    cb(f"WARNING: could not parse universe file for {peer_tab}")
+                    continue
+                loaded_tabs.append((peer_tab, one_map[peer_tab]))
+
+            if not loaded_tabs:
+                raise RuntimeError("No universe data could be loaded from staged files.")
+
+            grand_total = sum(df.shape[1] for _, df in loaded_tabs)
+            set_progress_phase('Cloning universe managers',
+                               total=grand_total, reset_current=True)
+            state['_progress_phase_base'] = 0
+            cb(f"Starting clones: {grand_total} managers across {len(loaded_tabs)} tab(s).")
+
+            for peer_tab, tab_df in loaded_tabs:
+                set_progress_phase(f'Cloning {peer_tab} ({tab_df.shape[1]} managers)',
+                                   total=grand_total)
+                already = len((state['universe_clone_results'] or {}).get(peer_tab) or {})
+                if already:
+                    cb(f"Resuming {peer_tab}: {already} already done, "
+                       f"{tab_df.shape[1] - already} remaining...")
+                else:
+                    cb(f"Running clones for {tab_df.shape[1]} {peer_tab} universe managers...")
+
+                def make_checkpoint(ptab):
+                    """Return a closure that merges a partial tab result into
+                    state and flushes to disk every 50 managers."""
+                    def _checkpoint(tab, partial):
+                        if state['universe_clone_results'] is None:
+                            state['universe_clone_results'] = {}
+                        state['universe_clone_results'][tab] = partial
+                        save_cache()
+                        cb(f"  checkpoint: {len(partial)} {tab} managers saved.")
+                    return _checkpoint
+
+                new_results = run_universe_cloning(
+                    {peer_tab: tab_df},
+                    state['factor_df'],
+                    progress_callback=cb_counting,
+                    checkpoint_callback=make_checkpoint(peer_tab),
+                    checkpoint_every=50,
+                    existing_results=state.get('universe_clone_results'),
+                )
+                state['universe_clone_results'].update(new_results)
+                state['universe_dfs'][peer_tab] = tab_df
+                absorb_regional_into_core({peer_tab: state['universe_clone_results'].get(peer_tab, {})})
+                set_progress_phase(f'Computing normalized skill ({peer_tab})',
+                                   total=grand_total)
+                recompute_norm_skill(tabs=[peer_tab])
+                save_cache()
+                advance_progress_base()
+
+            set_progress_phase('Done', total=grand_total)
+            state['progress_current'] = grand_total
+            cb("DONE")
+        except Exception as e:
+            import traceback
+            state['error'] = str(e) + "\n" + traceback.format_exc()
+            cb(f"ERROR: {e}")
+        finally:
+            state['running'] = False
+
+    threading.Thread(target=worker, daemon=True).start()
+    return jsonify({'status': 'started', 'tabs': list(uni_map.keys())})
+
+
+@app.route('/market_cycle', methods=['POST'])
+def market_cycle():
+    """Classify current and proposed portfolio managers onto market-cycle buckets.
+    Request JSON: { client_name?, managers: [{matched_name, tab, current_weight, proposed_weight}, ...] }
+    Returns {current: [...], proposed: [...], peer_group, missing_universe: bool}.
+    A manager appears in the 'current' array only if current_weight > 0, and
+    likewise for 'proposed'. Classification is the same per manager regardless
+    of which portfolio — this is just a convenience split for charting.
+    """
+    from market_cycle import classify_peer_group
+    from data_loader import load_factor_returns
+    from risk_engine import PEER_BENCHMARKS
+
+    if not state['clone_results']:
+        return jsonify({'error': 'Run the clone engine first.'})
+    ucr = state.get('universe_clone_results') or {}
+    if not ucr:
+        return jsonify({'error': 'No universe data loaded — upload a universe file first.',
+                        'missing_universe': True})
+
+    if state.get('factor_df') is None:
+        if 'factor_returns' not in state['files']:
+            return jsonify({'error': 'Factor returns file missing.'})
+        state['factor_df'] = load_factor_returns(state['files']['factor_returns'])
+
+    payload = request.get_json(silent=True) or {}
+    raw_managers = payload.get('managers', [])
+    if not raw_managers:
+        return jsonify({'error': 'No managers provided.'})
+
+    # Group buy-list managers by peer tab. Market cycle classification is
+    # peer-group-specific, so each tab's managers get classified against
+    # their own universe.
+    by_tab = {}
+    for m in raw_managers:
+        tab = m.get('tab')
+        if not tab:
+            continue
+        # Pull the buy-list clone data to get dates/returns/betas/buckets
+        d = state['clone_results'].get(tab, {}).get(m.get('matched_name') or m.get('name'), {})
+        if not d:
+            continue
+        by_tab.setdefault(tab, []).append({
+            'name':              m.get('matched_name') or m.get('name'),
+            'tab':               tab,
+            'current_weight':    float(m.get('current_weight', 0) or 0),
+            'proposed_weight':   float(m.get('proposed_weight', 0) or 0),
+            # Use posted style_buckets when provided (for client-side overrides),
+            # otherwise fall back to the computed buckets in clone_results.
+            'style_buckets':     m.get('style_buckets') or d.get('style_buckets', {}),
+            'manager_returns':   d.get('manager_returns', []),
+            'dates':             d.get('dates', []),
+            'static_clone_full': d.get('static_clone_full', []),
+            'betas_full':        d.get('betas_full', {}),
+        })
+
+    bench_map = {tab: PEER_BENCHMARKS.get(tab, {}).get('core') for tab in PEER_BENCHMARKS}
+    # EAFE_SC isn't a peer tab in the buy list — it's a benchmark override —
+    # so no mapping needed here for market cycle purposes.
+
+    all_placements = {}  # name -> placement dict (with tab, weights)
+    tabs_without_universe = []
+    for tab, mgrs in by_tab.items():
+        if tab not in ucr or not ucr[tab]:
+            tabs_without_universe.append(tab)
+            continue
+        try:
+            placements = classify_peer_group(mgrs, ucr, state['factor_df'], bench_map)
+        except Exception as e:
+            import traceback
+            return jsonify({'error': f'Classification failed for {tab}: {e}',
+                            'trace': traceback.format_exc()})
+        for m in mgrs:
+            p = placements.get(m['name'])
+            if p:
+                p = dict(p)  # copy
+                p['name']            = m['name']
+                p['tab']             = tab
+                p['current_weight']  = m['current_weight']
+                p['proposed_weight'] = m['proposed_weight']
+                all_placements[m['name']] = p
+
+    current_list  = [p for p in all_placements.values() if p['current_weight']  > 0]
+    proposed_list = [p for p in all_placements.values() if p['proposed_weight'] > 0]
+
+    return jsonify({
+        'current':              current_list,
+        'proposed':             proposed_list,
+        'tabs_without_universe': tabs_without_universe,
+        'n_total':              len(all_placements),
+    })
+
+
+# ── Exposures endpoints ──────────────────────────────────────────────────
+@app.route('/upload_exposures', methods=['POST'])
+def upload_exposures():
+    """Accept a FactSet-style contribution XLSX, parse it, cache it."""
+    from exposures_engine import parse_exposures_file
+    f = request.files.get('exposures')
+    if not f:
+        return jsonify({'status': 'error', 'message': 'No file provided.'})
+    fname = secure_filename(f.filename)
+    path  = os.path.join(app.config['UPLOAD_FOLDER'], fname)
+    f.save(path)
+    state['files']['exposures'] = path
+    try:
+        data = parse_exposures_file(path)
+        state['exposures_data'] = data
+        save_cache()
+        return jsonify({
+            'status':    'ok',
+            'benchmark': data['benchmark_name'],
+            'managers':  data['manager_names'],
+            'n_benchmark': len(data['benchmark']),
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({'status': 'error', 'message': str(e),
+                        'traceback': traceback.format_exc()})
+
+
+# Per-client FactSet-exposures benchmark override. The exposures file is a
+# snapshot of stocks and factor values across multiple candidate benchmarks
+# and manager portfolios; this dict tells the tool which benchmark each
+# client should be compared to. Falls back to the default (first-listed)
+# benchmark in the file if the named one isn't present.
+CLIENT_EXPOSURE_BENCHMARK = {
+    'Client 1': 'MSCI EAFE Small Cap',
+    'Client 2': 'MSCI EAFE',
+    'Client 3': 'MSCI World',
+}
+
+
+@app.route('/portfolio_exposures', methods=['POST'])
+def portfolio_exposures():
+    """
+    Compute portfolio exposure to a given grouping.
+    POST JSON: {
+        managers: [{matched_name, current_weight, proposed_weight}],
+        grouping: str,
+        client_name: str (optional — picks the client-specific benchmark),
+        benchmark_name: str (optional — explicit override, trumps client_name)
+    }
+    """
+    from exposures_engine import compute_portfolio_exposures, get_grouping_menu
+    if state['exposures_data'] is None:
+        return jsonify({'error': 'No exposure data loaded. Upload a FactSet file on the Setup tab.'})
+    payload      = request.get_json(silent=True) or {}
+    grouping     = payload.get('grouping')
+    sub_grouping = payload.get('sub_grouping')
+    managers     = payload.get('managers', [])
+    client_name  = payload.get('client_name')
+    bmk_name     = payload.get('benchmark_name')
+
+    if not grouping:
+        # Return the grouping menu + available benchmarks so the frontend can
+        # build its selector and benchmark-picker.
+        return jsonify({
+            'menu':                 get_grouping_menu(),
+            'available_benchmarks': list((state['exposures_data'].get('benchmarks') or {}).keys()),
+            'default_benchmark':    state['exposures_data'].get('benchmark_name'),
+        })
+    if not managers:
+        return jsonify({'error': 'No managers provided.'})
+
+    # Resolve benchmark: explicit override > weights-file benchmark for the
+    # client > hardcoded CLIENT_EXPOSURE_BENCHMARK > file default. The
+    # weights-file name is used verbatim against exposures-file columns; if
+    # it doesn't match, compute_portfolio_exposures falls back to the file
+    # default and flags benchmark_fallback: true.
+    if not bmk_name and client_name:
+        bmk_name = (state.get('client_benchmarks') or {}).get(client_name)
+    if not bmk_name and client_name:
+        bmk_name = CLIENT_EXPOSURE_BENCHMARK.get(client_name)
+
+    result = compute_portfolio_exposures(
+        managers, state['exposures_data'], grouping,
+        benchmark_name=bmk_name,
+        sub_grouping=sub_grouping,
+    )
+    return jsonify(result)
+
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5050, debug=False)
+
