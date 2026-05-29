@@ -418,11 +418,11 @@ export function PortfolioAnalyticsSections({
                     { key: "growth_tilted", label: "Growth-Tilted (85/15)" },
                     { key: "infl_sensitive", label: "Inflation Sensitive" },
                   ] as const).map((row) => {
-                    const current = riskAnalysis?.scenario.current[row.key] ?? null;
-                    const proposed = riskAnalysis?.scenario.proposed[row.key] ?? null;
+                    const current = riskAnalysis?.scenario?.current?.[row.key] ?? null;
+                    const proposed = riskAnalysis?.scenario?.proposed?.[row.key] ?? null;
                     return (
                       <tr key={row.key}>
-                        <td>{riskAnalysis?.benchmarks[row.key] ?? row.label}</td>
+                        <td>{riskAnalysis?.benchmarks?.[row.key] ?? row.label}</td>
                         <td className="mono sep-col">{current ? formatNumber(current.upside_capture, 1) : "--"}</td>
                         <td className="mono">{proposed ? formatNumber(proposed.upside_capture, 1) : "--"}</td>
                         <td className="mono sep-col">{current ? formatNumber(current.downside_capture, 1) : "--"}</td>
@@ -431,8 +431,8 @@ export function PortfolioAnalyticsSections({
                         <td className="mono">{proposed ? formatPercent(proposed.tracking_error, 2) : "--"}</td>
                         <td className="mono sep-col">{current ? formatNumber(current.beta, 2) : "--"}</td>
                         <td className="mono">{proposed ? formatNumber(proposed.beta, 2) : "--"}</td>
-                        <td className="mono sep-col">{formatPercent(riskAnalysis?.scenario.current.max_drawdown, 2)}</td>
-                        <td className="mono">{formatPercent(riskAnalysis?.scenario.proposed.max_drawdown, 2)}</td>
+                        <td className="mono sep-col">{formatPercent(riskAnalysis?.scenario?.current?.max_drawdown, 2)}</td>
+                        <td className="mono">{formatPercent(riskAnalysis?.scenario?.proposed?.max_drawdown, 2)}</td>
                       </tr>
                     );
                   })
@@ -467,7 +467,7 @@ export function PortfolioAnalyticsSections({
                   { key: "value_outperform", label: "Value-Tilt Outperforming" },
                   { key: "growth_outperform", label: "Growth-Tilt Outperforming" },
                 ] as const).map((row) => {
-                  const regime = riskAnalysis?.regime[row.key] ?? null;
+                  const regime = riskAnalysis?.regime?.[row.key] ?? null;
                   return (
                     <tr key={row.key}>
                       <td>{row.label}</td>

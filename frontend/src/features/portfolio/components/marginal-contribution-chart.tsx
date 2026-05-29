@@ -42,8 +42,8 @@ function niceStep(maxAbs: number): number {
 }
 
 export function MarginalContributionChart({ data, loading }: Props) {
-  const cur = data?.marginal.current ?? null;
-  const prop = data?.marginal.proposed ?? null;
+  const cur = data?.marginal?.current ?? null;
+  const prop = data?.marginal?.proposed ?? null;
 
   const { names, bars, axisMax, axisMin, ticks } = useMemo(() => {
     const curMap = Object.fromEntries((cur?.managers ?? []).map((r) => [r.name, r]));
