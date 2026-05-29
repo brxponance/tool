@@ -1,0 +1,8 @@
+venv/
+venv_broken/
+__pycache__/
+*.pyc
+*.log
+.pytest_cache/
+cache/results.pkl
+cache/results.pkl.backup

@@ -140,6 +140,14 @@ function hasStagedFile(status: BackendStatus | undefined, key: UploadSlot["key"]
     return status.has_universe || status.universe_files_staged.length > 0;
   }
 
+  if (key === "manager_returns" || key === "factor_returns") {
+    return status.has_results || Boolean(status.clone_run_files[key]) || Boolean(status.files[key]);
+  }
+
+  if (key === "weights") {
+    return status.has_weights || Boolean(status.files[key]);
+  }
+
   return Boolean(status.files[key]);
 }
 
@@ -174,6 +182,14 @@ function fileLabel(status: BackendStatus | undefined, key: UploadSlot["key"]) {
 
   if (value && typeof value === "object") {
     return "multiple files staged";
+  }
+
+  if (key === "manager_returns" || key === "factor_returns") {
+    return status.clone_run_files[key] || (status.has_results ? "Loaded from cache" : "");
+  }
+
+  if (key === "weights" && status.has_weights) {
+    return "Loaded from cache";
   }
 
   return "";

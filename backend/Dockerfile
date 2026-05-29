@@ -9,8 +9,13 @@ RUN pip install --no-cache-dir -r requirements.txt gunicorn boto3
 # Copy application code
 COPY *.py .
 
-# Create directories for cache (uploads go to S3 in prod)
+# Create directories and bake in the complete local cache snapshot.
+# The Flask app always loads /app/cache/results.pkl at startup. The deploy
+# snapshot is copied from results.pkl.backup and includes the universe clone
+# results + normalized skill data that the smaller active local cache lacks.
 RUN mkdir -p uploads cache
+COPY cache/results.deploy.pkl ./cache/results.pkl
+COPY uploads/ ./uploads/
 
 # Expose Flask port
 EXPOSE 3001
