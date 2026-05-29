@@ -21,4 +21,4 @@ COPY uploads/ ./uploads/
 EXPOSE 3001
 
 # Run with gunicorn — single worker required (shared in-memory state)
-CMD ["gunicorn", "--workers", "1", "--bind", "0.0.0.0:3001", "--timeout", "120", "--access-logfile", "-", "app:app"]
+CMD ["gunicorn", "--workers", "1", "--worker-class", "gthread", "--threads", "4", "--bind", "0.0.0.0:3001", "--timeout", "180", "--access-logfile", "-", "app:app"]

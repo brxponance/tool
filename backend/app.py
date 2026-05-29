@@ -155,12 +155,27 @@ def _resolve_cached_path(p):
     # Relative path, try as-is (relative to cwd)
     if os.path.exists(p):
         return os.path.abspath(p)
-    # Fall back: interpret as a filename in the uploads folder
-    basename = os.path.basename(p)
+    # Fall back: interpret as a filename in the uploads folder. Cached paths
+    # may have Windows backslashes even when the app is running in Linux.
+    basename = os.path.basename(str(p).replace('\\', '/'))
     alt = os.path.join(app.config['UPLOAD_FOLDER'], basename)
     if os.path.exists(alt):
         return os.path.abspath(alt)
     return None
+
+
+def _restore_cached_upload(resolved, key):
+    """Backfilled deploy caches may have clone_run_files but an empty files map.
+    Reconnect those file names to the baked uploads folder so endpoints that
+    need the original workbooks can run without a manual re-upload.
+    """
+    if key in resolved:
+        return
+
+    cached_name = (state.get('clone_run_files') or {}).get(key)
+    restored = _resolve_cached_path(cached_name)
+    if restored:
+        resolved[key] = restored
 
 
 def load_cache():
@@ -200,12 +215,19 @@ def load_cache():
                 rp = _resolve_cached_path(val)
                 if rp:
                     resolved[key] = rp
+
+        _restore_cached_upload(resolved, 'manager_returns')
+        _restore_cached_upload(resolved, 'factor_returns')
         state['files'] = resolved
 
         # Reload manager_dfs if the manager returns file resolved successfully
         mgr_path = state['files'].get('manager_returns')
         if mgr_path and os.path.exists(mgr_path):
             state['manager_dfs'] = load_manager_returns(mgr_path)
+
+        factor_path = state['files'].get('factor_returns')
+        if factor_path and os.path.exists(factor_path):
+            state['factor_df'] = load_factor_returns(factor_path)
 
         n_mgrs = sum(len(v) for v in (state['clone_results'] or {}).values())
         missing = [k for k in (cached_files or {}) if k not in resolved]
@@ -3013,4 +3035,3 @@ if __name__ == '__main__':
     # someone does `python app.py` directly — keep the port consistent so
     # behaviour matches.
     app.run(host='0.0.0.0', port=3001, debug=False)
-
