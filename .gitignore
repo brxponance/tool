@@ -26,6 +26,20 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+*.log
+
+# Local dev tooling (debug scripts, Playwright MCP, runtime artifacts).
+# Leading / pins these to the repo root so we don't ignore frontend/package.json.
+.tools/
+.playwright-mcp/
+/playwright-mcp.cmd
+/package.json
+/package-lock.json
+/.mcp.json
+
+# IDE / editor
+.idea/
+.vscode/
 
 # OS files
 .DS_Store

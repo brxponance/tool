@@ -5,16 +5,28 @@ Results are cached to disk so browser refreshes don't lose data.
 import os, json, threading, pickle
 import numpy as np
 import pandas as pd
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
 from data_loader import (load_factor_returns, load_manager_returns, load_weights,
                          run_cloning, build_portfolio_view, fuzzy_match,
                          diagnose_clone_determinism)
+from s3_storage import save_uploaded_file, resolve_path, is_enabled as s3_enabled
 
-app = Flask(__name__, static_folder='static')
+app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')
 app.config['CACHE_FILE']    = os.path.join(os.path.dirname(__file__), 'cache', 'results.pkl')
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
+
+# Allow frontend origin — set FRONTEND_URL env var in production
+# e.g. FRONTEND_URL=https://main.d1234.amplifyapp.com
+_frontend_url = os.environ.get('FRONTEND_URL', '')
+if _frontend_url:
+    try:
+        from flask_cors import CORS
+        CORS(app, origins=[_frontend_url])
+        print(f"CORS enabled for {_frontend_url}")
+    except ImportError:
+        print("flask-cors not installed — skipping CORS setup")
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(os.path.dirname(app.config['CACHE_FILE']), exist_ok=True)
@@ -35,6 +47,10 @@ state = {
     # Stock-level risk data from FactSet Security-Level Risk DNA export.
     # {managers: {mgr: [stocks]}, benchmarks: {bmk: {factor: val}}, ...}
     'security_risk_data': None,
+    # User-edited style buckets for placeholder managers (those in the
+    # weights file but missing clone data). Keyed by weight-file manager
+    # name. Empty dict means "use default Core=1.0". Persisted across runs.
+    'placeholder_buckets': {},
 }
 
 # ── Cache helpers ──────────────────────────────────────────────────────────
@@ -52,6 +68,7 @@ def save_cache():
                 'files':                   state['files'],
                 'clone_run_files':         state['clone_run_files'],
                 'security_risk_data':      state['security_risk_data'],
+                'placeholder_buckets':     state.get('placeholder_buckets') or {},
             }, f)
         print("Cache saved.")
     except Exception as e:
@@ -93,7 +110,12 @@ def absorb_regional_into_core(clone_results):
 def recompute_norm_skill(tabs=None):
     """Recompute normalized-skill Z-scores for the given tabs (or all tabs
     with clone results). Safe to call whenever clone_results or
-    universe_clone_results change. Silent no-op if there is nothing to do."""
+    universe_clone_results change. Silent no-op if there is nothing to do.
+
+    Uses skill_engine's default target_managers=None (filters to buy-list
+    managers only) — the post-clone snapshot is fast enough now (~5 sec on
+    a US tab with ~3K universe managers) that no progress UI is needed.
+    """
     try:
         from skill_engine import compute_norm_skill_latest
     except Exception as e:
@@ -108,7 +130,7 @@ def recompute_norm_skill(tabs=None):
     for t in tabs:
         try:
             state['norm_skill_by_tab'][t] = compute_norm_skill_latest(
-                cr, ucr, t, exclude=NORM_SKILL_EXCLUDE
+                cr, ucr, t, exclude=NORM_SKILL_EXCLUDE,
             )
             n = len(state['norm_skill_by_tab'][t])
             print(f"Normalized skill recomputed for {t}: {n} managers.")
@@ -124,6 +146,10 @@ def _resolve_cached_path(p):
     """
     if not p:
         return None
+    # S3 mode: key starts with the S3 prefix or doesn't exist locally
+    if s3_enabled():
+        resolved = resolve_path(p, app.config['UPLOAD_FOLDER'])
+        return resolved if resolved and os.path.exists(resolved) else None
     if os.path.isabs(p) and os.path.exists(p):
         return p
     # Relative path, try as-is (relative to cwd)
@@ -153,6 +179,7 @@ def load_cache():
         state['universe_clone_results'] = data.get('universe_clone_results')
         state['exposures_data']         = data.get('exposures_data')
         state['norm_skill_by_tab']      = data.get('norm_skill_by_tab', {})
+        state['placeholder_buckets']    = data.get('placeholder_buckets') or {}
         cached_files                    = data.get('files', {})
 
         # Resolve each cached path. Drop entries whose files can no longer be
@@ -217,6 +244,8 @@ def reset_progress(phase='', total=0):
     state['progress_current']  = 0
     state['progress_total']    = int(total or 0)
     state['progress_phase']    = phase or ''
+    state['progress_sub_current'] = 0
+    state['progress_sub_total']   = 0
 
 def set_progress_phase(phase, total=None, reset_current=False):
     """Update the phase label (and optionally total / current counter)."""
@@ -225,6 +254,11 @@ def set_progress_phase(phase, total=None, reset_current=False):
         state['progress_total'] = int(total)
     if reset_current:
         state['progress_current'] = 0
+    # Whenever the phase changes, clear sub-progress; the new phase is
+    # responsible for repopulating it if it wants to advertise per-step
+    # ticks (e.g. norm-skill snapshots).
+    state['progress_sub_current'] = 0
+    state['progress_sub_total']   = 0
 
 def cb_counting(msg):
     """Like cb(), but also bumps progress_current whenever it sees a
@@ -260,7 +294,12 @@ def advance_progress_base():
 # ── Routes ─────────────────────────────────────────────────────────────────
 @app.route('/')
 def index():
-    return send_from_directory('static', 'index.html')
+    """Service identity. The user-facing UI lives on the separate Next.js
+    frontend (typically at :3000) — this Flask server only exposes JSON."""
+    return jsonify({
+        'service': 'aapryl-clone-tool-backend',
+        'ui': 'see Next.js frontend (default http://localhost:3000)',
+    })
 
 @app.route('/upload', methods=['POST'])
 def upload_files():
@@ -270,8 +309,7 @@ def upload_files():
         if key in request.files:
             f = request.files[key]
             if f.filename:
-                path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(f.filename))
-                f.save(path)
+                path = save_uploaded_file(f, secure_filename(f.filename), app.config['UPLOAD_FOLDER'])
                 state['files'][key] = path
                 saved.append(key)
                 # Sniff the factor-returns file for missing expected factors.
@@ -346,8 +384,7 @@ def upload_universe():
                         'message': 'Upload factor_returns first — universe cloning needs it.'})
 
     safe_fn = secure_filename(f"universe_{peer_tab}_{f.filename}")
-    path = os.path.join(app.config['UPLOAD_FOLDER'], safe_fn)
-    f.save(path)
+    path = save_uploaded_file(f, safe_fn, app.config['UPLOAD_FOLDER'])
     # Keep track of universe files per peer tab
     uni_map = state['files'].get('universe_returns', {})
     if not isinstance(uni_map, dict):
@@ -376,8 +413,7 @@ def upload_universe_consolidated():
                         'message': 'Upload factor_returns first — universe cloning needs it.'})
 
     safe_fn = secure_filename(f"universe_consolidated_{f.filename}")
-    path = os.path.join(app.config['UPLOAD_FOLDER'], safe_fn)
-    f.save(path)
+    path = save_uploaded_file(f, safe_fn, app.config['UPLOAD_FOLDER'])
 
     # Store under a reserved __all__ key so we remember the source file
     uni_map = state['files'].get('universe_returns', {})
@@ -613,6 +649,9 @@ def progress():
     if total and current > total:
         current = total
     pct = (100.0 * current / total) if total > 0 else None
+    sub_total   = int(state.get('progress_sub_total', 0) or 0)
+    sub_current = int(state.get('progress_sub_current', 0) or 0)
+    sub_pct = (100.0 * sub_current / sub_total) if sub_total > 0 else None
     return jsonify({
         'messages': state['progress'][-30:],
         'running':  state['running'],
@@ -622,6 +661,12 @@ def progress():
         'progress_total':   total,
         'progress_phase':   state.get('progress_phase', ''),
         'progress_pct':     pct,   # None when total unknown; UI falls back to indeterminate animation
+        # Per-phase sub-progress (e.g. norm-skill snapshots). When
+        # populated, the UI can show a more responsive percentage during
+        # phases that don't tick the global counter.
+        'progress_sub_current': sub_current,
+        'progress_sub_total':   sub_total,
+        'progress_sub_pct':     sub_pct,
     })
 
 @app.route('/clients')
@@ -740,6 +785,82 @@ def _annualized_downside_dev(returns):
         return None
     arr = np.minimum(np.array(returns, dtype=float), 0.0)
     return float(np.sqrt(np.mean(arr ** 2)) * np.sqrt(12.0))
+
+
+def _build_portfolio_contribution_rows(managers):
+    """Compute contribution rows for an arbitrary manager list."""
+    import math, pandas as pd
+    from data_loader import get_benchmark, load_factor_returns
+
+    if not state['clone_results']:
+        return {'error': 'No results'}
+
+    if state.get('factor_df') is None and 'factor_returns' in state['files']:
+        state['factor_df'] = load_factor_returns(state['files']['factor_returns'])
+
+    fdf = state.get('factor_df')
+
+    def period_stats(mgr, clone, bench, n):
+        pairs = [(mgr[i], clone[i], bench[i])
+                 for i in range(min(n, len(mgr), len(clone), len(bench)))
+                 if mgr[i] is not None and clone[i] is not None and bench[i] is not None
+                 and not math.isnan(float(mgr[i])) and not math.isnan(float(clone[i]))
+                 and not math.isnan(float(bench[i]))]
+        if len(pairs) < max(1, n // 2):
+            return None, None, None, None
+        m_tot = float(np.prod([1 + p[0] for p in pairs]) - 1)
+        c_tot = float(np.prod([1 + p[1] for p in pairs]) - 1)
+        b_tot = float(np.prod([1 + p[2] for p in pairs]) - 1)
+        nm = len(pairs)
+        if nm >= 12:
+            ann = lambda r: (1 + r) ** (12 / nm) - 1
+            m_tot, c_tot, b_tot = ann(m_tot), ann(c_tot), ann(b_tot)
+        return m_tot, m_tot - b_tot, c_tot - b_tot, m_tot - c_tot
+
+    managers_out = []
+    for m in managers:
+        tab = m.get('tab')
+        mgr_name = m.get('matched_name') or m.get('name')
+        if not tab or not mgr_name:
+            continue
+
+        d = (state['clone_results'].get(tab, {}) or {}).get(mgr_name, {})
+        if not d:
+            continue
+
+        mgr_rets = d.get('manager_returns', [])
+        clone_rets = d.get('static_clone_full', [])
+        dates = d.get('dates', [])
+
+        bench_name = get_benchmark(tab, mgr_name)
+        bench_rets = []
+        if fdf is not None and bench_name in fdf.columns:
+            for ds in dates:
+                try:
+                    dt = pd.Timestamp(ds)
+                    v = fdf.loc[dt, bench_name] if dt in fdf.index else None
+                    bench_rets.append(None if (v is None or math.isnan(float(v))) else float(v))
+                except Exception:
+                    bench_rets.append(None)
+        else:
+            bench_rets = [None] * len(dates)
+
+        row = {
+            'name': mgr_name,
+            'weight': float(m.get('current_weight', 0) or 0),
+            'benchmark_name': bench_name,
+            'vg_full': m.get('vg_full', d.get('vg_full', 0)),
+        }
+        for label, n in [('qtd', 3), ('t1', 12), ('t3', 36)]:
+            mr, be, ps, sk = period_stats(mgr_rets, clone_rets, bench_rets, n)
+            row[f'{label}_mgr'] = round(mr * 100, 4) if mr is not None else None
+            row[f'{label}_bench'] = round(be * 100, 4) if be is not None else None
+            row[f'{label}_style'] = round(ps * 100, 4) if ps is not None else None
+            row[f'{label}_skill'] = round(sk * 100, 4) if sk is not None else None
+
+        managers_out.append(row)
+
+    return {'managers': managers_out, 'unmatched': []}
 
 
 def _manager_recommender_features(tab, name, manager_result):
@@ -916,27 +1037,126 @@ def portfolio(client_name):
         return jsonify({'error': 'Client not found'})
     data = build_portfolio_view(client_name, state['weights'][client_name],
                                 state['clone_results'], state['manager_dfs'],
-                                universe_clone_results=state.get('universe_clone_results'))
-    # Enrich each manager with normalized-skill fields
+                                universe_clone_results=state.get('universe_clone_results'),
+                                placeholder_buckets=state.get('placeholder_buckets') or {})
+    # Enrich each manager with normalized-skill fields (placeholders skip
+    # this — they have no clone, no skill Z, and the lookup would just
+    # return None across the board)
     for m in data.get('managers', []):
+        if m.get('is_placeholder'):
+            continue
         m.update(_norm_skill_for(m['tab'], m['matched_name']))
     # Surface the client's benchmark (as given in the weights file) so the
     # UI can label the risk/exposures tables with the right benchmark name.
     data['client_benchmark'] = (state.get('client_benchmarks') or {}).get(client_name)
     return jsonify(data)
 
+
+@app.route('/placeholder_buckets', methods=['POST'])
+def update_placeholder_buckets():
+    """Update style buckets for one placeholder manager (or clear them).
+    POST JSON: { name: str, buckets: {bucket: weight, ...} | null }
+    Setting buckets to null/{} resets to the default Core=1.0.
+    Bucket weights are normalised to sum to 1.0; the UI sends fractions
+    or percentages — both work.
+    """
+    data    = request.get_json(silent=True) or {}
+    name    = data.get('name')
+    buckets = data.get('buckets')
+    if not name:
+        return jsonify({'status': 'error', 'message': 'Missing name'})
+    if 'placeholder_buckets' not in state or state['placeholder_buckets'] is None:
+        state['placeholder_buckets'] = {}
+    if not buckets:
+        state['placeholder_buckets'].pop(name, None)
+    else:
+        # Coerce to floats and normalise to sum=1.0 so V-G / %SC math
+        # downstream doesn't depend on whether the UI sent 0-1 or 0-100.
+        clean = {}
+        for k, v in buckets.items():
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                continue
+            if f > 0:
+                clean[str(k)] = f
+        total = sum(clean.values())
+        if total > 0:
+            clean = {k: v / total for k, v in clean.items()}
+        state['placeholder_buckets'][name] = clean
+    save_cache()
+    return jsonify({'status': 'ok',
+                    'buckets': state['placeholder_buckets'].get(name)})
+
+
+def _enumerate_placeholder_candidates():
+    """Return the set of manager names that should be eligible for the
+    Placeholder peer group: any name appearing in the FactSet exposures
+    file, the Risk Summary file, the Security-Level Risk file, or any
+    client's weights file, that does NOT fuzzy-match into clone_results
+    or universe_clone_results. These are managers the user has FactSet
+    data for but no clone (typically <3 years of returns), so they can
+    be added to a portfolio with manually-set style buckets."""
+    from data_loader import fuzzy_match
+    candidates = set()
+    ed = state.get('exposures_data') or {}
+    for n in (ed.get('managers') or {}).keys():
+        candidates.add(n)
+    rd = state.get('risk_data') or {}
+    for n in rd.get('manager_names', []) or []:
+        candidates.add(n)
+    srd = state.get('security_risk_data') or {}
+    for n in (srd.get('managers') or {}).keys():
+        candidates.add(n)
+    weights = state.get('weights') or {}
+    for mgr_weights in weights.values():
+        for n in mgr_weights.keys():
+            candidates.add(n)
+    mgr_dfs = state.get('manager_dfs') or {}
+    placeholders = set()
+    for name in candidates:
+        t, m = fuzzy_match(name, mgr_dfs)
+        cr_tab = (state.get('clone_results') or {}).get(t, {}) if t else {}
+        ucr_tab = (state.get('universe_clone_results') or {}).get(t, {}) if t else {}
+        if not (m and (m in cr_tab or m in ucr_tab)):
+            placeholders.add(name)
+    return placeholders
+
+
 @app.route('/all_managers')
 def all_managers():
-    if not state['clone_results']:
-        return jsonify({'managers': []})
     out = []
-    for tab, td in state['clone_results'].items():
-        for name, d in td.items():
-            row = {'name': name, 'tab': tab, 'peer_group': tab,
-                   'vg_full': d.get('vg_full', 0), 'vg_3factor': d.get('vg_3factor', 0),
-                   'r2_full': d.get('r2_full')}
-            row.update(_norm_skill_for(tab, name))
-            out.append(row)
+    if state.get('clone_results'):
+        for tab, td in state['clone_results'].items():
+            for name, d in td.items():
+                row = {'name': name, 'tab': tab, 'peer_group': tab,
+                       'vg_full': d.get('vg_full', 0), 'vg_3factor': d.get('vg_3factor', 0),
+                       'r2_full': d.get('r2_full'),
+                       'is_placeholder': False}
+                row.update(_norm_skill_for(tab, name))
+                out.append(row)
+    # Placeholder candidates: managers with FactSet data but no clone.
+    # Bucket overrides come from state['placeholder_buckets'] (default
+    # Core=1.0). Surfacing these in /all_managers makes them selectable
+    # from the Add Manager dialog so the user can pull e.g. 'IMC Global'
+    # into a portfolio even though it has no clone yet.
+    ph_buckets = state.get('placeholder_buckets') or {}
+    for name in sorted(_enumerate_placeholder_candidates(), key=str.lower):
+        sb = dict(ph_buckets.get(name) or {'Core': 1.0})
+        v = sum(w for b, w in sb.items() if b == 'Value')
+        y = sum(w for b, w in sb.items() if b == 'Yield')
+        g = sum(w for b, w in sb.items() if b == 'Growth')
+        vg = round((v + y) - g, 6)
+        out.append({
+            'name':           name,
+            'tab':            'Placeholder',
+            'peer_group':     'Placeholder',
+            'vg_full':        vg,
+            'vg_3factor':     vg,
+            'r2_full':        None,
+            'style_buckets':  sb,
+            'is_placeholder': True,
+        })
     return jsonify({'managers': out})
 
 @app.route('/manager_detail/<tab>/<path:mgr_name>')
@@ -1100,6 +1320,33 @@ def peer_skill_summary(tab):
     from data_loader import compute_skill_periods
     if not state['clone_results']:
         return jsonify({'error': 'No results'})
+    # Synthesise the Placeholder peer group: every manager appearing in
+    # the FactSet exposures / risk / weights files but lacking a clone,
+    # with bucket overrides from state['placeholder_buckets'] applied.
+    if tab == 'Placeholder':
+        ph_buckets = state.get('placeholder_buckets') or {}
+        out = []
+        for name in sorted(_enumerate_placeholder_candidates(), key=str.lower):
+            sb = dict(ph_buckets.get(name) or {'Core': 1.0})
+            v = sum(w for b, w in sb.items() if b == 'Value')
+            y = sum(w for b, w in sb.items() if b == 'Yield')
+            g = sum(w for b, w in sb.items() if b == 'Growth')
+            vg = round((v + y) - g, 6)
+            out.append({
+                'name':            name,
+                'r2_full':         None,
+                'vg_full':         vg,
+                'style_buckets':   sb,
+                'pct_small':       sb.get('Small Cap', 0) or 0,
+                'pct_em':          0,
+                'betas_full':      {},
+                'betas_3factor':   {},
+                't1_skill': None, 't3_skill': None,
+                't5_skill': None, 'si_skill': None,
+                'is_placeholder':  True,
+            })
+        return jsonify({'tab': tab, 'managers': out})
+
     td = state['clone_results'].get(tab, {})
     out = []
     for name, d in td.items():
@@ -1132,83 +1379,32 @@ def portfolio_contribution(client_name):
     Returns manager_return, benchmark_excess, passive_style, skill
     for QTD, T1, T3 for each manager in the client portfolio.
     """
-    import math, pandas as pd
-    from data_loader import (load_factor_returns, get_benchmark,
-                             build_portfolio_view, fuzzy_match)
-    from clone_engine import FACTOR_CATEGORIES, clone_fun
-
     if not state['clone_results']:
         return jsonify({'error': 'No results'})
     if not state['weights'] or client_name not in state['weights']:
         return jsonify({'error': 'Client not found'})
-
-    # Ensure factor_df loaded
-    if state.get('factor_df') is None and 'factor_returns' in state['files']:
-        state['factor_df'] = load_factor_returns(state['files']['factor_returns'])
-
-    fdf = state.get('factor_df')
+    from data_loader import build_portfolio_view
     portfolio = build_portfolio_view(client_name, state['weights'][client_name],
                                      state['clone_results'], state['manager_dfs'],
-                                     universe_clone_results=state.get('universe_clone_results'))
+                                     universe_clone_results=state.get('universe_clone_results'),
+                                     placeholder_buckets=state.get('placeholder_buckets') or {})
+    result = _build_portfolio_contribution_rows(portfolio['managers'])
+    result['unmatched'] = portfolio.get('unmatched', [])
+    return jsonify(result)
 
-    def period_stats(mgr, clone, bench, n):
-        pairs = [(mgr[i], clone[i], bench[i])
-                 for i in range(min(n, len(mgr), len(clone), len(bench)))
-                 if mgr[i] is not None and clone[i] is not None and bench[i] is not None
-                 and not math.isnan(float(mgr[i])) and not math.isnan(float(clone[i]))
-                 and not math.isnan(float(bench[i]))]
-        if len(pairs) < max(1, n // 2):
-            return None, None, None, None
-        m_tot = float(np.prod([1 + p[0] for p in pairs]) - 1)
-        c_tot = float(np.prod([1 + p[1] for p in pairs]) - 1)
-        b_tot = float(np.prod([1 + p[2] for p in pairs]) - 1)
-        nm = len(pairs)
-        if nm >= 12:
-            ann = lambda r: (1 + r) ** (12 / nm) - 1
-            m_tot, c_tot, b_tot = ann(m_tot), ann(c_tot), ann(b_tot)
-        return m_tot, m_tot - b_tot, c_tot - b_tot, m_tot - c_tot
 
-    managers_out = []
-    for m in portfolio['managers']:
-        tab      = m['tab']
-        mgr_name = m['matched_name']
-        weight   = m['current_weight']
-        d        = state['clone_results'].get(tab, {}).get(mgr_name, {})
+@app.route('/portfolio_contribution_preview', methods=['POST'])
+def portfolio_contribution_preview():
+    """Preview contribution tables for a client-edited portfolio payload."""
+    if not state['clone_results']:
+        return jsonify({'error': 'No results'})
 
-        mgr_rets   = d.get('manager_returns', [])
-        clone_rets = d.get('static_clone_full', [])
-        dates      = d.get('dates', [])
+    payload = request.get_json(silent=True) or {}
+    managers = payload.get('managers', [])
+    if not managers:
+        return jsonify({'managers': [], 'unmatched': []})
 
-        # Build benchmark return series aligned to dates
-        bench_name = get_benchmark(tab, mgr_name)
-        bench_rets = []
-        if fdf is not None and bench_name in fdf.columns:
-            for ds in dates:
-                try:
-                    dt = pd.Timestamp(ds)
-                    v  = fdf.loc[dt, bench_name] if dt in fdf.index else None
-                    bench_rets.append(None if (v is None or math.isnan(float(v))) else float(v))
-                except:
-                    bench_rets.append(None)
-        else:
-            bench_rets = [None] * len(dates)
-
-        row = {
-            'name':           mgr_name,
-            'weight':         weight,
-            'benchmark_name': bench_name,
-            'vg_full':        m.get('vg_full', 0),
-        }
-        for label, n in [('qtd', 3), ('t1', 12), ('t3', 36)]:
-            mr, be, ps, sk = period_stats(mgr_rets, clone_rets, bench_rets, n)
-            row[f'{label}_mgr']   = round(mr * 100, 4) if mr is not None else None
-            row[f'{label}_bench'] = round(be * 100, 4) if be is not None else None
-            row[f'{label}_style'] = round(ps * 100, 4) if ps is not None else None
-            row[f'{label}_skill'] = round(sk * 100, 4) if sk is not None else None
-
-        managers_out.append(row)
-
-    return jsonify({'managers': managers_out, 'unmatched': portfolio.get('unmatched', [])})
+    return jsonify(_build_portfolio_contribution_rows(managers))
 
 
 # ── FactSet Risk Summary ──────────────────────────────────────────────────
@@ -1375,10 +1571,10 @@ def upload_risk():
     f = request.files['risk_summary']
     if not f.filename:
         return jsonify({'status': 'error', 'message': 'No filename'})
-    path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(f.filename))
-    f.save(path)
+    path = save_uploaded_file(f, secure_filename(f.filename), app.config['UPLOAD_FOLDER'])
     try:
-        parsed = parse_risk_summary(path)
+        local = resolve_path(path, app.config['UPLOAD_FOLDER'], suffix='.xlsx')
+        parsed = parse_risk_summary(local)
         state['risk_data'] = parsed
         state['files']['risk_summary'] = path
         save_cache()
@@ -1402,8 +1598,7 @@ def upload_security_risk():
     f = request.files['security_risk']
     if not f.filename:
         return jsonify({'status': 'error', 'message': 'Empty filename'})
-    path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(f.filename))
-    f.save(path)
+    path = save_uploaded_file(f, secure_filename(f.filename), app.config['UPLOAD_FOLDER'])
     try:
         from security_risk_engine import parse_security_risk_file
         parsed = parse_security_risk_file(path)
@@ -1825,6 +2020,437 @@ def risk_analysis():
     return jsonify(result)
 
 
+@app.route('/ideal_complement', methods=['POST'])
+def ideal_complement():
+    """
+    Find the manager whose track record best offsets the *proposed* portfolio's
+    underperformance.
+
+    Logic (locked in via user spec):
+      1. Build proposed portfolio monthly returns from clone_results + weights.
+      2. Compute proposed excess vs the client benchmark (same yardstick used
+         for the rest of the report). Find months where excess < 0.
+      3. Eligible candidates = managers whose `tab` matches a peer group with
+         non-zero proposed weight AND who are not already held in the portfolio.
+      4. For each candidate, on the proposed-portfolio-underperformance months
+         that the candidate also has data for: compute
+           - hit_rate  = # months candidate beat the benchmark / # overlap months
+           - avg_excess = mean(candidate_return − benchmark_return) over those months
+      5. Require ≥ 12 overlapping months — anything less is too noisy.
+      6. Rank by hit_rate desc, tiebreak by avg_excess desc. Return the top one
+         along with its full manager metadata so the UI can render it in the
+         portfolio table.
+    """
+    import numpy as np
+    import pandas as pd
+    from risk_engine import (
+        build_return_matrix, build_benchmark_series, portfolio_return_series,
+        PEER_BENCHMARKS, CLIENT_BENCHMARK_OVERRIDE,
+    )
+    from data_loader import load_factor_returns, resolve_peer_group
+
+    if not state['clone_results']:
+        return jsonify({'error': 'Run the clone engine first.'})
+    if state.get('factor_df') is None:
+        if 'factor_returns' not in state['files']:
+            return jsonify({'error': 'Factor returns file missing.'})
+        state['factor_df'] = load_factor_returns(state['files']['factor_returns'])
+
+    payload = request.get_json(silent=True) or {}
+    managers = payload.get('managers', [])
+    client_name = payload.get('client_name')
+    if not managers:
+        return jsonify({'error': 'No managers provided.'})
+
+    # ── 1. Held managers + eligible peer groups (proposed_weight > 0) ─────
+    held_names = set()
+    eligible_tabs = set()
+    proposed_managers = []
+    for m in managers:
+        nm  = m.get('matched_name') or m.get('name', '')
+        tab = m.get('tab')
+        pw  = float(m.get('proposed_weight', 0) or 0)
+        if nm and pw > 0:
+            held_names.add(nm)
+            if tab:
+                eligible_tabs.add(tab)
+                proposed_managers.append({'matched_name': nm, 'tab': tab, 'proposed_weight': pw})
+    if not proposed_managers:
+        return jsonify({'error': 'No managers with proposed weight > 0.'})
+    if not eligible_tabs:
+        return jsonify({'error': 'Cannot determine peer groups from proposed managers.'})
+
+    # ── 2. Resolve client benchmark peer group ────────────────────────────
+    peer_benchmark = None
+    if client_name:
+        bench_str = (state.get('client_benchmarks') or {}).get(client_name)
+        peer_benchmark = resolve_peer_group(bench_str)
+    # Fallback: per-client hardcoded override, else the dominant peer group
+    if not peer_benchmark and client_name in CLIENT_BENCHMARK_OVERRIDE:
+        peer_benchmark = CLIENT_BENCHMARK_OVERRIDE[client_name]
+    if not peer_benchmark:
+        # Pick the tab with the largest proposed weight as the benchmark anchor
+        tab_weights = {}
+        for pm in proposed_managers:
+            tab_weights[pm['tab']] = tab_weights.get(pm['tab'], 0) + pm['proposed_weight']
+        peer_benchmark = max(tab_weights, key=tab_weights.get)
+
+    # ── 3. Proposed portfolio returns + benchmark series ──────────────────
+    ret_mtx = build_return_matrix(proposed_managers, state['clone_results'])
+    if ret_mtx.empty:
+        return jsonify({'error': 'No return data for proposed managers.'})
+
+    bench_df = build_benchmark_series(peer_benchmark, state['factor_df'], ret_mtx.index)
+    if bench_df is None or 'core' not in bench_df.columns:
+        return jsonify({'error': f'Benchmark series unavailable for peer group {peer_benchmark}.'})
+    bench_core = bench_df['core'].dropna()
+
+    weights_dict = {pm['matched_name']: pm['proposed_weight'] for pm in proposed_managers}
+    port_rets = portfolio_return_series(ret_mtx, weights_dict)
+    excess    = (port_rets - bench_core).dropna()
+    under_idx = excess[excess < 0].index
+    if len(under_idx) < 12:
+        return jsonify({
+            'error': f'Proposed portfolio only has {len(under_idx)} underperformance month(s). '
+                     f'Need at least 12 to compute a meaningful complement.',
+            'n_underperform_months': int(len(under_idx)),
+        })
+
+    # ── 4. Score each candidate on the underperformance subset ────────────
+    MIN_OVERLAP = 12
+    candidates = []
+    for tab in eligible_tabs:
+        for cname, cdata in (state['clone_results'].get(tab, {}) or {}).items():
+            if cname in held_names:
+                continue
+            dates  = cdata.get('dates') or []
+            mrets  = cdata.get('manager_returns') or []
+            if not dates or not mrets:
+                continue
+            n = min(len(dates), len(mrets))
+            try:
+                idx = pd.DatetimeIndex(pd.to_datetime(dates[:n]))
+            except Exception:
+                continue
+            cs = pd.Series([float(v) if v is not None and not (isinstance(v, float) and np.isnan(v)) else np.nan
+                            for v in mrets[:n]], index=idx, dtype=float).dropna()
+            cs = cs[~cs.index.duplicated(keep='first')]
+
+            common = cs.index.intersection(under_idx)
+            if len(common) < MIN_OVERLAP:
+                continue
+            cand_on = cs.loc[common]
+            bench_on = bench_core.reindex(common).dropna()
+            common  = cand_on.index.intersection(bench_on.index)
+            if len(common) < MIN_OVERLAP:
+                continue
+            cand_on  = cand_on.loc[common]
+            bench_on = bench_on.loc[common]
+            diff = cand_on - bench_on
+            hit_rate   = float((diff > 0).sum()) / float(len(diff))
+            avg_excess = float(diff.mean())
+
+            ns = _norm_skill_for(tab, cname) or {}
+            candidates.append({
+                'name': cname,
+                'matched_name': cname,
+                'tab': tab,
+                'peer_group': cdata.get('peer_group', tab),
+                'hit_rate': hit_rate,
+                'avg_excess': avg_excess,
+                'n_months': int(len(diff)),
+                'vg_full':     cdata.get('vg_full', 0),
+                'vg_3factor':  cdata.get('vg_3factor', 0),
+                'r2_full':     cdata.get('r2_full', 0),
+                'r2_3factor':  cdata.get('r2_3factor', 0),
+                'style_buckets': cdata.get('style_buckets', {}) or {},
+                'pct_small':   cdata.get('pct_small', 0),
+                'pct_em':      cdata.get('pct_em', 0),
+                'ns_z':        ns.get('z'),
+                'ns_skill':    ns.get('skill'),
+                'ns_n_obs':    ns.get('n_obs'),
+                'ns_n_peers':  ns.get('n_peers'),
+                'current_weight':  0.0,
+                'proposed_weight': 0.0,
+            })
+
+    if not candidates:
+        return jsonify({
+            'error': f'No candidates with at least {MIN_OVERLAP} overlapping underperformance months.',
+            'n_underperform_months': int(len(under_idx)),
+            'eligible_tabs': sorted(eligible_tabs),
+        })
+
+    # ── 5. Rank: hit_rate desc, then avg_excess desc ──────────────────────
+    candidates.sort(key=lambda c: (-c['hit_rate'], -c['avg_excess']))
+    best = candidates[0]
+    return jsonify({
+        'best': best,
+        'n_underperform_months': int(len(under_idx)),
+        'n_candidates_considered': len(candidates),
+        'eligible_tabs': sorted(eligible_tabs),
+        'peer_benchmark': peer_benchmark,
+        'benchmark_name': (PEER_BENCHMARKS.get(peer_benchmark) or {}).get('core'),
+    })
+
+
+@app.route('/portfolio_report/<client_name>')
+def portfolio_report(client_name):
+    """Compose the data the printable Report tab needs for one client.
+    Returns the same shape as the legacy REPORT_MOCK, computed from real
+    clone_results + weights + factor_df. Includes both the backtested
+    portfolio performance series and an Aapryl-factor + FactSet-risk
+    complement pick (in addition to the manager complement)."""
+    import numpy as np
+    import pandas as pd
+    from risk_engine import (
+        build_return_matrix, build_benchmark_series, portfolio_return_series,
+        PEER_BENCHMARKS, CLIENT_BENCHMARK_OVERRIDE,
+    )
+    from data_loader import (
+        build_portfolio_view, load_factor_returns, resolve_peer_group,
+    )
+    from report_engine import (
+        compute_trailing_periods, compute_calendar_years,
+        compute_quarterly_excess, compute_factor_complements,
+        find_inception_date,
+    )
+
+    if not state.get('clone_results'):
+        return jsonify({'error': 'Run the clone engine first.'})
+    if not state.get('weights') or client_name not in state['weights']:
+        return jsonify({'error': f'Client {client_name!r} not found.'})
+
+    # Ensure factor_df is loaded (same lazy pattern as /ideal_complement)
+    if state.get('factor_df') is None:
+        if 'factor_returns' not in state.get('files', {}):
+            return jsonify({'error': 'Factor returns file missing.'})
+        state['factor_df'] = load_factor_returns(state['files']['factor_returns'])
+    factor_df = state['factor_df']
+
+    # ── 1. Resolve managers + weights via the same path /portfolio uses ──
+    portfolio = build_portfolio_view(
+        client_name, state['weights'][client_name],
+        state['clone_results'], state['manager_dfs'],
+        universe_clone_results=state.get('universe_clone_results'),
+        placeholder_buckets=state.get('placeholder_buckets') or {},
+    )
+    managers = [m for m in portfolio.get('managers', [])
+                if not m.get('is_placeholder')
+                and float(m.get('current_weight', 0) or 0) > 0]
+    if not managers:
+        return jsonify({'error': 'Client has no managers with weight data.'})
+
+    # ── 2. Resolve benchmark peer group ──────────────────────────────────
+    bench_str = (state.get('client_benchmarks') or {}).get(client_name) or ''
+    peer_benchmark = resolve_peer_group(bench_str)
+    if not peer_benchmark and client_name in CLIENT_BENCHMARK_OVERRIDE:
+        peer_benchmark = CLIENT_BENCHMARK_OVERRIDE[client_name]
+    if not peer_benchmark:
+        tab_weights = {}
+        for m in managers:
+            t = m.get('tab')
+            if t:
+                tab_weights[t] = tab_weights.get(t, 0) + float(m.get('current_weight', 0) or 0)
+        peer_benchmark = max(tab_weights, key=tab_weights.get) if tab_weights else None
+    if not peer_benchmark:
+        return jsonify({'error': 'Could not resolve a benchmark peer group for this client.'})
+
+    bench_meta = PEER_BENCHMARKS.get(peer_benchmark) or {}
+    benchmark_name = bench_meta.get('core') or bench_str
+
+    # ── 3. Build portfolio + benchmark return series ─────────────────────
+    ret_mtx = build_return_matrix(managers, state['clone_results'])
+    if ret_mtx.empty:
+        return jsonify({'error': 'No return data for portfolio managers.'})
+
+    bench_df = build_benchmark_series(peer_benchmark, factor_df, ret_mtx.index)
+    if bench_df is None or 'core' not in bench_df.columns:
+        return jsonify({'error': f'Benchmark series unavailable for peer group {peer_benchmark}.'})
+
+    weights_dict = {m['matched_name']: float(m.get('current_weight', 0) or 0) for m in managers}
+    port_rets = portfolio_return_series(ret_mtx, weights_dict).dropna()
+    bench_core = bench_df['core'].dropna()
+    # "Clone" series = portfolio return constructed from each manager's static
+    # clone (not the manager's actual returns). Available when static_clone_full
+    # is present in clone_results — same pattern as build_return_matrix's
+    # clone-fallback path, but isolated to the clone-only return.
+    clone_rets = _build_clone_return_series(managers, state['clone_results'], weights_dict)
+
+    perf_periods = compute_trailing_periods(port_rets, bench_core, clone_rets)
+    perf_calendar = compute_calendar_years(port_rets, bench_core, clone_rets, n_years=5)
+    perf_quarterly = compute_quarterly_excess(port_rets, bench_core, clone_rets, n_quarters=21)
+    inception = find_inception_date(port_rets) or '—'
+
+    # ── 4. Manager-side ideal complement (reuse the same logic) ──────────
+    excess = (port_rets - bench_core).dropna()
+    under_idx = excess[excess < 0].index
+    manager_complement = _best_manager_complement(
+        state['clone_results'], managers, under_idx, bench_core, min_overlap=12,
+    )
+
+    # ── 5. Aapryl-factor and FactSet-risk complements ────────────────────
+    aapryl_factors = ['Value', 'Growth', 'Yield', 'Quality', 'Defensive',
+                      'Low Vol', 'Dynamic', 'Momentum']
+    aapryl_complement = compute_factor_complements(
+        port_rets, bench_core, factor_df, aapryl_factors,
+        min_overlap=12, category_label='Aapryl Style Factor',
+    )
+    factset_factors = ['Beta', 'Book to Price', 'Dividend Yield', 'Earnings Yield',
+                       'Growth', 'Leverage', 'Liquidity', 'Momentum',
+                       'Profitability', 'Size', 'Volatility']
+    factset_complement = compute_factor_complements(
+        port_rets, bench_core, factor_df, factset_factors,
+        min_overlap=12, category_label='FactSet Global Risk Factor',
+    )
+
+    n_underperf = int(len(under_idx))
+
+    # ── 6. Holdings + portfolio V-G (pulled from build_portfolio_view) ───
+    holdings_payload = []
+    total_weight = sum(float(m.get('current_weight', 0) or 0) for m in managers)
+    for m in managers:
+        ns = _norm_skill_for(m.get('tab'), m.get('matched_name')) or {}
+        holdings_payload.append({
+            'name':       m.get('matched_name'),
+            'tab':        m.get('tab'),
+            'weight':     float(m.get('current_weight', 0) or 0),
+            'vg_3factor': float(m.get('vg_3factor', 0) or 0),
+            'vg_full':    float(m.get('vg_full', 0) or 0),
+            'ns_z':       ns.get('z'),
+        })
+
+    # Portfolio-level V-G (weighted average over current weights)
+    def _wavg(field):
+        return (sum(float(m.get(field, 0) or 0) * float(m.get('current_weight', 0) or 0)
+                    for m in managers)
+                / total_weight) if total_weight > 0 else 0.0
+    portfolio_vg = {
+        'vg_3factor': _wavg('vg_3factor'),
+        'vg_full':    _wavg('vg_full'),
+    }
+
+    return jsonify({
+        'client':           client_name,
+        'benchmark':        bench_str or benchmark_name,
+        'benchmark_name':   benchmark_name,
+        'peer_benchmark':   peer_benchmark,
+        'as_of':            str(port_rets.index.max().date()) if not port_rets.empty else None,
+        'inception_date':   inception,
+        'n_underperf_months': n_underperf,
+        'managers':         holdings_payload,
+        'portfolio_vg':     portfolio_vg,
+        'perf_backtested': {
+            'name':             'Current Portfolio (Backtested)',
+            'inception_date':   inception,
+            'periods':          perf_periods,
+            'calendar':         perf_calendar,
+            'quarterly_excess': perf_quarterly,
+        },
+        'complements_backtested': {
+            'benchmark_name':       benchmark_name,
+            'n_underperf_months':   n_underperf,
+            'manager':              manager_complement,
+            'aapryl_factor':        aapryl_complement,
+            'factset_risk':         factset_complement,
+        },
+    })
+
+
+def _build_clone_return_series(managers, clone_results, weights_dict):
+    """Synthesize a portfolio return series from each manager's static clone
+    (vs their actual returns). Used in the report to surface 'Portfolio Clone'
+    next to the actual portfolio backtest."""
+    import numpy as np
+    import pandas as pd
+    series_list = []
+    for m in managers:
+        tab = m.get('tab')
+        name = m.get('matched_name')
+        d = (clone_results.get(tab) or {}).get(name, {})
+        dates = d.get('dates') or []
+        clone = d.get('static_clone_full') or []
+        n = min(len(dates), len(clone))
+        if n == 0:
+            continue
+        idx = pd.DatetimeIndex(pd.to_datetime(dates[:n]))
+        vals = [np.nan if v is None or (isinstance(v, float) and np.isnan(v)) else float(v)
+                for v in clone[:n]]
+        s = pd.Series(vals, index=idx, name=name, dtype=float)
+        s = s[~s.index.duplicated(keep='first')]
+        series_list.append(s)
+    if not series_list:
+        return pd.Series(dtype=float)
+    df = pd.concat(series_list, axis=1).sort_index()
+    weights = np.array([weights_dict.get(c, 0) for c in df.columns], dtype=float)
+    s = (df.values * weights).sum(axis=1)
+    # Renormalize per-row by the sum of weights of the non-NaN columns so
+    # months where some clones are missing don't drag the portfolio down.
+    mask = (~np.isnan(df.values)).astype(float)
+    denom = (mask * weights).sum(axis=1)
+    denom = np.where(denom > 0, denom, np.nan)
+    s = np.nansum(df.values * weights, axis=1) / denom
+    return pd.Series(s, index=df.index, dtype=float).dropna()
+
+
+def _best_manager_complement(clone_results, held_managers, under_idx, bench_core, min_overlap=12):
+    """Find the manager with the highest hit rate on portfolio-underperformance
+    months. Restricted to managers from peer-group tabs the portfolio already
+    holds, and excludes managers already in the portfolio."""
+    import numpy as np
+    import pandas as pd
+    if len(under_idx) < min_overlap:
+        return None
+    held_names = {m.get('matched_name') for m in held_managers}
+    eligible_tabs = {m.get('tab') for m in held_managers if m.get('tab')}
+
+    best = None
+    for tab in eligible_tabs:
+        for cname, cdata in (clone_results.get(tab, {}) or {}).items():
+            if cname in held_names:
+                continue
+            dates = cdata.get('dates') or []
+            mrets = cdata.get('manager_returns') or []
+            n = min(len(dates), len(mrets))
+            if n == 0:
+                continue
+            try:
+                idx = pd.DatetimeIndex(pd.to_datetime(dates[:n]))
+            except Exception:
+                continue
+            cs = pd.Series(
+                [float(v) if v is not None and not (isinstance(v, float) and np.isnan(v)) else np.nan
+                 for v in mrets[:n]],
+                index=idx, dtype=float,
+            ).dropna()
+            cs = cs[~cs.index.duplicated(keep='first')]
+            common = cs.index.intersection(under_idx)
+            if len(common) < min_overlap:
+                continue
+            cand_on = cs.loc[common]
+            bench_on = bench_core.reindex(common).dropna()
+            common = cand_on.index.intersection(bench_on.index)
+            if len(common) < min_overlap:
+                continue
+            diff = cand_on.loc[common] - bench_on.loc[common]
+            hit = float((diff > 0).sum()) / float(len(diff))
+            avg = float(diff.mean())
+            ns = _norm_skill_for(tab, cname) or {}
+            rec = {
+                'name':       cname,
+                'tab':        tab,
+                'vg_3factor': cdata.get('vg_3factor', 0),
+                'vg_full':    cdata.get('vg_full', 0),
+                'ns_z':       ns.get('z'),
+                'hit_rate':   hit,
+                'avg_excess': avg,
+                'n_months':   int(len(diff)),
+            }
+            if best is None or (rec['hit_rate'], rec['avg_excess']) > (best['hit_rate'], best['avg_excess']):
+                best = rec
+    return best
+
+
 # ── Market Cycle chart endpoint ───────────────────────────────────────────
 # Map each peer tab to its core benchmark for downside-capture comparisons.
 MARKET_CYCLE_BENCH = {
@@ -2173,11 +2799,11 @@ def upload_exposures():
     if not f:
         return jsonify({'status': 'error', 'message': 'No file provided.'})
     fname = secure_filename(f.filename)
-    path  = os.path.join(app.config['UPLOAD_FOLDER'], fname)
-    f.save(path)
+    path  = save_uploaded_file(f, fname, app.config['UPLOAD_FOLDER'])
     state['files']['exposures'] = path
     try:
-        data = parse_exposures_file(path)
+        local = resolve_path(path, app.config['UPLOAD_FOLDER'], suffix='.xlsx')
+        data = parse_exposures_file(local)
         state['exposures_data'] = data
         save_cache()
         return jsonify({
@@ -2254,6 +2880,137 @@ def portfolio_exposures():
     return jsonify(result)
 
 
+@app.route('/optimize_portfolio', methods=['POST'])
+def optimize_portfolio_endpoint():
+    """Run a MILP optimization to find the buy-list portfolio that
+    maximizes weighted norm skill subject to user constraints.
+
+    Request JSON:
+      {
+        "client_name": "Client 1",            # used to resolve peer group if not given
+        "peer_group": "EAFE",                 # optional; resolved from client if omitted
+        "forced_managers": [
+          {"name": "...", "tab": "EAFE", "weight": 0.15},
+          ...
+        ],
+        # optional overrides — all default to the user's spec
+        "min_weight": 0.05, "max_weight": 0.20,
+        "min_managers": 4, "max_managers": 8,
+        "vg_band": 0.07, "vg_center": 0.0
+      }
+
+    Candidates are restricted to the buy list of `peer_group` only.
+    Forced managers may come from any peer-group tab on the buy list.
+    """
+    from portfolio_optimizer import optimize_portfolio
+    from data_loader import resolve_peer_group
+    from risk_engine import CLIENT_BENCHMARK_OVERRIDE
+
+    if not state['clone_results']:
+        return jsonify({'status': 'error', 'error': 'Run the clone engine first.'})
+
+    payload = request.get_json(silent=True) or {}
+    client_name = payload.get('client_name')
+    peer_group  = payload.get('peer_group')
+    forced      = payload.get('forced_managers') or []
+
+    # ── Resolve peer group from client benchmark if not provided ─────────
+    if not peer_group and client_name:
+        bench = (state.get('client_benchmarks') or {}).get(client_name)
+        peer_group = resolve_peer_group(bench) if bench else None
+        if not peer_group and client_name in CLIENT_BENCHMARK_OVERRIDE:
+            peer_group = CLIENT_BENCHMARK_OVERRIDE[client_name]
+
+    # ── Map benchmark-side pseudo peer groups to actual buy-list tabs ────
+    # resolve_peer_group may return 'EAFE_SC' or 'ACWI_xUS', which are used
+    # for benchmark/risk routing but are NOT buy-list tabs. Translate:
+    BENCH_TO_BUYLIST = {
+        'EAFE_SC':  'ISC',   # MSCI EAFE SC / World ex-US SC → ISC buy list
+        'ACWI_xUS': 'EAFE',  # MSCI ACWI ex-US → EAFE buy list (developed-ex-US managers)
+    }
+    if peer_group in BENCH_TO_BUYLIST:
+        peer_group = BENCH_TO_BUYLIST[peer_group]
+
+    if not peer_group:
+        return jsonify({
+            'status': 'error',
+            'error': 'Cannot resolve peer group for the optimizer. '
+                     'Specify peer_group explicitly or ensure the client has a benchmark.'
+        })
+
+    if peer_group not in (state.get('clone_results') or {}):
+        return jsonify({
+            'status': 'error',
+            'error': f'No buy-list managers found for peer group "{peer_group}".'
+        })
+
+    # ── Optional constraint overrides (with sane fallbacks) ──────────────
+    def _f(k, d):
+        try:
+            v = payload.get(k)
+            return float(v) if v is not None else d
+        except (TypeError, ValueError):
+            return d
+    def _i(k, d):
+        try:
+            v = payload.get(k)
+            return int(v) if v is not None else d
+        except (TypeError, ValueError):
+            return d
+
+    result = optimize_portfolio(
+        peer_group=peer_group,
+        forced_managers=forced,
+        clone_results=state['clone_results'],
+        norm_skill_by_tab=state.get('norm_skill_by_tab') or {},
+        min_weight=_f('min_weight', 0.05),
+        max_weight=_f('max_weight', 0.20),
+        min_managers=_i('min_managers', 4),
+        max_managers=_i('max_managers', 8),
+        vg_band=_f('vg_band', 0.07),
+        vg_center=_f('vg_center', 0.0),
+    )
+
+    # Surface the peer group used (in case it was resolved server-side)
+    result['peer_group'] = peer_group
+    return jsonify(result)
+
+
+@app.route('/optimize_candidates/<peer_group>')
+def optimize_candidates(peer_group):
+    """List the buy-list managers eligible as forced inputs for the optimizer.
+    Returns ALL buy-list managers across all peer-group tabs (so the user can
+    force, e.g., an ISC manager into an EAFE optimization).
+
+    Filtered to only include managers with a norm-skill score so the user
+    sees what's actually usable. (Forced managers without a score are still
+    permitted server-side, but we don't surface them in the picker.)
+    """
+    if not state['clone_results']:
+        return jsonify({'candidates': []})
+    ns = state.get('norm_skill_by_tab') or {}
+    out = []
+    for tab, mgrs in (state.get('clone_results') or {}).items():
+        ns_tab = ns.get(tab, {}) or {}
+        for name, d in mgrs.items():
+            rec = {
+                'name':      name,
+                'tab':       tab,
+                'vg_3factor': d.get('vg_3factor'),
+                'vg_full':    d.get('vg_full'),
+                'ns_z':       (ns_tab.get(name) or {}).get('z'),
+                'r2_full':    d.get('r2_full'),
+            }
+            out.append(rec)
+    # Sort: same peer group first (when peer_group matches), then by name
+    out.sort(key=lambda r: (r['tab'] != peer_group, r['tab'], r['name'].lower()))
+    return jsonify({'candidates': out, 'peer_group': peer_group})
+
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5050, debug=False)
+    # Direct entry point. The canonical launcher is `python run.py` (port 3001
+    # + dependency check + browser auto-open). This block only fires when
+    # someone does `python app.py` directly — keep the port consistent so
+    # behaviour matches.
+    app.run(host='0.0.0.0', port=3001, debug=False)
 

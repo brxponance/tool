@@ -227,49 +227,27 @@ def _place_relative_value(v_pct):
     return 'Relative Value 3'  # 0.66–0.746
 
 
-def classify_peer_group(buy_list_managers, universe_clone_results,
-                        factor_df, bench_map):
-    """
-    Main entry point. Classifies buy-list managers in a given peer tab to
-    one of the 18 market-cycle buckets.
+def precompute_universe_state(universe_clone_results, peer_tab,
+                              factor_df, bench_map):
+    """Precompute the universe-side classification state for a peer tab.
+    Result is a dict with v/q scores, percentiles, initial buckets,
+    downside-capture map, defensive assignments, and the per-bucket Growth
+    rank universes that classify_peer_group needs.
 
-    Args:
-        buy_list_managers: list of {name, tab, style_buckets, manager_returns,
-            dates, static_clone_full, betas_full} — one per buy-list manager
-            in this peer tab
-        universe_clone_results: state['universe_clone_results'] nested dict
-        factor_df: factor returns DataFrame (needed for downside capture)
-        bench_map: dict {tab: core_benchmark_name}
-
-    Returns: {mgr_name: {'bucket': '...', 'x': 0.xx, 'v_vs_g': ..., 'q_vs_d': ...,
-                          'v_pct': ..., 'q_pct': ..., 'downside_capture': ...,
-                          'initial_bucket': '...'}}
-        Empty dict if the universe for this tab isn't available.
-    """
-    if not buy_list_managers:
-        return {}
-    peer_tab = buy_list_managers[0]['tab']
+    The heavy cost here is `ten_year_downside_capture` which runs O(N)
+    pandas ops over every defensive-eligible universe manager. For US/EAFE
+    that's thousands of managers × 5–20 ms per call, dominating /market_cycle
+    response time. Callers should cache the returned dict — it depends only
+    on (universe_clone_results, peer_tab, factor_df, bench_map[peer_tab])
+    and is invariant across buy-list weight tweaks."""
     if peer_tab not in universe_clone_results or not universe_clone_results[peer_tab]:
-        return {}
+        return None
 
     # Build universe scores
     uni_v, uni_q = build_universe_scores(universe_clone_results, peer_tab)
     uni_v_vals = list(uni_v.values())
     uni_q_vals = list(uni_q.values())
 
-    # Ensure buy-list managers are also in the ranking universe
-    # (add them if not already present in the universe file)
-    for m in buy_list_managers:
-        name = m['name']
-        if name not in uni_v:
-            v, q = compute_scores(m.get('style_buckets', {}))
-            uni_v[name] = v
-            uni_q[name] = q
-            uni_v_vals.append(v)
-            uni_q_vals.append(q)
-
-    # Median Q-vs-D percentile within the Core universe group — used to split
-    # Core into Core Quality vs GARP. Compute percentiles first, then filter.
     uni_percentiles = {}
     for name, v in uni_v.items():
         q = uni_q[name]
@@ -279,17 +257,13 @@ def classify_peer_group(buy_list_managers, universe_clone_results,
     core_qs = [qp for (vp, qp) in uni_percentiles.values() if 0.34 <= vp < 0.67]
     core_q_median = float(np.median(core_qs)) if core_qs else 0.5
 
-    # Assign initial buckets to the entire universe (needed for Defensive step
-    # and for sub-bucket percentile ranking within the universe Growth groups)
     uni_initial = {}
     for name, (vp, qp) in uni_percentiles.items():
         uni_initial[name] = classify_initial_bucket(vp, qp, core_q_median)
 
-    # Compute 10-year downside capture for Defensive-eligible universe managers
-    # (Relative Value, Core Quality, Core Growth) so we can percentile-rank it.
     core_bench = bench_map.get(peer_tab)
     defensive_eligible = {'Relative Value', 'Core Quality', 'Core Growth'}
-    uni_dc = {}  # name -> downside capture, restricted to defensive-eligible
+    uni_dc = {}
     for name, init in uni_initial.items():
         if init not in defensive_eligible:
             continue
@@ -307,50 +281,140 @@ def classify_peer_group(buy_list_managers, universe_clone_results,
             uni_dc[name] = dc
 
     dc_vals = list(uni_dc.values())
-    # Defensive assignments within the universe
     uni_is_defensive = {}
     for name, dc in uni_dc.items():
         init = uni_initial[name]
         dc_pct = percentile_rank(dc, dc_vals)
         if init == 'Core Quality':
             uni_is_defensive[name] = (dc_pct < 0.50, dc_pct)
-        else:  # Relative Value or Core Growth
+        else:
             uni_is_defensive[name] = (dc_pct < (1.0 / 3.0), dc_pct)
-    # Defensive sub-bucket terciles — compute rank within defensive-only
     defensive_names = [n for n, (is_d, _) in uni_is_defensive.items() if is_d]
     defensive_dcs = [uni_dc[n] for n in defensive_names]
 
-    # Sub-bucket percentile rank inputs. "GARP + Core Quality (non-defensive)"
-    # and "Core Growth (non-defensive)" and "High Growth" are ranked by their
-    # Growth bucket exposure.
-    def growth_of(name, d_source):
-        """Look up growth bucket for a manager — d_source maps name -> d."""
-        d = d_source.get(name, {})
-        return _safe_bucket(d.get('style_buckets', {}), 'Growth')
-
     uni_products = universe_clone_results[peer_tab]
+    def _growth_of(name):
+        return _safe_bucket(uni_products.get(name, {}).get('style_buckets', {}), 'Growth')
     garp_core_universe = {
-        n: growth_of(n, uni_products) for n in uni_initial
+        n: _growth_of(n) for n in uni_initial
         if uni_initial[n] in ('GARP', 'Core Quality')
         and not uni_is_defensive.get(n, (False, None))[0]
     }
     core_growth_universe = {
-        n: growth_of(n, uni_products) for n in uni_initial
+        n: _growth_of(n) for n in uni_initial
         if uni_initial[n] == 'Core Growth'
         and not uni_is_defensive.get(n, (False, None))[0]
     }
     high_growth_universe = {
-        n: growth_of(n, uni_products) for n in uni_initial
+        n: _growth_of(n) for n in uni_initial
         if uni_initial[n] == 'High Growth'
     }
+
+    return {
+        'uni_v': uni_v, 'uni_q': uni_q,
+        'uni_v_vals': uni_v_vals, 'uni_q_vals': uni_q_vals,
+        'uni_percentiles':      uni_percentiles,
+        'core_q_median':        core_q_median,
+        'uni_initial':          uni_initial,
+        'uni_dc':               uni_dc,
+        'dc_vals':              dc_vals,
+        'uni_is_defensive':     uni_is_defensive,
+        'defensive_dcs':        defensive_dcs,
+        'garp_core_universe':   garp_core_universe,
+        'core_growth_universe': core_growth_universe,
+        'high_growth_universe': high_growth_universe,
+        'core_bench':           core_bench,
+        'defensive_eligible':   defensive_eligible,
+    }
+
+
+def classify_peer_group(buy_list_managers, universe_clone_results,
+                        factor_df, bench_map, universe_state=None):
+    """
+    Main entry point. Classifies buy-list managers in a given peer tab to
+    one of the 18 market-cycle buckets.
+
+    Args:
+        buy_list_managers: list of {name, tab, style_buckets, manager_returns,
+            dates, static_clone_full, betas_full} — one per buy-list manager
+            in this peer tab
+        universe_clone_results: state['universe_clone_results'] nested dict
+        factor_df: factor returns DataFrame (needed for downside capture)
+        bench_map: dict {tab: core_benchmark_name}
+        universe_state: optional precomputed dict from precompute_universe_state.
+            Pass this on every UI weight-tweak refresh so the universe-side
+            O(N) downside-capture loop only runs once per universe-clone run.
+
+    Returns: {mgr_name: {'bucket': '...', 'x': 0.xx, 'v_vs_g': ..., 'q_vs_d': ...,
+                          'v_pct': ..., 'q_pct': ..., 'downside_capture': ...,
+                          'initial_bucket': '...'}}
+        Empty dict if the universe for this tab isn't available.
+    """
+    if not buy_list_managers:
+        return {}
+    peer_tab = buy_list_managers[0]['tab']
+    if peer_tab not in universe_clone_results or not universe_clone_results[peer_tab]:
+        return {}
+
+    if universe_state is None:
+        universe_state = precompute_universe_state(
+            universe_clone_results, peer_tab, factor_df, bench_map)
+        if universe_state is None:
+            return {}
+
+    uni_v                = universe_state['uni_v']
+    uni_q                = universe_state['uni_q']
+    uni_v_vals           = universe_state['uni_v_vals']
+    uni_q_vals           = universe_state['uni_q_vals']
+    uni_percentiles      = universe_state['uni_percentiles']
+    core_q_median        = universe_state['core_q_median']
+    dc_vals              = universe_state['dc_vals']
+    defensive_dcs        = universe_state['defensive_dcs']
+    garp_core_universe   = universe_state['garp_core_universe']
+    core_growth_universe = universe_state['core_growth_universe']
+    high_growth_universe = universe_state['high_growth_universe']
+    core_bench           = universe_state['core_bench']
+    defensive_eligible   = universe_state['defensive_eligible']
+
+    # Ensure buy-list managers participate in the V/Q ranking universe even
+    # when they're not in the universe file. Fold them in lazily here so the
+    # cached universe_state stays untouched (and reusable next call).
+    buy_list_v = {}
+    buy_list_q = {}
+    extra_v_vals = list(uni_v_vals)
+    extra_q_vals = list(uni_q_vals)
+    for m in buy_list_managers:
+        name = m['name']
+        if name not in uni_v:
+            v, q = compute_scores(m.get('style_buckets', {}))
+            buy_list_v[name] = v
+            buy_list_q[name] = q
+            extra_v_vals.append(v)
+            extra_q_vals.append(q)
+    # If any buy-list managers were added, recompute their percentiles
+    # against the augmented vals; everyone else's percentile is unchanged
+    # (adding a handful of points to a 3K-element universe shifts ranks
+    # negligibly, so we don't recompute existing percentiles).
+    extra_percentiles = {}
+    if buy_list_v:
+        for name, v in buy_list_v.items():
+            extra_percentiles[name] = (
+                percentile_rank(v, extra_v_vals),
+                percentile_rank(buy_list_q[name], extra_q_vals),
+            )
 
     # ── Now classify each buy-list manager ────────────────────────────────
     results = {}
     for m in buy_list_managers:
         name = m['name']
         v_raw, q_raw = compute_scores(m.get('style_buckets', {}))
-        v_pct = uni_percentiles[name][0] if name in uni_percentiles else percentile_rank(v_raw, uni_v_vals)
-        q_pct = uni_percentiles[name][1] if name in uni_percentiles else percentile_rank(q_raw, uni_q_vals)
+        if name in uni_percentiles:
+            v_pct, q_pct = uni_percentiles[name]
+        elif name in extra_percentiles:
+            v_pct, q_pct = extra_percentiles[name]
+        else:
+            v_pct = percentile_rank(v_raw, uni_v_vals)
+            q_pct = percentile_rank(q_raw, uni_q_vals)
 
         initial = classify_initial_bucket(v_pct, q_pct, core_q_median)
 

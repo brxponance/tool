@@ -41,7 +41,24 @@ SLEEVE_EM    = 'EM'
 
 
 def classify_country(country: str, has_em_sleeve: bool = False):
-    """Return (region_label, flag_or_None)."""
+    """Return (region_label, flag_or_None) for routing a security into
+    one of the sleeve buckets.
+
+    `has_em_sleeve` describes the BREAKDOWN, not the current selection: it
+    is True whenever the parent benchmark has an EM sleeve option (3-way
+    US/Non-US Dev/EM split, e.g. ACWI / ACWI ex-US / ACWI ex-US SC) and
+    False for 2-way US/Non-US splits (e.g. MSCI World). Passing the
+    current sleeve here would silently route EM stocks into Non-US Dev
+    when the user picks the Non-US Dev sleeve — that's the bug we're
+    fixing. The classifier returns the *correct* destination sleeve
+    regardless of which sleeve the user is currently filtering to.
+
+    Routing rules:
+      US country               -> US sleeve.
+      EAFE Developed + Canada  -> Non-US Dev sleeve.
+      Listed EM country        -> EM if 3-way; else lumped into Non-US.
+      Unclassified non-US      -> EM if 3-way; else lumped into Non-US.
+    """
     if not country or country.strip() in ('--', ''):
         return None, None
     c = country.strip()
@@ -51,13 +68,29 @@ def classify_country(country: str, has_em_sleeve: bool = False):
     if c in _EM:
         if has_em_sleeve:   return SLEEVE_EM, None
         return SLEEVE_NONUS, f'{c} is EM — included in Non-US (no EM sleeve)'
-    flag = f'{c} not in standard classification — treated as Non-US/EM'
+    flag = f'{c} not in standard classification — treated as {"EM" if has_em_sleeve else "Non-US"}'
     if has_em_sleeve:       return SLEEVE_EM, flag
     return SLEEVE_NONUS, flag
 
 
+def _norm_bench(s):
+    """Normalize a benchmark name for cross-file matching.
+    Strips punctuation (`+ - / , .`) and collapses whitespace, then
+    canonicalises 'Small Cap' → 'sc' so 'MSCI EAFE Small Cap' and 'MSCI
+    EAFE SC' resolve to the same key. Used both for _SLEEVES lookups and
+    for matching client benchmark strings against the available column
+    list in the uploaded risk file."""
+    t = re.sub(r'[\s\+\-/,\.]+', ' ', (s or '').lower()).strip()
+    t = re.sub(r'\bsmall\s+cap\b', 'sc', t)
+    return re.sub(r'\s+', ' ', t).strip()
+
+
 # ── Sleeve options per benchmark ─────────────────────────────────────────
 # (display_label, sleeve_constant, preferred_bench_key)
+# IMPORTANT: keys MUST be in `_norm_bench` form so that any spelling
+# variation in the weights file ('MSCI EAFE+CANADA', 'MSCI EAFE + Canada',
+# 'MSCI EAFE+Canada', etc.) resolves to the same entry. Don't add a key
+# with raw hyphens, plus signs, or 'Small Cap' — those won't match.
 _SLEEVES = {
     'msci world': [
         ('Full Portfolio',                None,        'MSCI World'),
@@ -70,28 +103,28 @@ _SLEEVES = {
         ('Non-US Dev vs MSCI EAFE + Canada', SLEEVE_NONUS,'MSCI EAFE + Canada'),
         ('EM vs MSCI EM',                    SLEEVE_EM,   'MSCI EM'),
     ],
-    'msci acwi ex-us': [
+    'msci acwi ex us': [
         ('Full Portfolio',                   None,        'MSCI ACWI ex-US'),
         ('Non-US Dev vs MSCI EAFE + Canada', SLEEVE_NONUS,'MSCI EAFE + Canada'),
         ('EM vs MSCI EM',                    SLEEVE_EM,   'MSCI EM'),
     ],
-    'msci eafe + canada': [
-        ('Full Portfolio', None, 'MSCI EAFE + Canada'),
+    # ACWI ex-US Small Cap variant. Same regional split logic as ACWI ex-US
+    # but with SC-specific benchmark targets. The EM SC option only renders
+    # if the benchmark column is actually present in the uploaded risk
+    # file — get_sleeve_options filters by `avail_norm` — so users without
+    # an 'MSCI EM SC' column will see Full + Non-US SC only.
+    'msci acwi ex us sc': [
+        ('Full Portfolio',                       None,         'MSCI ACWI ex-US SC'),
+        ('Non-US Dev SC vs MSCI World ex-US SC', SLEEVE_NONUS, 'MSCI World ex US SC'),
+        ('EM SC vs MSCI EM SC',                  SLEEVE_EM,    'MSCI EM SC'),
     ],
-    'msci eafe+canada': [
-        ('Full Portfolio', None, 'MSCI EAFE + Canada'),
-    ],
-    'msci eafe sc':        [('Full Portfolio', None, 'MSCI EAFE Small Cap')],
-    'msci eafe small cap': [('Full Portfolio', None, 'MSCI EAFE Small Cap')],
-    'msci eafe':           [('Full Portfolio', None, 'MSCI EAFE')],
-    'msci em':             [('Full Portfolio', None, 'MSCI EM')],
-    'russell 1000':        [('Full Portfolio', None, 'Russell 1000')],
-    'russell 2000':        [('Full Portfolio', None, 'Russell 2000')],
+    'msci eafe canada': [('Full Portfolio', None, 'MSCI EAFE + Canada')],
+    'msci eafe sc':     [('Full Portfolio', None, 'MSCI EAFE Small Cap')],
+    'msci eafe':        [('Full Portfolio', None, 'MSCI EAFE')],
+    'msci em':          [('Full Portfolio', None, 'MSCI EM')],
+    'russell 1000':     [('Full Portfolio', None, 'Russell 1000')],
+    'russell 2000':     [('Full Portfolio', None, 'Russell 2000')],
 }
-
-
-def _norm_bench(s):
-    return re.sub(r'[\s\+\-]+', ' ', (s or '').lower()).strip()
 
 
 def get_sleeve_options(client_bench_str: str, available_benchmarks: list) -> list:
@@ -194,26 +227,81 @@ def parse_security_risk_file(filepath: str) -> dict:
 
 # ── Name matching ─────────────────────────────────────────────────────────
 def _norm_name(s):
+    """Normalise a manager name for matching across files. Strips
+    regional descriptors ('EAFE', 'Canada', 'xUS', etc.) and generic
+    style/wrapper words but PRESERVES the size sleeve marker (sc/lc/mc).
+    Reason: previously stripping 'sc' and 'small cap' caused 'CastleArk
+    EAFE + Canada SC' and 'CastleArk EAFE + Canada' to collapse to the
+    same key — the LC sleeve then silently overwrote the SC sleeve in
+    the lookup dict, swapping in the wrong portfolio's exposures and
+    flipping sign on the Size factor for SC clients."""
     s = str(s).lower().strip()
     s = re.sub(r'\([^)]*\)', '', s)
-    s = re.sub(r'[\./\-_,]+', ' ', s)
-    for sfx in ['eafe sc','eafe small cap','us lc','us sc','us','eafe',
-                'global','isc','em','equity','composite','strategy',
-                'growth','value','core','sc','lc','international',
-                'small cap','large cap']:
-        s = re.sub(r'\b' + re.escape(sfx) + r'\b', '', s)
+    # Treat +/-/./_/,/space combos as separators (handles 'EAFE+Canada'
+    # vs 'EAFE + Canada' uniformly).
+    s = re.sub(r'[\./\-_,\+]+', ' ', s)
+    # Canonicalise size markers BEFORE stripping anything else
+    s = re.sub(r'\bsmall\s+cap\b', 'sc', s)
+    s = re.sub(r'\blarge\s+cap\b', 'lc', s)
+    s = re.sub(r'\bmid\s+cap\b',   'mc', s)
+    # Compound region+size shorthand. 'ISC' = International Small Cap,
+    # 'USSC' = US Small Cap — both encode the SC sleeve. Keeping them as
+    # raw tokens caused 'Ballina ISC' to lose its size signal during
+    # region stripping and silently match the LC sleeve in the risk file.
+    s = re.sub(r'\bisc\b',  'sc', s)
+    s = re.sub(r'\bussc\b', 'sc', s)
+    # Strip regional / geographic descriptors only — never size words
+    for region in ['international', 'eafe', 'acwi', 'em', 'us', 'usa',
+                   'world', 'global', 'xus', 'ex', 'non', 'canada']:
+        s = re.sub(r'\b' + re.escape(region) + r'\b', '', s)
+    # Strip generic wrapper / style words
+    for generic in ['composite', 'portfolio', 'strategy', 'fund',
+                    'equity', 'equities', 'growth', 'value', 'blend', 'core']:
+        s = re.sub(r'\b' + re.escape(generic) + r'\b', '', s)
     return re.sub(r'\s+', ' ', s).strip()
 
 
 def _match_mgr(weight_name: str, security_names: list) -> Optional[str]:
+    """Map a weights-file manager name to the corresponding column in the
+    security risk file. When several file rows share a normalised key
+    (e.g. 'Hillsdale xUS SC' and 'Hillsdale EAFE + Canada SC' both norm
+    to 'hillsdale sc'), break ties on full-string similarity to the
+    weights name — picks the EAFE+Canada variant for 'Hillsdale EAFE SC'
+    and the xUS variant for 'Hillsdale xUS SC'."""
     wn = _norm_name(weight_name)
-    by_norm = {_norm_name(n): n for n in security_names}
-    if wn in by_norm: return by_norm[wn]
+    # Group candidates by normalised key — keep ALL collisions so we can
+    # tiebreak rather than silently overwriting like the previous dict
+    # comprehension did.
+    by_norm: dict = {}
+    for n in security_names:
+        by_norm.setdefault(_norm_name(n), []).append(n)
+
+    def _best_of(originals):
+        if len(originals) == 1:
+            return originals[0]
+        # Tiebreak by original-word-token overlap. WRatio fuzzy didn't
+        # always pick the right candidate when the normalised key collapses
+        # multiple sleeves: 'Hillsdale EAFE Small Cap' (weights) vs
+        # 'Hillsdale xUS SC' AND 'Hillsdale EAFE + Canada SC' (file) is the
+        # canonical case. Counting how many original word-tokens each
+        # candidate shares with the weights name picks the EAFE+Canada
+        # variant cleanly because it shares 'eafe' with the weights name.
+        wt_tokens = set(re.split(r'[\s\+\-\.,/]+', weight_name.lower()))
+        wt_tokens.discard('')
+        ranked = sorted(
+            originals,
+            key=lambda o: -len(set(re.split(r'[\s\+\-\.,/]+', o.lower())) & wt_tokens),
+        )
+        return ranked[0]
+
+    if wn in by_norm:
+        return _best_of(by_norm[wn])
     try:
         from rapidfuzz import process, fuzz
         m = process.extractOne(wn, list(by_norm.keys()),
                                scorer=fuzz.WRatio, score_cutoff=70)
-        if m: return by_norm[m[0]]
+        if m:
+            return _best_of(by_norm[m[0]])
     except ImportError:
         pass
     return None
@@ -236,8 +324,16 @@ def compute_exposures(
     security_data: dict,
     benchmark_name: Optional[str],
     sleeve: Optional[str] = None,
+    has_em_sleeve: Optional[bool] = None,
 ) -> dict:
     """Compute current + proposed active style exposures.
+
+    `has_em_sleeve` reflects the breakdown context (does the parent
+    benchmark have a 3-way US/Non-US Dev/EM split?), not the user's
+    current selection. When None, defaults to `sleeve == 'EM'` for
+    backwards compat with old call sites — but new callers should pass
+    it explicitly to get correct routing for Non-US Dev sleeves in 3-way
+    breakdowns.
 
     Returns same schema as /compute_risk_exposures (manager-level path) so
     the existing renderRiskExposures() function works without changes.
@@ -246,15 +342,23 @@ def compute_exposures(
     mgr_data   = security_data.get('managers', {})
     bench_abs  = (security_data.get('benchmarks', {}).get(benchmark_name) or {}) \
                  if benchmark_name else {}
-    has_em     = (sleeve == SLEEVE_EM)
+    if has_em_sleeve is None:
+        has_em_sleeve = (sleeve == SLEEVE_EM)
+    has_em     = has_em_sleeve
     sec_names  = list(mgr_data.keys())
 
     def compute_side(weight_key: str):
-        totals   = {f: 0.0 for f in factors}
-        sleeve_w = 0.0
-        total_cw = sum(max(m.get(weight_key, 0) or 0, 0) for m in portfolio_managers)
+        totals      = {f: 0.0 for f in factors}
+        sleeve_w    = 0.0
+        # Portfolio-wide weight in stocks whose country tag is missing or
+        # '--'. Surfaced separately in the response so the UI can explain
+        # why summed sleeve coverage falls short of 100%. Computed even in
+        # Full Portfolio mode (sleeve=None) because the user may want to
+        # know the total no-country drag regardless of split.
+        no_country_w = 0.0
+        total_cw    = sum(max(m.get(weight_key, 0) or 0, 0) for m in portfolio_managers)
         if total_cw <= 0:
-            return {f: None for f in factors}, [], 0.0, set()
+            return {f: None for f in factors}, [], 0.0, set(), 0.0
 
         unmatched = []
         flags     = set()
@@ -262,11 +366,30 @@ def compute_exposures(
         for m in portfolio_managers:
             cw = m.get(weight_key, 0) or 0
             if cw <= 0: continue
-            mgr_key = _match_mgr(m.get('matched_name') or m.get('name', ''), sec_names)
+            # Prefer weight_file_name for matching — it's the original
+            # weights-file label ('Mac Alpha EAFE + Canada SC') and carries
+            # sleeve-specific info that the buy-list matched_name often
+            # loses (e.g. 'Mac Alpha' alone). matched_name remains the
+            # canonical key for clone_results/norm_skill lookups elsewhere.
+            match_input = (m.get('weight_file_name')
+                           or m.get('matched_name')
+                           or m.get('name', ''))
+            mgr_key = _match_mgr(match_input, sec_names)
             if mgr_key is None:
                 unmatched.append(m.get('matched_name') or m.get('name', '?'))
                 continue
             all_stocks = mgr_data.get(mgr_key, [])
+            if not all_stocks:
+                continue
+
+            mgr_total = sum(s['weight'] for s in all_stocks) or 1
+            # No-country accounting (independent of sleeve filter)
+            no_country_stocks_w = sum(
+                s['weight'] for s in all_stocks
+                if not s.get('country')
+                or str(s.get('country')).strip() in ('--', '')
+            )
+            no_country_w += (cw / total_cw) * (no_country_stocks_w / mgr_total)
 
             if sleeve is not None:
                 stocks = []
@@ -280,7 +403,6 @@ def compute_exposures(
             if not stocks: continue
 
             if sleeve is not None:
-                mgr_total = sum(s['weight'] for s in all_stocks) or 1
                 contrib   = (cw / total_cw) * (sum(s['weight'] for s in stocks) / mgr_total)
             else:
                 contrib   = cw / total_cw
@@ -291,11 +413,11 @@ def compute_exposures(
                 if f in ma: totals[f] += contrib * ma[f]
 
         if sleeve_w <= 0:
-            return {f: None for f in factors}, unmatched, 0.0, flags
-        return {f: totals[f] / sleeve_w for f in factors}, unmatched, sleeve_w, flags
+            return {f: None for f in factors}, unmatched, 0.0, flags, no_country_w
+        return {f: totals[f] / sleeve_w for f in factors}, unmatched, sleeve_w, flags, no_country_w
 
-    cur_abs,  unc_cur,  cur_sw,  cur_flags  = compute_side('current_weight')
-    prop_abs, unc_prop, prop_sw, prop_flags = compute_side('proposed_weight')
+    cur_abs,  unc_cur,  cur_sw,  cur_flags,  cur_nc  = compute_side('current_weight')
+    prop_abs, unc_prop, prop_sw, prop_flags, prop_nc = compute_side('proposed_weight')
 
     def to_active(abs_vals):
         return {f: round(abs_vals[f] - bench_abs[f], 4)
@@ -322,8 +444,16 @@ def compute_exposures(
             'available_columns': security_data.get('available_benchmarks', []),
         },
         'sleeve_info': {
-            'sleeve':   sleeve,
-            'sleeve_wt': round(cur_sw, 4),
+            'sleeve':         sleeve,
+            'sleeve_wt':      round(cur_sw, 4),
+            'sleeve_wt_proposed': round(prop_sw, 4),
+            # Portfolio-wide weight in stocks whose country tag is missing
+            # in the FactSet export (typically cash, ADRs, or derivatives).
+            # The sum of sleeve coverages won't reach 100% by exactly this
+            # amount; surfaced so the UI can render an explicit accounting
+            # line for the user.
+            'no_country_wt':           round(cur_nc, 4),
+            'no_country_wt_proposed':  round(prop_nc, 4),
             'flags':     sorted(cur_flags | prop_flags),
         },
     }

@@ -1,0 +1,108 @@
+﻿<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <!--my domain-->
+    <base href="/oa/" />
+    <script src="https://polyfill.apps.factset.com/v3/polyfill.min.js"></script>
+    <script nonce="generated-oa-nonce">
+      (function () {
+        if (location.host.includes("oa") || location.host.includes("local")) {
+          document.getElementsByTagName("base")[0].href = "/";
+        }
+      })();
+    </script>
+    <title ng-bind="pagePrefix + 'Online Assistant'"></title>
+    <meta http-equiv="Content-type" content="text/html;charset=UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <link rel="shortcut icon" href="favicon.ico" />
+    <link href="dist/assets/css/print.css" rel="stylesheet" media="print" />
+    <link
+      href="//cdn.factset.com/thief-angular/2.14.1/css/thief-angular-quartz.min.css"
+      rel="stylesheet"
+    />
+    <link
+      href="//cdn.factset.com/thief/4.1.0/css/thief.min.css"
+      rel="stylesheet"
+    />
+    <link
+      rel="stylesheet"
+      href="dist/assets/css/vendor/freezeframe_styles.min.css"
+    />
+    <link
+      href="dist/assets/css/vendor/prism.css"
+      rel="stylesheet"
+    />
+
+    <!-- build:css assets/css/app.css -->
+    <link href="dist/assets/css/app.min.css" rel="stylesheet" />
+    <!-- endbuild -->
+  </head>
+  <body>
+    <div id="oa-display-site" ng-controller="searchbarCtrl">
+      <div id="header" ng-show="!hideHeader">
+        <a href="pages/" class="header-logo">
+          <img
+            src="dist/assets/img/online-assistant-logo.svg"
+            alt="FactSet"
+            title="Go to Online Assistant Home"
+            ng-show="useQuickLogo === false"
+            class="app-image ng-cloak"
+          />
+          <img
+            src="dist/assets/img/quick-logo.svg"
+            alt="Quick"
+            title="Go to Online Assistant Home"
+            ng-show="useQuickLogo === true"
+            class="app-image ng-cloak"
+          />
+        </a>
+        <form id="search-form" ng-submit="search()" data-qa-id="search-form">
+          <tf-textbox
+            id="search-bar"
+            ng-model="model.searchQuery"
+            placeholder="'Search full site or enter a page number'"
+            clearable="true"
+            ng-hide="hideSearch()"
+          ></tf-textbox>
+          <tf-button
+            on-press="search()"
+            icon="lookup"
+            ng-hide="hideSearch()"
+          ></tf-button
+          ><br />
+        </form>
+      </div>
+      <ui-view></ui-view>
+    </div>
+
+    <script src="//cdn.factset.com/jquery/2.2.1/dist/jquery.min.js"></script>
+    <script src="//cdn.factset.com/lodash/3.10.1/lodash.js"></script>
+    <script src="//cdn.factset.com/angular/1.5.11/angular.min.js"></script>
+    <script src="//cdn.factset.com/angular-animate/1.5.11/angular-animate.min.js"></script>
+    <script src="//cdn.factset.com/angular-resource/1.5.11/angular-resource.min.js"></script>
+    <script src="//cdn.factset.com/angular-sanitize/1.5.11/angular-sanitize.min.js"></script>
+    <script src="//cdn.factset.com/angular-ui-router/0.2.18/release/angular-ui-router.min.js"></script>
+    <script src="//cdn.factset.com/thief-angular/2.14.2/js/thief-angular.min.js"></script>
+    <script src="dist/assets/js/vendor/axios.min.js"></script>
+    <script src="dist/assets/js/vendor/request.min.js"></script>
+    <script src="dist/assets/js/vendor/fds-metadata.min.js"></script>
+    <script src="dist/assets/js/vendor/clp-logger.min.js"></script>
+    <script src="dist/assets/js/vendor/freezeframe.min.js"></script>
+    <script src="dist/assets/js/vendor/imagesloaded.pkgd.min.js"></script>
+    <script src="dist/assets/js/vendor/performance-logger.min.js"></script>
+    <script src="dist/assets/js/vendor/usage-context.min.js"></script>
+    <script src="dist/assets/js/vendor/fds-lightstep.min.js"></script>
+    <script src="dist/assets/js/vendor/prism.js"></script>
+    <!-- build:js assets/app.js -->
+    <script src="dist/assets/js/app/oa-bundle.js"></script>
+    <!-- endbuild -->
+
+    <script type="text/javascript">
+      app.init();
+    </script>
+  </body>
+</html>

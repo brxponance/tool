@@ -19,6 +19,7 @@ Key design decisions:
 """
 
 import math
+import re
 import numpy as np
 import pandas as pd
 from rapidfuzz import fuzz, process
@@ -384,20 +385,105 @@ def _portfolio_exposure(securities, col, quintile_breaks):
     return buckets
 
 
-def _fuzzy_match_manager(name, candidates, threshold=80):
-    """Match a manager name against a list of candidates using fuzzy logic.
-    Uses partial_ratio so short names ('Mac Alpha') match longer ones
-    ('Mac Alpha EAFE SC') — token_sort_ratio penalises the extra tokens."""
-    if name in candidates:
-        return name
+def _norm_mgr_name(s):
+    """Normalise a manager name for sleeve-aware matching. Mirrors the
+    matcher in security_risk_engine — preserves size markers (sc/lc/mc)
+    so 'CastleArk EAFE + Canada SC' and 'CastleArk EAFE + Canada' don't
+    collapse to the same key. Strips regional/style descriptors that vary
+    across files for the same underlying portfolio."""
+    s = str(s).lower().strip()
+    s = re.sub(r'\([^)]*\)', '', s)
+    s = re.sub(r'[\./\-_,\+]+', ' ', s)
+    s = re.sub(r'\bsmall\s+cap\b', 'sc', s)
+    s = re.sub(r'\blarge\s+cap\b', 'lc', s)
+    s = re.sub(r'\bmid\s+cap\b',   'mc', s)
+    # Compound region+size shorthand
+    s = re.sub(r'\bisc\b',  'sc', s)
+    s = re.sub(r'\bussc\b', 'sc', s)
+    for region in ['international', 'eafe', 'acwi', 'em', 'us', 'usa',
+                   'world', 'global', 'xus', 'ex', 'non', 'canada']:
+        s = re.sub(r'\b' + re.escape(region) + r'\b', '', s)
+    for generic in ['composite', 'portfolio', 'strategy', 'fund',
+                    'equity', 'equities', 'growth', 'value', 'blend', 'core']:
+        s = re.sub(r'\b' + re.escape(generic) + r'\b', '', s)
+    return re.sub(r'\s+', ' ', s).strip()
+
+
+def _benchmark_region_tokens(bmk):
+    """Expand a client-benchmark name into the set of region tokens we'd
+    prefer to see in matched manager names. Handles equivalences like
+    'MSCI World ex US' ≈ 'MSCI EAFE + Canada' so a portfolio benchmarked
+    against 'MSCI World ex US SC' resolves Hillsdale to the EAFE+Canada
+    SC sleeve rather than the plain EAFE SC sleeve."""
+    if not bmk:
+        return set()
+    b = str(bmk).lower()
+    out = set(re.split(r'[\s\+\-\.,/]+', b))
+    out.discard('')
+    # Geographic equivalences: "World ex US" / "ACWI ex-US" / "ex-US" ≈ EAFE+Canada
+    if ('world' in out and 'ex' in out and 'us' in out) or \
+       ('acwi' in out and 'ex' in out and 'us' in out):
+        out.update({'eafe', 'canada'})
+    # SC / Small Cap canonicalisation
+    if 'small' in out and 'cap' in out:
+        out.add('sc')
+    return out
+
+
+def _fuzzy_match_manager(name, candidates, threshold=80, benchmark_hint=None):
+    """Match a buy-list manager name to a column in the FactSet exposures
+    file. Cascade: exact > norm-key > fuzzy fallback. When several file
+    rows share a normalised key (e.g. 'Hillsdale EAFE SC' / 'Hillsdale
+    EAFE + Canada SC' / 'Hillsdale xUS SC' all collapse to 'hillsdale
+    sc'), the tiebreak prefers candidates that share tokens with both
+    the weights-file name AND the client benchmark — so Client MD
+    (benchmark MSCI World ex US SC) resolves to the EAFE+Canada SC
+    variant rather than the plain EAFE SC one."""
+    if not name:
+        return None
+    # Note: don't shortcut on raw `name in candidates` — when several file
+    # rows share the same normalised key (Hillsdale EAFE SC vs Hillsdale
+    # EAFE + Canada SC vs Hillsdale xUS SC) the exact match would win
+    # immediately and bypass the benchmark-aware tiebreak. Always go
+    # through the cascade so the benchmark hint can override.
+    by_norm = {}
+    for n in candidates:
+        by_norm.setdefault(_norm_mgr_name(n), []).append(n)
+    wt_tokens = set(re.split(r'[\s\+\-\.,/]+', str(name).lower()))
+    wt_tokens.discard('')
+    bmk_tokens = _benchmark_region_tokens(benchmark_hint)
+
+    def _best_of(originals):
+        if len(originals) == 1:
+            return originals[0]
+        # Three-key sort:
+        #   (1) maximise shared tokens with the weights-file name,
+        #   (2) maximise shared tokens with the client benchmark
+        #       (handles 'MSCI World ex US SC' → EAFE+Canada SC),
+        #   (3) minimise extra tokens not in either set
+        #       (handles plain 'MSCI EAFE' → EAFE over EAFE+Canada).
+        def _key(o):
+            ot = set(re.split(r'[\s\+\-\.,/]+', o.lower()))
+            ot.discard('')
+            shared_w = len(ot & wt_tokens)
+            shared_b = len(ot & bmk_tokens)
+            extra    = len(ot - wt_tokens - bmk_tokens)
+            return (-shared_w, -shared_b, extra)
+        return sorted(originals, key=_key)[0]
+
+    wn = _norm_mgr_name(name)
+    if wn in by_norm:
+        return _best_of(by_norm[wn])
+    m = process.extractOne(wn, list(by_norm.keys()),
+                           scorer=fuzz.WRatio, score_cutoff=threshold)
+    if m:
+        return _best_of(by_norm[m[0]])
+    # Final fallback: original partial-ratio behaviour, in case the
+    # normalisation strips too much for some pathological input
     result = process.extractOne(
-        name, candidates,
-        scorer=fuzz.partial_ratio,
-        score_cutoff=threshold,
+        name, candidates, scorer=fuzz.partial_ratio, score_cutoff=threshold,
     )
-    if result:
-        return result[0]
-    return None
+    return result[0] if result else None
 
 
 def compute_portfolio_exposures(managers_with_weights, exposures_data, grouping,
@@ -443,11 +529,38 @@ def compute_portfolio_exposures(managers_with_weights, exposures_data, grouping,
         exposures_data.get('benchmark_name', ''): exposures_data.get('quintile_breaks', {})
     }
 
-    # Resolve which benchmark to use
+    # Resolve which benchmark to use. Mirrors the matching cascade in the
+    # risk endpoint so the user's weights-file label resolves the same way
+    # everywhere — exact, then normalized (strip punctuation/whitespace,
+    # canonicalise 'SC' / 'Small Cap'), then fuzzy fallback. Without this,
+    # 'MSCI EAFE+CANADA' in weights vs 'MSCI EAFE + Canada' in the file
+    # silently drops to the file default and the table renders against the
+    # wrong benchmark.
     resolved_bmk_name = None
-    if benchmark_name and benchmark_name in benchmarks_all:
-        resolved_bmk_name = benchmark_name
-    else:
+    if benchmark_name:
+        if benchmark_name in benchmarks_all:
+            resolved_bmk_name = benchmark_name
+        else:
+            import re as _re
+            def _bn(s):
+                t = str(s or '').lower()
+                for ch in ['+', '-', '/', ',', '.']:
+                    t = t.replace(ch, ' ')
+                t = _re.sub(r'\bsmall\s+cap\b', 'sc', t)
+                return _re.sub(r'\s+', ' ', t).strip()
+            target = _bn(benchmark_name)
+            for cand in benchmarks_all:
+                if _bn(cand) == target:
+                    resolved_bmk_name = cand
+                    break
+            if resolved_bmk_name is None:
+                cand_keys = [_bn(c) for c in benchmarks_all]
+                cand_orig = list(benchmarks_all)
+                m = process.extractOne(target, cand_keys,
+                                       scorer=fuzz.WRatio, score_cutoff=80)
+                if m:
+                    resolved_bmk_name = cand_orig[m[2]]
+    if resolved_bmk_name is None:
         # Fall back to the default
         resolved_bmk_name = exposures_data.get('benchmark_name')
 
@@ -459,12 +572,19 @@ def compute_portfolio_exposures(managers_with_weights, exposures_data, grouping,
 
     candidate_names = list(exp_managers.keys())
 
-    # Match each client manager to a name in the exposure file
+    # Match each client manager to a name in the exposure file. Prefer
+    # weight_file_name (original weights-file label, e.g. 'Mac Alpha EAFE
+    # + Canada SC') over the buy-list matched_name (often a generic
+    # 'Mac Alpha') because the weights label carries sleeve-specific
+    # info needed to disambiguate LC vs SC and EAFE vs EAFE+Canada
+    # variants in the FactSet exposures file.
     matched     = {}   # matched_name -> exposure_file_name
     unmatched   = []
     for m in managers_with_weights:
         nm = m['matched_name']
-        hit = _fuzzy_match_manager(nm, candidate_names)
+        match_input = m.get('weight_file_name') or nm
+        hit = _fuzzy_match_manager(match_input, candidate_names,
+                                    benchmark_hint=resolved_bmk_name)
         if hit:
             matched[nm] = hit
         else:
@@ -538,6 +658,18 @@ def compute_portfolio_exposures(managers_with_weights, exposures_data, grouping,
     bmark_total = sum(bmark_exp.values())
     bmark_norm  = {k: v / bmark_total * 100 for k, v in bmark_exp.items()} if bmark_total > 0 else bmark_exp
 
+    # For continuous-only (Mode B) groupings, build the per-quintile range
+    # labels from the benchmark-wide breaks so the UI can show ranges
+    # like '≥ 25.4 · 17.2 – 25.4 · ...' without the user needing to
+    # also pick a categorical sub-grouping. Same labels Mode C builds
+    # from per-bucket breaks; here they come from benchmark-wide breaks.
+    label_range = {}
+    if grouping in CONTINUOUS_COLS:
+        breaks = quintile_breaks.get(grouping)
+        if breaks is not None:
+            range_lbls = _quintile_range_labels(breaks, grouping)
+            label_range = dict(zip(['Q1 (High)','Q2','Q3','Q4','Q5 (Low)'], range_lbls))
+
     rows = []
     for b in all_buckets:
         bw = bmark_norm.get(b, 0.0)
@@ -545,14 +677,17 @@ def compute_portfolio_exposures(managers_with_weights, exposures_data, grouping,
         pw = prop_norm.get(b,  0.0)
         if bw < 0.001 and cw < 0.001 and pw < 0.001:
             continue  # skip truly empty rows
-        rows.append({
+        row = {
             'label':         b,
             'benchmark':     round(bw, 2),
             'current':       round(cw, 2),
             'proposed':      round(pw, 2),
             'delta_current': round(cw - bw, 2),
             'delta_proposed':round(pw - bw, 2),
-        })
+        }
+        if b in label_range:
+            row['range_label'] = label_range[b]
+        rows.append(row)
 
     cov_src = (exposures_data.get('coverage_by_benchmark', {}).get(resolved_bmk_name)
                or exposures_data.get('coverage', {}))

@@ -603,9 +603,21 @@ def resolve_peer_group(bench_str):
     toks = set(u.split())
 
     is_small = bool(toks & {'SC', 'SMALL', 'SMALLCAP'})
-    is_xus   = bool(toks & {'XUS', 'ACWIXUS'}) or ('ACWI' in toks and 'EX' in toks and 'USA' in toks)
+    # 'ex-US' was previously requiring the token 'USA' specifically — but
+    # FactSet labels almost always say 'ex-US' (token 'US' after split).
+    # Also recognise 'World ex US' alongside 'ACWI ex US'. Without these,
+    # 'MSCI ACWI ex-US' / 'MSCI World ex US SC' fell through to the broad
+    # ACWI bucket and the risk tables read against the wrong benchmark.
+    is_xus = (
+        bool(toks & {'XUS', 'ACWIXUS'})
+        or (('ACWI' in toks or 'WORLD' in toks)
+            and 'EX' in toks
+            and ('US' in toks or 'USA' in toks))
+    )
     has_eafe = 'EAFE' in toks
-    has_acwi_or_world = ('ACWI' in toks) or ('WORLD' in toks) or ('GLOBAL' in toks)
+    has_world = 'WORLD' in toks or 'GLOBAL' in toks
+    has_acwi  = 'ACWI' in toks
+    has_acwi_or_world = has_acwi or has_world
     has_em   = 'EM' in toks or 'EMERGING' in toks
     has_russell_2000 = 'RUSSELL' in toks and '2000' in toks
     has_russell_1000 = 'RUSSELL' in toks and '1000' in toks
@@ -615,13 +627,23 @@ def resolve_peer_group(bench_str):
         return 'USSC'
     if has_russell_1000:
         return 'US'
-    if is_xus and is_small:
-        return 'ISC'
-    if has_eafe and is_small:
-        return 'EAFE_SC'
-    if has_em and is_small:
-        return 'EM'   # no dedicated EM SC peer group yet
+    # Small-cap routing
+    if is_small:
+        # 'World ex US SC' = developed ex-US small cap → EAFE Small Cap peer
+        # 'ACWI ex-US SC'  = includes EM small cap        → ISC peer
+        if has_world and is_xus and not has_acwi:
+            return 'EAFE_SC'
+        if is_xus:
+            return 'ISC'
+        if has_eafe:
+            return 'EAFE_SC'
+        if has_em:
+            return 'EM'   # no dedicated EM SC peer group yet
     if is_xus:
+        # 'ACWI ex-US' includes EM → its own peer group (ACWI_xUS).
+        # 'World ex US' / 'EAFE+Canada' → EAFE (developed-only).
+        if has_acwi:
+            return 'ACWI_xUS'
         return 'EAFE'
     if has_eafe:
         return 'EAFE'     # includes 'MSCI EAFE+Canada' and similar composites
@@ -741,6 +763,46 @@ def infer_tab(weight_name):
     return 'EAFE'
 
 
+_INDEX_PREFIXES = ('msci ', 'russell ', 'ftse ', 's&p ', 'bloomberg ',
+                   'stoxx ', 'nikkei ', 'topix ')
+_INDEX_KEYWORDS = ('benchmark', 'index')
+
+
+def _is_index_name(s):
+    """True if a buy-list manager name looks like an index passthrough
+    (e.g. 'MSCI EAFE + Canada', 'Russell 1000', 'Benchmark Foo'). Used
+    by fuzzy_match to gate cross-token matching: a real manager weight
+    like 'Haven EAFE + Canada' must NOT silently fall onto an index-
+    named buy-list entry just because they share regional suffixes."""
+    if not s:
+        return False
+    low = s.lower()
+    return low.startswith(_INDEX_PREFIXES) or any(k in low for k in _INDEX_KEYWORDS)
+
+
+def _shares_index_token(weight_name, candidate):
+    """When `candidate` is an index-style name, only allow a fuzzy
+    match if `weight_name` also references the same index family — i.e.
+    it shares an MSCI/Russell/FTSE/etc. or Benchmark/Index token. So
+    'Benchmark MSCI EAFE + Canada' (Client 5's index passthrough weight)
+    can still resolve to 'MSCI EAFE + Canada' in the buy-list, but
+    'Haven EAFE + Canada' (a real manager) cannot."""
+    if not _is_index_name(candidate):
+        return True
+    wl = (weight_name or '').lower()
+    for tok in _INDEX_PREFIXES:
+        if tok in candidate.lower() and tok in wl:
+            return True
+    for tok in _INDEX_KEYWORDS:
+        if tok in candidate.lower() and tok in wl:
+            return True
+    # Also accept if weight name contains the candidate's first index token
+    # as a standalone word (e.g., weight 'MSCI EAFE + Canada' against
+    # candidate 'MSCI EAFE + Canada'): the prefix-startswith check above
+    # already covers this, but keep symmetric handling for safety.
+    return False
+
+
 def fuzzy_match(weight_name, manager_dfs, threshold=60):
     """
     Match a weight-file manager name to an actual manager in the returns file.
@@ -810,11 +872,20 @@ def fuzzy_match(weight_name, manager_dfs, threshold=60):
             if c.lower() == core.lower():
                 return tab, orig
 
-        # Fuzzy match within filtered set
-        match = process.extractOne(core, cores, scorer=fuzz.token_sort_ratio,
-                                   score_cutoff=threshold)
-        if match:
-            return tab, candidates[cores.index(match[0])]
+        # Fuzzy match within filtered set, but gate index-style candidates
+        # ('MSCI EAFE + Canada', 'Russell 1000', etc.) so real-manager
+        # weight names like 'Haven EAFE + Canada' don't silently fall
+        # onto them via the shared regional suffix.
+        fuzzy_pool = [(c, k) for c, k in zip(candidates, cores)
+                       if _shares_index_token(weight_name, c)]
+        if fuzzy_pool:
+            fuzzy_cores = [k for _, k in fuzzy_pool]
+            fuzzy_origs = [c for c, _ in fuzzy_pool]
+            match = process.extractOne(core, fuzzy_cores,
+                                        scorer=fuzz.token_sort_ratio,
+                                        score_cutoff=threshold)
+            if match:
+                return tab, fuzzy_origs[fuzzy_cores.index(match[0])]
 
     # Second pass — only relevant when the weight name carried an explicit
     # regional signal (so region_pool is meaningfully narrowed). Inside a
@@ -828,6 +899,11 @@ def fuzzy_match(weight_name, manager_dfs, threshold=60):
         best = None   # (score, tab, orig)
         for tab, candidates, cores in region_pool:
             for orig, c in zip(candidates, cores):
+                # Same index-token gate as the first pass — keeps an
+                # 'MSCI EAFE + Canada' buy-list entry from absorbing real
+                # managers when the first-token fallback fires.
+                if not _shares_index_token(weight_name, orig):
+                    continue
                 toks = c.split()
                 if not toks:
                     continue
@@ -1080,7 +1156,7 @@ def run_universe_cloning(universe_df_map, factor_df, progress_callback=None,
 
 
 def build_portfolio_view(client_name, weights_dict, clone_results, manager_dfs,
-                         universe_clone_results=None):
+                         universe_clone_results=None, placeholder_buckets=None):
     # Defensive fallback: if manager_dfs didn't get reloaded from disk (cache
     # paths no longer resolve after a zip deploy), synthesize a lookup from
     # clone_results keys so fuzzy_match still works. Every manager in
@@ -1138,7 +1214,39 @@ def build_portfolio_view(client_name, weights_dict, clone_results, manager_dfs,
                             exact_key = k
                             break
         if d is None:
-            unmatched.append(wt_name)
+            # Manager exists in the weights file but has no clone data yet
+            # — typically a newly-funded manager with <3 years of returns.
+            # Synthesise a placeholder entry so the manager still appears
+            # in the portfolio table and counts toward FactSet exposure
+            # aggregations (which match against the exposures/risk files,
+            # not clone_results). Style buckets default to 100% Core; the
+            # user can override per manager via the Placeholder peer-group
+            # tab and those overrides flow through here.
+            ph_buckets = (placeholder_buckets or {}).get(wt_name)
+            sb = dict(ph_buckets) if ph_buckets else {'Core': 1.0}
+            # Derived metrics from the (possibly user-edited) buckets so
+            # V-G, %SC, %EM in the portfolio table reflect overrides.
+            v = sum(w for b, w in sb.items() if b == 'Value')
+            y = sum(w for b, w in sb.items() if b == 'Yield')
+            g = sum(w for b, w in sb.items() if b == 'Growth')
+            vg = round((v + y) - g, 6)
+            managers.append({
+                'weight_file_name': wt_name,
+                'matched_name':     wt_name,  # use the weights name verbatim
+                'tab':              'Placeholder',
+                'current_weight':   weight,
+                'proposed_weight':  weight,
+                'vg_full':          vg,
+                'vg_3factor':       vg,
+                'style_buckets':    sb,
+                'r2_full':          None,
+                'r2_3factor':       None,
+                'betas_full':       {},
+                'betas_3factor':    {},
+                'pct_small':        sb.get('Small Cap', 0) or 0,
+                'pct_em':           0,
+                'is_placeholder':   True,
+            })
             continue
         managers.append({
             'weight_file_name': wt_name,

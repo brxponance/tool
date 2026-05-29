@@ -43,6 +43,17 @@ PEER_BENCHMARKS = {
         'growth': 'MSCI ACWI Growth NR USD',
         'infl_sectors': ('ACWI Financials', 'ACWI Materials', 'ACWI Energy'),
     },
+    # ACWI ex-US large-cap. Developed-ex-US + EM. Used when the client
+    # benchmark is 'MSCI ACWI ex-US' / 'MSCI ACWI ex US'. Different from
+    # plain EAFE (developed ex-US, no EM) which is what we previously
+    # collapsed ACWI ex-US into — the EM exposure matters for tracking
+    # error and risk decomposition vs the actual benchmark.
+    'ACWI_xUS': {
+        'core':   'MSCI ACWI Ex USA NR USD',
+        'value':  'MSCI ACWI Ex USA Value NR USD',
+        'growth': 'MSCI ACWI Ex USA Growth NR USD',
+        'infl_sectors': None,
+    },
     'US': {
         'core':   'Russell 1000 TR USD',
         'value':  'Russell 1000 Pure Value TR USD',
