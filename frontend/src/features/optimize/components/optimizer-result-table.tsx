@@ -16,7 +16,7 @@ const td: React.CSSProperties = {
   padding: "8px 10px",
   fontFamily: "var(--mono)",
   fontSize: 12,
-  color: "var(--text1)",
+  color: "var(--text)",
   borderBottom: "1px solid var(--border)",
 };
 const tdNum: React.CSSProperties = { ...td, textAlign: "right" };

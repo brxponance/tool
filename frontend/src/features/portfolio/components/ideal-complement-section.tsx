@@ -31,7 +31,7 @@ const cellLabel: React.CSSProperties = {
 const cellValue: React.CSSProperties = {
   fontFamily: "var(--mono)",
   fontSize: 14,
-  color: "var(--text1)",
+  color: "var(--text)",
   marginTop: 2,
 };
 

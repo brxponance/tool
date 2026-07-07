@@ -65,11 +65,13 @@ export async function deleteClient(name: string) {
 export async function savePortfolioDraft(
   client: string,
   managers: Array<{
+    weight_file_name: string;
     matched_name: string;
     tab: string;
     current_weight: number;
     proposed_weight: number;
     style_buckets?: Record<string, number> | null;
+    is_placeholder?: boolean;
   }>,
 ) {
   return backendJson<{ ok: true; saved: string }>(

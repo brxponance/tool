@@ -73,7 +73,7 @@ export function OptimizeRoute() {
           {resultData?.status === "warning" && resultData.error && (
             <span
               style={{
-                color: "var(--yellow)",
+                color: "var(--amber)",
                 fontFamily: "var(--mono)",
                 fontSize: 12,
               }}
@@ -90,7 +90,7 @@ export function OptimizeRoute() {
             marginTop: 16,
             padding: 12,
             border: "1px solid var(--border)",
-            background: "var(--bg1)",
+            background: "var(--surface2)",
             color: "var(--red)",
             fontFamily: "var(--mono)",
             fontSize: 12,

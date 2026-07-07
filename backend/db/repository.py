@@ -52,6 +52,39 @@ def _get_client(s: Session, name: str) -> Client:
     return client
 
 
+import re as _re
+
+_MAX_NAME_LEN = 200
+
+
+def _normalize_name(name: str) -> str:
+    """Trim, collapse internal whitespace, and validate a client name.
+
+    Rejects empty names, names over the length cap, and names containing '/'
+    (which cannot be addressed by the URL routes). Collapsing internal runs of
+    whitespace stops 'Acme  Fund' vs 'Acme Fund' near-duplicates.
+    """
+    name = _re.sub(r"\s+", " ", (name or "").strip())
+    if not name:
+        raise ValueError("Client name is required.")
+    if len(name) > _MAX_NAME_LEN:
+        raise ValueError(f"Client name must be {_MAX_NAME_LEN} characters or fewer.")
+    if "/" in name:
+        raise ValueError("Client name cannot contain '/'.")
+    return name
+
+
+def _find_client_ci(s: Session, name: str, exclude_id: int | None = None) -> Client | None:
+    """Case-insensitive lookup for an existing client with this name, so
+    'Acme' and 'acme' are treated as the same client for uniqueness."""
+    from sqlalchemy import func
+    q = select(Client).where(func.lower(Client.name) == name.lower())
+    existing = s.scalar(q)
+    if existing and exclude_id is not None and existing.id == exclude_id:
+        return None
+    return existing
+
+
 # ── Client CRUD ──────────────────────────────────────────────────────────
 def create_client(
     name: str,
@@ -60,11 +93,9 @@ def create_client(
 ) -> None:
     """Create a client. `managers` is an optional list of
     {"manager_name": str, "weight": float} dicts in display order."""
-    name = (name or "").strip()
-    if not name:
-        raise ValueError("Client name is required.")
+    name = _normalize_name(name)
     with session_scope() as s:
-        if s.scalar(select(Client).where(Client.name == name)):
+        if _find_client_ci(s, name):
             raise ValueError(f"A client named {name!r} already exists.")
         client = Client(name=name, benchmark=_clean_benchmark(benchmark))
         for pos, m in enumerate(managers or []):
@@ -86,12 +117,10 @@ def update_client(
     with session_scope() as s:
         client = _get_client(s, name)
         if new_name is not None:
-            new_name = new_name.strip()
-            if not new_name:
-                raise ValueError("Client name cannot be empty.")
-            if new_name != client.name and s.scalar(
-                select(Client).where(Client.name == new_name)
-            ):
+            new_name = _normalize_name(new_name)
+            # Case-insensitive uniqueness, excluding this client itself (so a
+            # pure case/spacing change to its own name is allowed).
+            if _find_client_ci(s, new_name, exclude_id=client.id):
                 raise ValueError(f"A client named {new_name!r} already exists.")
             client.name = new_name
         if benchmark_provided:
@@ -178,10 +207,13 @@ def _build_manager(m: dict, position: int) -> ClientManager:
     current = m.get("current_weight")
     if current is None:
         current = m.get("weight")  # legacy / seed key
+    # proposed_weight is nullable: preserve None ("no draft") vs a real 0.0.
+    proposed_raw = m.get("proposed_weight")
+    proposed = None if proposed_raw is None else float(proposed_raw)
     return ClientManager(
         manager_name=name,
         current_weight=float(current or 0.0),
-        proposed_weight=float(m.get("proposed_weight") or 0.0),
+        proposed_weight=proposed,
         style_buckets=_clean_buckets(m.get("style_buckets")),
         position=position,
     )
@@ -231,13 +263,25 @@ def upsert_from_weight_maps(
             else:
                 updated += 1
             client.benchmark = _clean_benchmark(benchmarks.get(cname))
+            # Preserve user-entered drafts (proposed weights + style buckets)
+            # for managers that survive the re-import, keyed by manager name.
+            # The workbook only carries CURRENT weights, so a re-import must not
+            # silently wipe what-if drafts the analyst entered in the app.
+            preserved = {
+                m.manager_name: (m.proposed_weight, m.style_buckets)
+                for m in client.managers
+            }
             client.managers.clear()
             s.flush()  # delete old rows before re-inserting (unique constraint)
             for pos, (mname, wt) in enumerate(mgr_map.items()):
+                mname = str(mname).strip()
+                prev_proposed, prev_buckets = preserved.get(mname, (None, None))
                 client.managers.append(
                     ClientManager(
-                        manager_name=str(mname).strip(),
+                        manager_name=mname,
                         current_weight=float(wt or 0.0),
+                        proposed_weight=prev_proposed,
+                        style_buckets=prev_buckets,
                         position=pos,
                     )
                 )

@@ -145,7 +145,7 @@ export function OverlapMatrix({
                         background: cellColor(val / norm),
                         cursor: "pointer",
                         outline: isActive ? "2px solid var(--accent)" : undefined,
-                        color: val / norm > 0.55 ? "#fff" : "var(--text1)",
+                        color: val / norm > 0.55 ? "#fff" : "var(--text)",
                       }}
                       title={`${rowMgr.display} × ${managers[j].display} — ${basis}`}
                       onClick={() => onCellClick(pair.i, pair.j, pair.name_i, pair.name_j)}

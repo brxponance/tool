@@ -34,7 +34,7 @@ const tableCell: React.CSSProperties = {
   padding: "6px 8px",
   fontFamily: "var(--mono)",
   fontSize: 12,
-  color: "var(--text1)",
+  color: "var(--text)",
   borderBottom: "1px solid var(--border)",
 };
 
@@ -114,9 +114,9 @@ export function ForcedManagersPicker({
             flex: 1,
             maxWidth: 280,
             padding: "4px 8px",
-            background: "var(--bg1)",
+            background: "var(--surface2)",
             border: "1px solid var(--border)",
-            color: "var(--text1)",
+            color: "var(--text)",
             fontFamily: "var(--mono)",
             fontSize: 12,
           }}
@@ -163,9 +163,9 @@ export function ForcedManagersPicker({
             style={{
               width: 90,
               padding: "4px 6px",
-              background: "var(--bg1)",
+              background: "var(--surface2)",
               border: "1px solid var(--border)",
-              color: "var(--text1)",
+              color: "var(--text)",
               fontFamily: "var(--mono)",
               fontSize: 12,
             }}
@@ -233,7 +233,7 @@ export function ForcedManagersPicker({
                   borderBottom: "1px solid var(--border)",
                   fontFamily: "var(--mono)",
                   fontSize: 12,
-                  color: alreadyForced ? "var(--text3)" : "var(--text1)",
+                  color: alreadyForced ? "var(--text3)" : "var(--text)",
                 }}
               >
                 <span>
@@ -297,9 +297,9 @@ export function ForcedManagersPicker({
                         style={{
                           width: 80,
                           padding: "2px 4px",
-                          background: "var(--bg1)",
+                          background: "var(--surface2)",
                           border: "1px solid var(--border)",
-                          color: "var(--text1)",
+                          color: "var(--text)",
                           fontFamily: "var(--mono)",
                           fontSize: 12,
                         }}

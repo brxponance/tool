@@ -19,9 +19,9 @@ const fieldStyle: React.CSSProperties = {
 const inputStyle: React.CSSProperties = {
   width: 80,
   padding: "4px 6px",
-  background: "var(--bg1)",
+  background: "var(--surface2)",
   border: "1px solid var(--border)",
-  color: "var(--text1)",
+  color: "var(--text)",
   fontFamily: "var(--mono)",
   fontSize: 12,
 };

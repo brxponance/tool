@@ -30,7 +30,7 @@ const cellLabel: React.CSSProperties = {
 const cellValue: React.CSSProperties = {
   fontFamily: "var(--mono)",
   fontSize: 18,
-  color: "var(--text1)",
+  color: "var(--text)",
   marginTop: 2,
 };
 
@@ -137,8 +137,8 @@ export function DiverseOwnershipSection({ client, managers }: Props) {
                   fontSize: 12,
                   padding: "4px 6px",
                   border: "1px solid var(--border)",
-                  background: "var(--surface1)",
-                  color: "var(--text1)",
+                  background: "var(--surface)",
+                  color: "var(--text)",
                 }}
               />
               <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)" }}>% diverse/female</span>

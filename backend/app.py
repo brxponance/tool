@@ -2,7 +2,7 @@
 Flask backend for the Aapryl Clone Tool
 Results are cached to disk so browser refreshes don't lose data.
 """
-import os, json, threading, pickle
+import os, json, threading, pickle, math, sys
 import numpy as np
 import pandas as pd
 from flask import Flask, request, jsonify
@@ -124,6 +124,37 @@ def refresh_clients_from_db():
         return True
     except Exception as e:  # noqa: BLE001
         print(f"[db] failed to load clients from DB (keeping existing state): {e}")
+        return False
+
+
+def sync_weights_to_state(weights=None, benchmarks=None):
+    """Reconcile a freshly-parsed Excel weights book with app state.
+
+    When the DB is authoritative, an uploaded/reloaded workbook is IMPORTED
+    into Postgres (upsert) and then state is reloaded from the DB — so the DB
+    stays the single source of truth and the workbook can still be used to bulk-
+    update. When the DB is off, this just sets state from the parsed workbook
+    (the legacy behavior). Pass already-parsed (weights, benchmarks) or let the
+    caller set them first; returns True when the DB import path ran.
+
+    IMPORTANT: preserves user-entered proposed weights / style buckets on
+    existing managers — upsert_from_weight_maps only refreshes current weights
+    and benchmarks, leaving drafts intact for managers that still exist.
+    """
+    if not db_enabled():
+        return False
+    if weights is None:
+        weights = state.get('weights') or {}
+        benchmarks = state.get('client_benchmarks') or {}
+    try:
+        client_db.repository.upsert_from_weight_maps(weights, benchmarks)
+        refresh_clients_from_db()
+        print(f"[db] imported {len(weights)} clients from workbook into Postgres.")
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"[db] workbook→DB import failed (keeping DB roster): {e}")
+        # Re-assert the DB roster so a failed import never leaves Excel data live.
+        refresh_clients_from_db()
         return False
 
 
@@ -625,7 +656,14 @@ def run():
                 print(f"Determinism diagnostic skipped: {e}")
             state['manager_dfs']   = load_manager_returns(state['files']['manager_returns'])
             if 'weights' in state['files']:
-                state['weights'], state['client_benchmarks'] = load_weights(state['files']['weights'])
+                w, b = load_weights(state['files']['weights'])
+                # When the DB is authoritative, import the workbook into Postgres
+                # (preserving drafts) and reload state from the DB instead of
+                # letting Excel silently overwrite the DB-backed roster.
+                if db_enabled():
+                    sync_weights_to_state(w, b)
+                else:
+                    state['weights'], state['client_benchmarks'] = w, b
             # Cache factor returns for benchmark lookups
             from data_loader import load_factor_returns as lf
             state['factor_df'] = lf(state['files']['factor_returns'])
@@ -660,7 +698,13 @@ def reload_weights():
     if 'weights' not in state['files']:
         return jsonify({'status': 'error', 'message': 'No weights file uploaded yet'})
     try:
-        state['weights'], state['client_benchmarks'] = load_weights(state['files']['weights'])
+        w, b = load_weights(state['files']['weights'])
+        # DB authoritative → import workbook into Postgres (drafts preserved)
+        # and reload from DB; otherwise fall back to the legacy in-memory set.
+        if db_enabled():
+            sync_weights_to_state(w, b)
+        else:
+            state['weights'], state['client_benchmarks'] = w, b
         save_cache()
         return jsonify({'status': 'ok', 'clients': list(state['weights'].keys()),
                         'client_benchmarks': state['client_benchmarks']})
@@ -685,7 +729,11 @@ def reload_inputs():
     # Weights
     if 'weights' in state['files'] and os.path.exists(state['files']['weights']):
         try:
-            state['weights'], state['client_benchmarks'] = load_weights(state['files']['weights'])
+            w, b = load_weights(state['files']['weights'])
+            if db_enabled():
+                sync_weights_to_state(w, b)   # import into DB, drafts preserved
+            else:
+                state['weights'], state['client_benchmarks'] = w, b
             status['weights'] = 'ok'
         except Exception as e:
             status['weights'] = 'error'
@@ -773,12 +821,13 @@ def progress():
 
 @app.route('/clients')
 def clients():
-    if not state['weights']:
-        return jsonify({'clients': [], 'benchmarks': {}})
+    # Always report `editable` (even for an empty roster) so a reachable-but-
+    # empty DB still shows the "+ Add Client" control and the first client can
+    # be created.
     return jsonify({
-        'clients':    list(state['weights'].keys()),
+        'clients':    list((state.get('weights') or {}).keys()),
         'benchmarks': state.get('client_benchmarks') or {},
-        'editable':   db_enabled(),   # UI shows add/edit/delete only when DB is on
+        'editable':   db_enabled(),
     })
 
 
@@ -806,10 +855,49 @@ def _require_db():
 
 def _clients_payload():
     return {
-        'clients':    list(state['weights'].keys()),
+        'clients':    list((state.get('weights') or {}).keys()),
         'benchmarks': state.get('client_benchmarks') or {},
         'editable':   True,
     }
+
+
+def _validate_benchmark(bench):
+    """Return a cleaned benchmark or raise ValueError if it isn't in the
+    canonical list. None/empty is allowed (benchmark is optional). This is the
+    server-side enforcement of the 'strict dropdown' guarantee."""
+    if bench is None:
+        return None
+    b = str(bench).strip()
+    if not b or b.lower() == 'none':
+        return None
+    if b not in CANONICAL_BENCHMARKS:
+        raise ValueError(
+            f"Unknown benchmark {b!r}. Choose one of the supported benchmarks."
+        )
+    return b
+
+
+def _db_error_response(action):
+    """Translate the current exception into a client-safe response.
+
+    Connection-level failures (DB went down mid-request) → 503 with the
+    'database required' message. Everything else → a generic 500 with the full
+    traceback logged server-side (never leak SQL/schema to the client)."""
+    from sqlalchemy.exc import OperationalError, InterfaceError, DBAPIError
+    exc = sys.exc_info()[1]
+    if isinstance(exc, (OperationalError, InterfaceError)) or (
+        isinstance(exc, DBAPIError) and getattr(exc, 'connection_invalidated', False)
+    ):
+        # Force a re-probe next call so a recovered DB is picked up.
+        try:
+            client_db.session._enabled_positive = False  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            pass
+        return jsonify({
+            'error': 'The database is temporarily unavailable. Please try again.'
+        }), 503
+    app.logger.exception("%s failed", action)
+    return jsonify({'error': f'{action} failed. Please try again.'}), 500
 
 
 @app.route('/clients', methods=['POST'])
@@ -819,19 +907,21 @@ def create_client():
         return guard
     body = request.get_json(silent=True) or {}
     name = (body.get('name') or '').strip()
-    benchmark = body.get('benchmark')
     managers = body.get('managers') or []   # optional [{manager_name, weight}]
     try:
+        benchmark = _validate_benchmark(body.get('benchmark'))
         client_db.repository.create_client(name, benchmark, managers)
         refresh_clients_from_db()
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
-    except Exception as e:  # noqa: BLE001
-        return jsonify({'error': f'Could not create client: {e}'}), 500
-    return jsonify({'ok': True, 'created': name, **_clients_payload()})
+    except Exception:  # noqa: BLE001
+        return _db_error_response('Create client')
+    # Echo the normalized stored name so the UI selects the right client.
+    created = next((c for c in (state.get('weights') or {}) if c.lower() == name.lower()), name)
+    return jsonify({'ok': True, 'created': created, **_clients_payload()})
 
 
-@app.route('/clients/<client_name>', methods=['PATCH'])
+@app.route('/clients/<path:client_name>', methods=['PATCH'])
 def update_client(client_name):
     guard = _require_db()
     if guard:
@@ -839,8 +929,8 @@ def update_client(client_name):
     body = request.get_json(silent=True) or {}
     new_name = body.get('name')
     benchmark_provided = 'benchmark' in body
-    benchmark = body.get('benchmark')
     try:
+        benchmark = _validate_benchmark(body.get('benchmark')) if benchmark_provided else None
         client_db.repository.update_client(
             client_name,
             new_name=new_name,
@@ -849,20 +939,20 @@ def update_client(client_name):
         )
         refresh_clients_from_db()
     except ValueError as e:
-        # "not found" → 404, everything else (dup name, empty) → 400
         msg = str(e)
         code = 404 if 'not found' in msg.lower() else 400
         return jsonify({'error': msg}), code
-    except Exception as e:  # noqa: BLE001
-        return jsonify({'error': f'Could not update client: {e}'}), 500
-    return jsonify({
-        'ok': True,
-        'renamed_to': (new_name.strip() if new_name else client_name),
-        **_clients_payload(),
-    })
+    except Exception:  # noqa: BLE001
+        return _db_error_response('Update client')
+    # Report the normalized new name if renamed, else the original.
+    renamed = client_name
+    if new_name:
+        norm = ' '.join(new_name.split())
+        renamed = next((c for c in (state.get('weights') or {}) if c.lower() == norm.lower()), norm)
+    return jsonify({'ok': True, 'renamed_to': renamed, **_clients_payload()})
 
 
-@app.route('/clients/<client_name>', methods=['DELETE'])
+@app.route('/clients/<path:client_name>', methods=['DELETE'])
 def delete_client(client_name):
     guard = _require_db()
     if guard:
@@ -872,12 +962,12 @@ def delete_client(client_name):
         refresh_clients_from_db()
     except ValueError as e:
         return jsonify({'error': str(e)}), 404
-    except Exception as e:  # noqa: BLE001
-        return jsonify({'error': f'Could not delete client: {e}'}), 500
+    except Exception:  # noqa: BLE001
+        return _db_error_response('Delete client')
     return jsonify({'ok': True, 'deleted': client_name, **_clients_payload()})
 
 
-@app.route('/clients/<client_name>/portfolio', methods=['PUT'])
+@app.route('/clients/<path:client_name>/portfolio', methods=['PUT'])
 def save_client_portfolio(client_name):
     """Persist a client's full edited portfolio (the 'Save' button).
 
@@ -895,41 +985,138 @@ def save_client_portfolio(client_name):
     if not isinstance(incoming, list):
         return jsonify({'error': 'Body must include a "managers" list.'}), 400
 
-    # Normalize each manager to the repository's expected shape. The frontend
-    # sends matched_name (+ tab); the DB keys purely on the manager name.
+    # Normalize each manager to the repository's expected shape.
+    #
+    # DB row identity is the STABLE weight-file name (the original workbook
+    # name), NOT matched_name. matched_name is the fuzzy-matched clone key used
+    # only for analytics lookups and can differ from the workbook name by
+    # whitespace/casing/token-sort — persisting it would silently rename the
+    # manager on every save. Fall back to matched_name only when no separate
+    # weight_file_name was supplied (e.g. a manager added mid-session).
     rows = []
+    seen_names = set()
     for m in incoming:
-        name = (m.get('matched_name') or m.get('manager_name') or '').strip()
+        name = (m.get('weight_file_name')
+                or m.get('manager_name')
+                or m.get('matched_name')
+                or '').strip()
         if not name:
             continue
+        if name in seen_names:
+            return jsonify({
+                'error': f'Duplicate manager in save payload: {name!r}.'
+            }), 400
+        seen_names.add(name)
+        try:
+            cw = _validate_weight(m.get('current_weight'), 'current_weight', name)
+            pw = _validate_weight(m.get('proposed_weight'), 'proposed_weight', name)
+            buckets = _validate_buckets(m.get('style_buckets'), name)
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
+        # Only persist style buckets for PLACEHOLDER managers (no clone data).
+        # Real clone managers get their buckets recomputed each run; storing a
+        # snapshot here would later shadow fresh clone output as a stale
+        # "placeholder override". Frontend flags placeholders via is_placeholder.
+        if not m.get('is_placeholder'):
+            buckets = None
         rows.append({
             'manager_name':    name,
-            'current_weight':  m.get('current_weight'),
-            'proposed_weight': m.get('proposed_weight'),
-            'style_buckets':   m.get('style_buckets'),
+            'current_weight':  cw,
+            'proposed_weight': pw,
+            'style_buckets':   buckets,
         })
 
     try:
         client_db.repository.save_client_portfolio(client_name, rows)
-        refresh_clients_from_db()          # reloads state['weights'] (current book)
-        _sync_placeholder_buckets_from_db()  # reloads placeholder buckets into state
+        refreshed = refresh_clients_from_db()   # reloads state['weights']
+        _sync_placeholder_buckets_from_db()      # reloads buckets into state
     except ValueError as e:
         msg = str(e)
         code = 404 if 'not found' in msg.lower() else 400
         return jsonify({'error': msg}), code
-    except Exception as e:  # noqa: BLE001
-        return jsonify({'error': f'Could not save portfolio: {e}'}), 500
+    except Exception:  # noqa: BLE001
+        return _db_error_response('Save portfolio')
+
+    # If the DB write committed but the in-memory refresh failed, don't persist
+    # the (now stale) cache — surface a soft warning instead of silently
+    # baking stale weights to disk.
+    if not refreshed:
+        return jsonify({
+            'ok': True, 'saved': client_name,
+            'warning': 'Saved to the database, but the in-memory view may be '
+                       'stale until reload.',
+        })
 
     save_cache()  # persist the placeholder-bucket change across restarts too
     return jsonify({'ok': True, 'saved': client_name})
 
 
+# ── Save-payload validation helpers ─────────────────────────────────────────
+def _validate_weight(value, field, manager):
+    """Coerce a weight to a finite float >= 0, or raise ValueError."""
+    if value is None:
+        return 0.0
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field} for {manager!r} is not a number.")
+    if not math.isfinite(f):
+        raise ValueError(f"{field} for {manager!r} must be a finite number.")
+    if f < 0:
+        raise ValueError(f"{field} for {manager!r} cannot be negative.")
+    return f
+
+
+def _validate_buckets(buckets, manager):
+    """Coerce style buckets to {str: finite float > 0} or None; raise on junk."""
+    if not buckets:
+        return None
+    if not isinstance(buckets, dict):
+        raise ValueError(f"style_buckets for {manager!r} must be an object.")
+    clean = {}
+    for k, v in buckets.items():
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            raise ValueError(f"style bucket {k!r} for {manager!r} is not a number.")
+        if not math.isfinite(f):
+            raise ValueError(f"style bucket {k!r} for {manager!r} must be finite.")
+        if f > 0:
+            clean[str(k)] = f
+    return clean or None
+
+
+def _normalize_buckets(buckets):
+    """Normalize a {bucket: weight} dict to sum=1.0 (drop non-positive).
+
+    Single source of truth for bucket normalization, used by BOTH the DB sync
+    and the /placeholder_buckets endpoint so the same manager's buckets are
+    identical regardless of which path last wrote them.
+    """
+    if not buckets:
+        return None
+    clean = {}
+    for k, v in buckets.items():
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if f > 0:
+            clean[str(k)] = f
+    total = sum(clean.values())
+    if total <= 0:
+        return None
+    return {k: v / total for k, v in clean.items()}
+
+
 def _sync_placeholder_buckets_from_db():
     """Rebuild state['placeholder_buckets'] from every client's saved buckets.
 
-    Placeholder buckets are keyed by manager name (shared across clients, as the
-    existing /placeholder_buckets route treats them), so we union all clients'
-    saved buckets. No-op when the DB is unavailable.
+    Placeholder buckets are global-by-manager-name in this app (build_portfolio_
+    view looks them up by name across all clients), matching the legacy
+    /placeholder_buckets contract. We union all clients' saved buckets and
+    NORMALIZE each to sum=1.0 so values match what /placeholder_buckets writes,
+    regardless of which path last saved them. No-op when the DB is unavailable.
     """
     if not db_enabled():
         return
@@ -938,8 +1125,9 @@ def _sync_placeholder_buckets_from_db():
         weights, _ = client_db.load_weights_from_db()
         for cname in weights:
             for row in (client_db.repository.load_client_portfolio(cname) or []):
-                if row.get('style_buckets'):
-                    merged[row['manager_name']] = row['style_buckets']
+                nb = _normalize_buckets(row.get('style_buckets'))
+                if nb:
+                    merged[row['manager_name']] = nb
         state['placeholder_buckets'] = merged
     except Exception as e:  # noqa: BLE001
         print(f"[db] failed to sync placeholder buckets: {e}")
@@ -1324,13 +1512,18 @@ def portfolio(client_name):
     if db_enabled():
         try:
             saved = client_db.repository.load_client_portfolio(client_name) or []
+            # Key by the STABLE weight-file name (same identity used on save),
+            # NOT matched_name. proposed_weight is nullable: NULL means "no
+            # draft" so we skip it and keep build_portfolio_view's sensible
+            # proposed==current default.
             proposed_by_name = {
                 r['manager_name']: r.get('proposed_weight')
                 for r in saved
                 if r.get('proposed_weight') is not None
             }
             for m in data.get('managers', []):
-                pw = proposed_by_name.get(m.get('matched_name'))
+                key = m.get('weight_file_name') or m.get('matched_name')
+                pw = proposed_by_name.get(key)
                 if pw is not None:
                     m['proposed_weight'] = pw
         except Exception as e:  # noqa: BLE001
@@ -1359,20 +1552,9 @@ def update_placeholder_buckets():
     if not buckets:
         state['placeholder_buckets'].pop(name, None)
     else:
-        # Coerce to floats and normalise to sum=1.0 so V-G / %SC math
-        # downstream doesn't depend on whether the UI sent 0-1 or 0-100.
-        clean = {}
-        for k, v in buckets.items():
-            try:
-                f = float(v)
-            except (TypeError, ValueError):
-                continue
-            if f > 0:
-                clean[str(k)] = f
-        total = sum(clean.values())
-        if total > 0:
-            clean = {k: v / total for k, v in clean.items()}
-        state['placeholder_buckets'][name] = clean
+        # Normalise to sum=1.0 via the shared helper so this path and the DB
+        # sync path produce identical values for the same manager.
+        state['placeholder_buckets'][name] = _normalize_buckets(buckets) or {}
     save_cache()
     return jsonify({'status': 'ok',
                     'buckets': state['placeholder_buckets'].get(name)})

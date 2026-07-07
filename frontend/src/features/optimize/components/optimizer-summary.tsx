@@ -5,7 +5,7 @@ import type { OptimizerSummary } from "../types";
 const cardStyle: React.CSSProperties = {
   padding: "10px 14px",
   border: "1px solid var(--border)",
-  background: "var(--bg1)",
+  background: "var(--surface2)",
 };
 const label: React.CSSProperties = {
   fontFamily: "var(--mono)",
@@ -17,7 +17,7 @@ const label: React.CSSProperties = {
 const value: React.CSSProperties = {
   fontFamily: "var(--mono)",
   fontSize: 16,
-  color: "var(--text1)",
+  color: "var(--text)",
   marginTop: 4,
 };
 
@@ -83,7 +83,7 @@ export function OptimizerSummaryPanel({ summary }: { summary: OptimizerSummary }
           {summary.skill_uncovered_weight > 0 && (
             <>
               {" · "}skill uncovered weight:{" "}
-              <span style={{ color: "var(--yellow)" }}>
+              <span style={{ color: "var(--amber)" }}>
                 {pct(summary.skill_uncovered_weight)}
               </span>
             </>

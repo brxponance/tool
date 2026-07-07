@@ -120,8 +120,10 @@ export function PlaceholderBucketsModal({ manager, onClose, onSaved }: Props) {
         style={{
           width: 520,
           maxWidth: "90vw",
-          background: "var(--surface1)",
-          border: "1px solid var(--border)",
+          background: "var(--surface)",
+          border: "1px solid var(--border2)",
+          borderRadius: 6,
+          boxShadow: "0 24px 72px rgba(16, 38, 61, 0.28)",
           padding: 20,
         }}
         onClick={(e) => e.stopPropagation()}
@@ -141,7 +143,7 @@ export function PlaceholderBucketsModal({ manager, onClose, onSaved }: Props) {
           style={{
             fontFamily: "var(--mono)",
             fontSize: 14,
-            color: "var(--text1)",
+            color: "var(--text)",
             marginTop: 4,
             marginBottom: 12,
           }}
@@ -191,9 +193,9 @@ export function PlaceholderBucketsModal({ manager, onClose, onSaved }: Props) {
                 }
                 style={{
                   padding: "4px 6px",
-                  background: "var(--bg1)",
+                  background: "var(--surface2)",
                   border: "1px solid var(--border)",
-                  color: "var(--text1)",
+                  color: "var(--text)",
                   fontFamily: "var(--mono)",
                   fontSize: 12,
                 }}
@@ -211,7 +213,7 @@ export function PlaceholderBucketsModal({ manager, onClose, onSaved }: Props) {
             marginTop: 14,
             fontFamily: "var(--mono)",
             fontSize: 11,
-            color: total === 0 || Math.abs(total - 100) < 0.5 ? "var(--text3)" : "var(--yellow)",
+            color: total === 0 || Math.abs(total - 100) < 0.5 ? "var(--text3)" : "var(--amber)",
           }}
         >
           Sum: {total.toFixed(1)}%

@@ -24,11 +24,29 @@ from data_loader import load_weights  # noqa: E402
 from db import repository  # noqa: E402
 from db.session import init_db, is_enabled  # noqa: E402
 
-_DEFAULT_WORKBOOK = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "uploads",
-    "Manager_Weights_3_31.xlsx",
-)
+_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DEFAULT_WORKBOOK = os.path.join(_BACKEND_DIR, "uploads", "Manager_Weights_3_31.xlsx")
+
+
+def _ensure_schema() -> None:
+    """Bring the DB schema to the latest Alembic revision.
+
+    Using Alembic (not Base.metadata.create_all) as the single schema owner
+    avoids the drift where create_all builds tables without stamping
+    alembic_version, which would later make `alembic upgrade head` fail on
+    already-existing tables. Falls back to create_all only if Alembic can't be
+    loaded (e.g. a minimal test env)."""
+    try:
+        from alembic import command
+        from alembic.config import Config
+
+        cfg = Config(os.path.join(_BACKEND_DIR, "alembic.ini"))
+        cfg.set_main_option("script_location", os.path.join(_BACKEND_DIR, "migrations"))
+        command.upgrade(cfg, "head")
+        print("[db] schema migrated to head.")
+    except Exception as e:  # noqa: BLE001
+        print(f"[db] Alembic upgrade unavailable ({e}); falling back to create_all.")
+        init_db()
 
 
 def seed(workbook: str, force: bool = False) -> None:
@@ -38,7 +56,7 @@ def seed(workbook: str, force: bool = False) -> None:
             "or set DATABASE_URL, then retry."
         )
 
-    init_db()  # create tables if they don't exist yet
+    _ensure_schema()  # bring the schema to head via Alembic (creates + stamps)
 
     existing = repository.count_clients()
     if existing and not force:

@@ -650,11 +650,18 @@ export function usePortfolioScreen() {
         throw new Error("Load a client before saving.");
       }
       const managers = state.portfolio.managers.map((m) => ({
+        // weight_file_name is the stable DB identity (the original workbook
+        // name). matched_name is the fuzzy-matched clone key used only for
+        // analytics — never persist it as the row key or the manager gets
+        // silently renamed on save. Fall back to matched_name only for
+        // managers added in-session that have no separate file name.
+        weight_file_name: m.weight_file_name ?? m.matched_name,
         matched_name: m.matched_name,
         tab: m.tab,
         current_weight: m.current_weight,
         proposed_weight: m.proposed_weight,
         style_buckets: m.style_buckets ?? null,
+        is_placeholder: m.is_placeholder ?? false,
       }));
       await savePortfolioDraft(state.selectedClient, managers);
       // Snapshot the now-persisted managers so hasUnsavedChanges goes false.

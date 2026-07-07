@@ -93,9 +93,12 @@ class ClientManager(Base):
     current_weight: Mapped[float] = mapped_column(
         "weight", Float, nullable=False, default=0.0
     )
-    # Proposed (what-if) weight as a fraction. Persisted so a saved draft
-    # survives a refresh. Defaults to 0.
-    proposed_weight: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    # Proposed (what-if) weight as a fraction. NULLABLE on purpose: NULL means
+    # "no draft saved for this manager" (the UI should default proposed=current),
+    # whereas 0.0 means "the user deliberately saved a 0% proposed weight".
+    # The /portfolio overlay only applies non-NULL values, so a freshly seeded
+    # client keeps the sensible proposed==current default until it is saved.
+    proposed_weight: Mapped[float | None] = mapped_column(Float, nullable=True)
     # User-edited style buckets for placeholder managers (no clone data), e.g.
     # {"Core": 0.6, "Value": 0.4}. Null/empty means "use the default Core=1.0".
     style_buckets: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
