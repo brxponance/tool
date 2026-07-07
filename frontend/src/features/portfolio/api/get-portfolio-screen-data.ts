@@ -4,6 +4,7 @@ import type { BackendStatus } from "@/features/setup/types";
 import type {
   ClientsResponse,
   ContributionResponse,
+  DiverseOwnershipResponse,
   IdealComplementResponse,
   MarketCycleResponse,
   PlaceholderBucketUpdateResponse,
@@ -134,6 +135,17 @@ export async function findIdealComplement(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ client_name: client, managers }),
+  });
+}
+
+export async function getDiverseOwnership(
+  managers: PortfolioResponse["managers"],
+  threshold = 50,
+) {
+  return backendJson<DiverseOwnershipResponse>("diverse_ownership", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ managers, threshold }),
   });
 }
 

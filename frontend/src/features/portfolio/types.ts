@@ -19,6 +19,14 @@ export type PortfolioManager = {
   ns_adj_method?: string | null;
   ns_last_month?: string | null;
   betas_3factor?: Record<string, number>;
+  // Qualitative firm/strategy fields injected by the backend when a
+  // qualitative workbook is loaded (null-filled when the manager doesn't
+  // match a firm). See /upload_qualitative.
+  q_firm?: string | null;
+  q_firm_aum?: number | null;
+  q_strategy_aum?: number | null;
+  q_ownership?: string | null;
+  q_diverse_pct?: number | null;
   // True when this manager exists in the weights file but has no clone
   // data (newly-funded manager with <3 years of returns). Style buckets
   // are editable via /placeholder_buckets.
@@ -305,4 +313,20 @@ export type PlaceholderBucketUpdateResponse = {
   status: "ok" | "error";
   buckets?: Record<string, number> | null;
   message?: string;
+};
+
+// Diverse / woman-owned exposure rollup (from /diverse_ownership).
+export type DiverseOwnershipRollup = {
+  weight_pct: number; // % of portfolio weight in diverse firms
+  n_diverse: number; // count of firms ≥ threshold
+  n_firms: number; // total distinct matched firms held
+  ratio_pct: number; // n_diverse / n_firms as %
+  unknown_weight_pct: number; // % of weight in unmatched managers
+};
+
+export type DiverseOwnershipResponse = {
+  has_data: boolean;
+  threshold?: number;
+  current?: DiverseOwnershipRollup;
+  proposed?: DiverseOwnershipRollup;
 };

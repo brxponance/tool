@@ -5,6 +5,7 @@ import { useState } from "react";
 import { formatPercent, sum } from "@/lib/utils";
 
 import { AddManagerModal } from "../components/add-manager-modal";
+import { DiverseOwnershipSection } from "../components/diverse-ownership-section";
 import { IdealComplementSection } from "../components/ideal-complement-section";
 import { PortfolioAnalyticsSections } from "../components/portfolio-analytics-sections";
 import { PortfolioTable } from "../components/portfolio-table";
@@ -151,6 +152,10 @@ export function PortfolioRoute() {
 
       {portfolio && (
         <IdealComplementSection client={selectedClient} managers={managers} />
+      )}
+
+      {portfolio && (
+        <DiverseOwnershipSection client={selectedClient} managers={managers} />
       )}
 
       <AddManagerModal

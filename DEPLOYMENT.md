@@ -15,6 +15,7 @@ production both should sit behind the **same domain** (no CORS required).
 ```powershell
 # In one terminal — backend
 cd backend
+venv\Scripts\python.exe run.py
 python run.py        # → http://127.0.0.1:3001
 
 # In another terminal — frontend

@@ -51,6 +51,15 @@ state = {
     # weights file but missing clone data). Keyed by weight-file manager
     # name. Empty dict means "use default Core=1.0". Persisted across runs.
     'placeholder_buckets': {},
+    # Parsed firm/strategy qualitative data (firm AUM, ownership description,
+    # diverse/woman-owned %, per-strategy AUM). Populated by /upload_qualitative,
+    # read by _qual_lookup for diverse-ownership rollups and manager-row
+    # enrichment. Persisted so it survives restarts.
+    'qualitative_data': None,
+    # Per-tab market-cycle universe classification state (heavy O(N) downside-
+    # capture computation). Precomputed at /run_universe, consumed by
+    # /market_cycle, invalidated when a new factor_returns file is uploaded.
+    'mc_universe_cache': {},
 }
 
 # ── Cache helpers ──────────────────────────────────────────────────────────
@@ -69,6 +78,8 @@ def save_cache():
                 'clone_run_files':         state['clone_run_files'],
                 'security_risk_data':      state['security_risk_data'],
                 'placeholder_buckets':     state.get('placeholder_buckets') or {},
+                'qualitative_data':        state.get('qualitative_data'),
+                'mc_universe_cache':       state.get('mc_universe_cache') or {},
             }, f)
         print("Cache saved.")
     except Exception as e:
@@ -195,6 +206,8 @@ def load_cache():
         state['exposures_data']         = data.get('exposures_data')
         state['norm_skill_by_tab']      = data.get('norm_skill_by_tab', {})
         state['placeholder_buckets']    = data.get('placeholder_buckets') or {}
+        state['qualitative_data']       = data.get('qualitative_data')
+        state['mc_universe_cache']      = data.get('mc_universe_cache') or {}
         cached_files                    = data.get('files', {})
 
         # Resolve each cached path. Drop entries whose files can no longer be
@@ -382,6 +395,12 @@ def upload_files():
                         # A parse error here shouldn't block the upload; just
                         # log it and let the clone run surface the problem.
                         warnings[key] = {'type': 'sniff_error', 'message': str(e)}
+                    # A new factor file invalidates the cached market-cycle
+                    # universe state (built from factor exposures) and the
+                    # loaded factor_df — both must rebuild on demand rather
+                    # than serving stale results.
+                    state['mc_universe_cache'] = {}
+                    state['factor_df'] = None
     return jsonify({'status': 'ok', 'saved': saved, 'warnings': warnings})
 
 
@@ -500,6 +519,9 @@ def status():
         'has_exposures': state['exposures_data'] is not None,
         'exposures_benchmark': (state['exposures_data'] or {}).get('benchmark_name', ''),
         'exposures_managers':  (state['exposures_data'] or {}).get('manager_names', []),
+        'has_qualitative': state.get('qualitative_data') is not None,
+        'qualitative_firms':      (state.get('qualitative_data') or {}).get('n_firms', 0),
+        'qualitative_strategies': (state.get('qualitative_data') or {}).get('n_strategies', 0),
         'files': {k: os.path.basename(v) if isinstance(v, str) else v
                   for k, v in state['files'].items()},
         # Staleness signal: True when the currently-uploaded manager_returns
@@ -610,7 +632,8 @@ def reload_inputs():
 
     Returns a status dict indicating which inputs were refreshed.
     """
-    status = {'weights': 'skipped', 'risk': 'skipped', 'exposures': 'skipped'}
+    status = {'weights': 'skipped', 'risk': 'skipped', 'exposures': 'skipped',
+              'qualitative': 'skipped'}
     errors = {}
 
     # Weights
@@ -640,6 +663,17 @@ def reload_inputs():
         except Exception as e:
             status['exposures'] = 'error'
             errors['exposures'] = str(e)
+
+    # Qualitative firm/strategy data
+    if 'qualitative' in state['files'] and os.path.exists(state['files']['qualitative']):
+        try:
+            from qualitative_loader import parse_qualitative_file
+            state['qualitative_data'] = parse_qualitative_file(state['files']['qualitative'])
+            _QUAL_MATCH_CACHE.clear()  # manager names may have changed
+            status['qualitative'] = 'ok'
+        except Exception as e:
+            status['qualitative'] = 'error'
+            errors['qualitative'] = str(e)
 
     save_cache()
     return jsonify({
@@ -1066,8 +1100,12 @@ def portfolio(client_name):
     # return None across the board)
     for m in data.get('managers', []):
         if m.get('is_placeholder'):
+            # Placeholders still get qualitative fields (they may be a known
+            # firm with FactSet data but no clone), just not norm-skill.
+            m.update(_qual_fields(m.get('matched_name'), m.get('weight_file_name')))
             continue
         m.update(_norm_skill_for(m['tab'], m['matched_name']))
+        m.update(_qual_fields(m['matched_name'], m.get('weight_file_name')))
     # Surface the client's benchmark (as given in the weights file) so the
     # UI can label the risk/exposures tables with the right benchmark name.
     data['client_benchmark'] = (state.get('client_benchmarks') or {}).get(client_name)
@@ -1389,6 +1427,7 @@ def peer_skill_summary(tab):
             'si_skill':  sp.get('si'),
         }
         row.update(_norm_skill_for(tab, name))
+        row.update(_qual_fields(name))
         out.append(row)
     return jsonify({'tab': tab, 'managers': out})
 
@@ -1647,11 +1686,17 @@ def upload_security_risk():
 @app.route('/sleeve_options', methods=['POST'])
 def sleeve_options():
     """Return the available sleeve breakdown options for a client given their
-    benchmark and the benchmarks present in the uploaded security risk file."""
+    benchmark and the benchmarks present in the uploaded risk files."""
     data = request.get_json(silent=True) or {}
     client_name = data.get('client_name')
     bench_str   = (state.get('client_benchmarks') or {}).get(client_name or '')
     available   = (state.get('security_risk_data') or {}).get('available_benchmarks', [])
+    if not available:
+        # Mirror the fallback in /compute_security_risk_exposures: the
+        # Security-Level Risk DNA file may have no embedded 'Risk Summary'
+        # sheet, in which case the benchmark side comes from the separate
+        # Benchmark Risk Summaries upload.
+        available = list((state.get('risk_data') or {}).get('benchmark_names', []))
     from security_risk_engine import get_sleeve_options
     options = get_sleeve_options(bench_str or '', available)
     return jsonify({'options': options, 'benchmark': bench_str})
@@ -1681,20 +1726,58 @@ def compute_security_risk_exposures():
     bench_name  = payload.get('bench')    # exact column name from file
     if not managers:
         return jsonify({'error': 'No managers provided.'})
+
+    # Use security_risk_data as-is, but if the security file has no
+    # embedded 'Risk Summary' sheet (so available_benchmarks is empty),
+    # splice in benchmarks from the separately-uploaded Benchmark Risk
+    # Summaries file. Without this fallback the active-vs-benchmark math
+    # silently degrades to 'absolute portfolio exposures' even when the
+    # user has clearly uploaded benchmark data — they just put it in the
+    # second file rather than as a sheet inside the security file.
+    sec_data = state['security_risk_data']
+    if not sec_data.get('available_benchmarks'):
+        rd = state.get('risk_data') or {}
+        rd_bench_names   = rd.get('benchmark_names', [])
+        rd_style_factors = rd.get('style_factors', {})  # {factor: {col: val}}
+        if rd_bench_names:
+            from security_risk_engine import STYLE_FACTORS as _SF
+            merged = {bn: {} for bn in rd_bench_names}
+            for factor, col_map in rd_style_factors.items():
+                if factor not in _SF:
+                    continue
+                for bn in rd_bench_names:
+                    v = (col_map or {}).get(bn)
+                    if v is not None:
+                        merged[bn][factor] = v
+            sec_data = dict(sec_data)
+            sec_data['benchmarks']           = merged
+            sec_data['available_benchmarks'] = list(rd_bench_names)
+
+    # Always look up the breakdown's sleeve set so we know whether an EM
+    # sleeve exists for this client's benchmark. classify_country needs
+    # this to correctly route EM / unclassified countries:
+    #   3-way (US/Non-US Dev/EM) → EM and unclassified go to EM.
+    #   2-way (US/Non-US)        → EM and unclassified lump into Non-US.
+    # Determined by the BREAKDOWN, not by which sleeve the user has
+    # picked — so picking 'Non-US Dev' inside a 3-way ACWI ex-US split
+    # correctly excludes EM stocks from Non-US Dev.
+    from security_risk_engine import get_sleeve_options
+    bench_str = (state.get('client_benchmarks') or {}).get(client_name or '')
+    all_opts = get_sleeve_options(bench_str or '', sec_data.get('available_benchmarks', []))
+    has_em_sleeve = any(o.get('sleeve') == 'EM' for o in all_opts)
+
     # Fall back to client benchmark from weights file if bench not supplied
-    if not bench_name and client_name:
-        from security_risk_engine import get_sleeve_options
-        bench_str = (state.get('client_benchmarks') or {}).get(client_name or '')
-        avail     = state['security_risk_data'].get('available_benchmarks', [])
-        opts      = get_sleeve_options(bench_str or '', avail)
-        bench_name = opts[0]['bench'] if opts else None
+    if not bench_name:
+        bench_name = all_opts[0]['bench'] if all_opts else None
+
     from security_risk_engine import compute_exposures
     try:
         result = compute_exposures(
             portfolio_managers=managers,
-            security_data=state['security_risk_data'],
+            security_data=sec_data,
             benchmark_name=bench_name,
             sleeve=sleeve,
+            has_em_sleeve=has_em_sleeve,
         )
         return jsonify(result)
     except Exception as e:
@@ -1879,7 +1962,8 @@ def compute_risk_exposures():
 
     bench_lookup = {_bench_norm(b): b for b in bench_cols}
 
-    client_bench_str = (state.get('client_benchmarks') or {}).get(client_name or '')
+    client_bench_str = (data.get('benchmark_name')
+                        or (state.get('client_benchmarks') or {}).get(client_name or ''))
     matched_bench_col = None
     if client_bench_str:
         key = _bench_norm(client_bench_str)
@@ -2598,21 +2682,19 @@ def universe_files():
     return jsonify({'tabs': tabs})
 
 
-@app.route('/run_universe', methods=['POST'])
-def run_universe():
-    """Re-run the clone engine against every staged universe file. Each peer
-    tab is loaded and cloned in turn; results merge into universe_clone_results
-    per-tab (so a partial failure on one tab doesn't wipe others).
+def _start_universe_run():
+    """Guard, then launch the universe clone in a background thread.
+
+    Shared by the /run_universe route and the startup auto-run hook. Returns a
+    (status, message|tabs) tuple describing what happened; it never raises.
     """
     uni_map = state.get('files', {}).get('universe_returns', {})
     if not isinstance(uni_map, dict) or not uni_map:
-        return jsonify({'status': 'error',
-                        'message': 'No universe files staged. Upload at least one universe file first.'})
+        return ('error', 'No universe files staged. Upload at least one universe file first.')
     if 'factor_returns' not in state['files']:
-        return jsonify({'status': 'error',
-                        'message': 'Factor returns not loaded.'})
+        return ('error', 'Factor returns not loaded.')
     if state['running']:
-        return jsonify({'status': 'error', 'message': 'Another run is in progress'})
+        return ('error', 'Another run is in progress')
     reset_progress(phase='Preparing universe clone run', total=0)
     state.update({'running': True, 'error': None})
 
@@ -2702,6 +2784,26 @@ def run_universe():
                 set_progress_phase(f'Computing normalized skill ({peer_tab})',
                                    total=grand_total)
                 recompute_norm_skill(tabs=[peer_tab])
+                # Precompute the market-cycle universe state for this tab
+                # while we're already paying the load — eliminates the
+                # multi-second 'first /market_cycle call after restart' lag.
+                try:
+                    from market_cycle import precompute_universe_state
+                    from risk_engine import PEER_BENCHMARKS as _PB
+                    bench_map = {t: _PB.get(t, {}).get('core') for t in _PB}
+                    if state.get('factor_df') is None:
+                        state['factor_df'] = load_factor_returns(state['files']['factor_returns'])
+                    if 'mc_universe_cache' not in state or state['mc_universe_cache'] is None:
+                        state['mc_universe_cache'] = {}
+                    us = precompute_universe_state(
+                        state['universe_clone_results'], peer_tab,
+                        state['factor_df'], bench_map,
+                    )
+                    if us is not None:
+                        state['mc_universe_cache'][peer_tab] = us
+                        cb(f"  market-cycle universe state cached for {peer_tab}.")
+                except Exception as e:
+                    cb(f"  market-cycle precompute failed for {peer_tab}: {e}")
                 save_cache()
                 advance_progress_base()
 
@@ -2716,7 +2818,19 @@ def run_universe():
             state['running'] = False
 
     threading.Thread(target=worker, daemon=True).start()
-    return jsonify({'status': 'started', 'tabs': list(uni_map.keys())})
+    return ('started', list(uni_map.keys()))
+
+
+@app.route('/run_universe', methods=['POST'])
+def run_universe():
+    """Re-run the clone engine against every staged universe file. Each peer
+    tab is loaded and cloned in turn; results merge into universe_clone_results
+    per-tab (so a partial failure on one tab doesn't wipe others).
+    """
+    status, payload = _start_universe_run()
+    if status == 'error':
+        return jsonify({'status': 'error', 'message': payload})
+    return jsonify({'status': 'started', 'tabs': payload})
 
 
 @app.route('/market_cycle', methods=['POST'])
@@ -2779,6 +2893,29 @@ def market_cycle():
     # EAFE_SC isn't a peer tab in the buy list — it's a benchmark override —
     # so no mapping needed here for market cycle purposes.
 
+    # The universe-side classification state is precomputed at the end of
+    # each /run_universe tab and persisted in state['mc_universe_cache']
+    # (saved/loaded with the cache pickle). Look it up here; only fall
+    # back to on-demand compute if the entry is missing — that path is
+    # for caches predating the precompute hook or for users who haven't
+    # re-run universe since this code shipped.
+    from market_cycle import precompute_universe_state
+    if 'mc_universe_cache' not in state or state['mc_universe_cache'] is None:
+        state['mc_universe_cache'] = {}
+    mc_cache = state['mc_universe_cache']
+
+    def _get_universe_state(tab):
+        us = mc_cache.get(tab)
+        if us is not None:
+            return us
+        # Lazy fallback: build it now and stash for next time. Save not
+        # required immediately — the next save_cache() call (after a clone
+        # run, weights reload, etc.) will persist it.
+        us = precompute_universe_state(ucr, tab, state['factor_df'], bench_map)
+        if us is not None:
+            mc_cache[tab] = us
+        return us
+
     all_placements = {}  # name -> placement dict (with tab, weights)
     tabs_without_universe = []
     for tab, mgrs in by_tab.items():
@@ -2786,7 +2923,10 @@ def market_cycle():
             tabs_without_universe.append(tab)
             continue
         try:
-            placements = classify_peer_group(mgrs, ucr, state['factor_df'], bench_map)
+            placements = classify_peer_group(
+                mgrs, ucr, state['factor_df'], bench_map,
+                universe_state=_get_universe_state(tab),
+            )
         except Exception as e:
             import traceback
             return jsonify({'error': f'Classification failed for {tab}: {e}',
@@ -2898,6 +3038,88 @@ def portfolio_exposures():
         managers, state['exposures_data'], grouping,
         benchmark_name=bmk_name,
         sub_grouping=sub_grouping,
+    )
+    return jsonify(result)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Holdings-overlap matrix (Portfolio tab)
+# ─────────────────────────────────────────────────────────────────────────
+def _resolve_overlap_benchmark(client_name, bmk_name):
+    """Same benchmark-resolution cascade the exposures tab uses, so the
+    overlap matrix matches managers to the same exposure-file sleeves."""
+    if not bmk_name and client_name:
+        bmk_name = (state.get('client_benchmarks') or {}).get(client_name)
+    if not bmk_name and client_name:
+        bmk_name = CLIENT_EXPOSURE_BENCHMARK.get(client_name)
+    return bmk_name
+
+
+@app.route('/holdings_overlap', methods=['POST'])
+def holdings_overlap():
+    """
+    Pairwise holdings-overlap matrix for the current or proposed portfolio.
+
+    POST JSON: {
+        managers: [{matched_name, weight_file_name?, current_weight, proposed_weight}],
+        client_name:  str (optional — resolves the benchmark matching hint),
+        weight_state: 'current' | 'proposed'  (default 'current'),
+        benchmark_name: str (optional explicit override)
+    }
+    Returns the matrix (see overlap_engine.compute_holdings_overlap).
+    """
+    from overlap_engine import compute_holdings_overlap
+    if state['exposures_data'] is None:
+        return jsonify({'error': 'No exposure data loaded. Upload a FactSet '
+                                 'exposures file on the Setup tab.'})
+    payload      = request.get_json(silent=True) or {}
+    managers     = payload.get('managers', [])
+    client_name  = payload.get('client_name')
+    weight_state = payload.get('weight_state', 'current')
+    match_basis  = payload.get('match_basis', 'sedol')
+    bmk_name     = _resolve_overlap_benchmark(client_name,
+                                              payload.get('benchmark_name'))
+    if not managers:
+        return jsonify({'error': 'No managers provided.'})
+    result = compute_holdings_overlap(
+        managers, state['exposures_data'],
+        benchmark_name=bmk_name, weight_state=weight_state,
+        match_basis=match_basis,
+    )
+    return jsonify(result)
+
+
+@app.route('/holdings_overlap_detail', methods=['POST'])
+def holdings_overlap_detail():
+    """
+    Shared-security detail for one manager pair (drill-down panel).
+
+    POST JSON: {
+        managers: [...same as /holdings_overlap...],
+        name_i: str, name_j: str,
+        client_name: str (optional), weight_state: 'current'|'proposed',
+        top_n: int (optional — cap the returned rows)
+    }
+    """
+    from overlap_engine import compute_pair_detail
+    if state['exposures_data'] is None:
+        return jsonify({'error': 'No exposure data loaded.'})
+    payload      = request.get_json(silent=True) or {}
+    managers     = payload.get('managers', [])
+    name_i       = payload.get('name_i')
+    name_j       = payload.get('name_j')
+    client_name  = payload.get('client_name')
+    weight_state = payload.get('weight_state', 'current')
+    match_basis  = payload.get('match_basis', 'sedol')
+    top_n        = payload.get('top_n')
+    bmk_name     = _resolve_overlap_benchmark(client_name,
+                                              payload.get('benchmark_name'))
+    if not (managers and name_i and name_j):
+        return jsonify({'error': 'managers, name_i and name_j are required.'})
+    result = compute_pair_detail(
+        managers, state['exposures_data'], name_i, name_j,
+        benchmark_name=bmk_name, weight_state=weight_state, top_n=top_n,
+        match_basis=match_basis,
     )
     return jsonify(result)
 
@@ -3027,6 +3249,246 @@ def optimize_candidates(peer_group):
     # Sort: same peer group first (when peer_group matches), then by name
     out.sort(key=lambda r: (r['tab'] != peer_group, r['tab'], r['name'].lower()))
     return jsonify({'candidates': out, 'peer_group': peer_group})
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Qualitative firm/strategy data — diverse/woman-owned ownership tracking
+# ─────────────────────────────────────────────────────────────────────────
+@app.route('/upload_qualitative', methods=['POST'])
+def upload_qualitative():
+    """Accept the layered firm/strategy qualitative XLSX, parse it, cache it."""
+    from qualitative_loader import parse_qualitative_file
+    f = request.files.get('qualitative')
+    if not f:
+        return jsonify({'status': 'error', 'message': 'No file provided.'})
+    fname = secure_filename(f.filename)
+    path  = save_uploaded_file(f, fname, app.config['UPLOAD_FOLDER'])
+    state['files']['qualitative'] = path
+    try:
+        data = parse_qualitative_file(path)
+        state['qualitative_data'] = data
+        _QUAL_MATCH_CACHE.clear()
+        save_cache()
+        return jsonify({
+            'status':       'ok',
+            'n_firms':      data['n_firms'],
+            'n_strategies': data['n_strategies'],
+            'warnings':     data.get('warnings', []),
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({'status': 'error', 'message': str(e),
+                        'traceback': traceback.format_exc()})
+
+
+# ── Qualitative join: manager name → firm/strategy record ──────────────────
+# Cache the fuzzy match per (qualitative-version, name) so the peer tables and
+# portfolio view don't re-run rapidfuzz for every row on every render.
+_QUAL_MATCH_CACHE = {}
+
+
+def _qual_lookup(name, weight_file_name=None):
+    """Return the qualitative record for a manager, matching its name (or the
+    weights-file label) against the strategy keys in the qualitative file.
+    Cascade: exact → whitespace/case-normalised → fuzzy (WRatio ≥ 86).
+    Returns None if no confident match or no qualitative data loaded."""
+    qd = state.get('qualitative_data')
+    if not qd or not qd.get('strategies'):
+        return None
+    strategies = qd['strategies']
+
+    for cand in (name, weight_file_name):
+        if not cand:
+            continue
+        c = str(cand).strip()
+        # 1 — exact
+        if c in strategies:
+            return strategies[c]
+        # 2 — whitespace/case-normalised (handles 'Ativo ' vs 'Ativo',
+        #     'Castleark' vs 'CastleArk')
+        cl = c.lower().strip()
+        for k, v in strategies.items():
+            if str(k).lower().strip() == cl:
+                return v
+
+    # 3 — fuzzy fallback, guarded by a high cutoff so we don't mis-attach
+    from rapidfuzz import process, fuzz
+    keys = list(strategies.keys())
+    ck = f"{id(qd)}::{name}::{weight_file_name}"
+    if ck in _QUAL_MATCH_CACHE:
+        hit = _QUAL_MATCH_CACHE[ck]
+        return strategies.get(hit) if hit else None
+    best = None
+    for cand in (name, weight_file_name):
+        if not cand:
+            continue
+        m = process.extractOne(str(cand), keys, scorer=fuzz.WRatio, score_cutoff=86)
+        if m:
+            best = m[0]
+            break
+    _QUAL_MATCH_CACHE[ck] = best
+    return strategies.get(best) if best else None
+
+
+def _qual_fields(name, weight_file_name=None):
+    """Flat dict of qualitative fields for a manager, always the same shape
+    (None-filled when unmatched) so the frontend can render uniformly."""
+    rec = _qual_lookup(name, weight_file_name)
+    if not rec:
+        return {'q_firm': None, 'q_firm_aum': None, 'q_strategy_aum': None,
+                'q_ownership': None, 'q_diverse_pct': None}
+    return {
+        'q_firm':         rec.get('firm'),
+        'q_firm_aum':     rec.get('firm_aum'),
+        'q_strategy_aum': rec.get('strategy_aum'),
+        'q_ownership':    rec.get('ownership'),
+        'q_diverse_pct':  rec.get('diverse_pct'),
+    }
+
+
+@app.route('/diverse_ownership', methods=['POST'])
+def diverse_ownership():
+    """
+    Portfolio-level diverse/woman-owned exposure. Rolls managers up to firms
+    (a client can hold several strategies from one firm), then answers:
+    how much of the portfolio sits with firms whose diverse/woman ownership
+    is >= threshold (default 50%), by weight and by firm count.
+    """
+    qd = state.get('qualitative_data')
+    if not qd or not qd.get('strategies'):
+        return jsonify({'has_data': False})
+    payload   = request.get_json(silent=True) or {}
+    managers  = payload.get('managers', [])
+    threshold = float(payload.get('threshold', 50) or 50)
+
+    def rollup(wkey):
+        firms = {}
+        unknown_w = 0.0
+        total_w = 0.0
+        for m in managers:
+            w = float(m.get(wkey, 0) or 0)
+            if w <= 0:
+                continue
+            total_w += w
+            rec = _qual_lookup(m.get('matched_name'), m.get('weight_file_name'))
+            if not rec or not rec.get('firm'):
+                unknown_w += w
+                continue
+            f = rec['firm']
+            if f not in firms:
+                firms[f] = {'weight': 0.0, 'diverse_pct': rec.get('diverse_pct')}
+            firms[f]['weight'] += w
+        n_firms = len(firms)
+        div_firms = [f for f, d in firms.items()
+                     if d['diverse_pct'] is not None and d['diverse_pct'] >= threshold]
+        div_w = sum(firms[f]['weight'] for f in div_firms)
+        wpct = (100.0 * div_w / total_w) if total_w > 0 else 0.0
+        return {
+            'weight_pct':   round(wpct, 2),
+            'n_diverse':    len(div_firms),
+            'n_firms':      n_firms,
+            'ratio_pct':    round(100.0 * len(div_firms) / n_firms, 1) if n_firms else 0.0,
+            'unknown_weight_pct': round(100.0 * unknown_w / total_w, 1) if total_w > 0 else 0.0,
+        }
+
+    return jsonify({
+        'has_data':  True,
+        'threshold': threshold,
+        'current':   rollup('current_weight'),
+        'proposed':  rollup('proposed_weight'),
+    })
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  PowerPoint "Print Memo Report" export (Portfolio tab)
+# ─────────────────────────────────────────────────────────────────────────
+@app.route('/export_portfolio_pptx', methods=['POST'])
+def export_portfolio_pptx():
+    """Build the 'Print Memo Report' PowerPoint deck for the current portfolio.
+
+    Request JSON (assembled by the frontend from already-rendered panels):
+      {
+        "client_name":      str,
+        "benchmark_name":   str | null,
+        "images": {portfolio_managers, vg_positioning, factset_risk, mcr, market_cycle}
+      }
+    Each image is a base64 data-URL PNG (or null to skip that slide).
+
+    Returns the binary .pptx with Content-Disposition set for download.
+    If a section's data is missing the slide is skipped; the response header
+    'X-Skipped-Slides' communicates that back to the UI.
+    """
+    from pptx_export import build_portfolio_pptx
+    from flask import Response
+
+    payload = request.get_json(silent=True) or {}
+    images = payload.get('images') or {}
+    if not any(images.get(k) for k in
+               ('portfolio_managers', 'vg_positioning', 'factset_risk', 'mcr', 'market_cycle')):
+        return jsonify({'status': 'error',
+                        'error': 'No panel screenshots provided — '
+                                 'select a client and wait for the page to fully render.'}), 400
+
+    try:
+        data, summary = build_portfolio_pptx(payload)
+    except Exception as e:
+        import traceback
+        return jsonify({'status': 'error', 'error': str(e),
+                        'trace': traceback.format_exc()}), 500
+
+    # Filename: {ClientName}_Memo_Report_{YYYY-MM-DD}.pptx
+    from datetime import date
+    client = (payload.get('client_name') or 'Portfolio').replace(' ', '_')
+    safe   = ''.join(ch for ch in client if ch.isalnum() or ch in '_-')
+    fname  = f"{safe}_Memo_Report_{date.today().isoformat()}.pptx"
+
+    resp = Response(
+        data,
+        mimetype='application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    )
+    resp.headers['Content-Disposition'] = f'attachment; filename="{fname}"'
+    resp.headers['Content-Length']      = str(len(data))
+    # Comma-separated list of section names that were omitted, if any
+    if summary.get('skipped'):
+        resp.headers['X-Skipped-Slides'] = '; '.join(summary['skipped'])
+    return resp
+
+
+def _auto_run_universe_on_startup():
+    """If a universe file is staged on disk but its clones haven't been run yet,
+    kick off the universe clone automatically in the background at startup — so
+    the Market Cycle view populates without the user clicking 'Run Universe
+    Clones'. The first boot pays the multi-minute compute once; results are
+    cached to results.pkl, so every later boot sees cached results here and
+    skips the run. Guards keep it from firing when it isn't needed or safe:
+      • a universe file must actually be staged (and exist on disk),
+      • factor returns must be loaded (the clone needs them),
+      • no universe clone results may already be cached (else we'd redo work),
+      • no run may already be in progress.
+    Failures are swallowed — a bad auto-run must never stop the server booting.
+    """
+    try:
+        uni_map = state.get('files', {}).get('universe_returns', {})
+        if not isinstance(uni_map, dict) or not uni_map:
+            return
+        if not any(isinstance(p, str) and os.path.exists(p) for p in uni_map.values()):
+            return
+        if 'factor_returns' not in state.get('files', {}):
+            return
+        if state.get('universe_clone_results'):
+            return  # already cloned — cached results are enough
+        if state.get('running'):
+            return
+        print("Auto-running universe clones on startup (staged file, no cached results)...")
+        status, payload = _start_universe_run()
+        print(f"  universe auto-run: {status} ({payload})")
+    except Exception as e:
+        print(f"  universe auto-run skipped due to error: {e}")
+
+
+# Fire the auto-run at import time so it happens under both `python run.py`
+# (which does `from app import app`) and `python app.py`.
+_auto_run_universe_on_startup()
 
 
 if __name__ == '__main__':

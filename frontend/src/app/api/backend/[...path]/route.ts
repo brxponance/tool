@@ -56,6 +56,19 @@ async function forward(request: NextRequest, context: RouteContext) {
         if (contentType) {
           responseHeaders.set("content-type", contentType);
         }
+        // Forward the headers a binary download needs. Without these the
+        // browser can't read the filename or the skipped-slides list from
+        // the /export_portfolio_pptx response.
+        for (const passthrough of [
+          "content-disposition",
+          "content-length",
+          "x-skipped-slides",
+        ]) {
+          const value = upstream.headers.get(passthrough);
+          if (value) {
+            responseHeaders.set(passthrough, value);
+          }
+        }
 
         return new Response(upstream.body, {
           status: upstream.status,

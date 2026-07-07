@@ -52,6 +52,7 @@ type UploadSlot = {
     | "risk_summary"
     | "security_risk"
     | "exposures"
+    | "qualitative"
     | "universe_returns";
   endpoint: string;
   field: string;
@@ -110,6 +111,14 @@ const UPLOAD_SLOTS: UploadSlot[] = [
     icon: "📊",
   },
   {
+    key: "qualitative",
+    endpoint: "upload_qualitative",
+    field: "qualitative",
+    label: "Qualitative (Ownership)",
+    hint: "Optional — firm/strategy AUM & diverse-ownership %",
+    icon: "🏛️",
+  },
+  {
     key: "universe_returns",
     endpoint: "upload_universe_consolidated",
     field: "universe_returns",
@@ -136,6 +145,10 @@ function hasStagedFile(status: BackendStatus | undefined, key: UploadSlot["key"]
     return status.has_exposures || Boolean(status.files[key]);
   }
 
+  if (key === "qualitative") {
+    return status.has_qualitative || Boolean(status.files[key]);
+  }
+
   if (key === "universe_returns") {
     return status.has_universe || status.universe_files_staged.length > 0;
   }
@@ -158,6 +171,10 @@ function fileLabel(status: BackendStatus | undefined, key: UploadSlot["key"]) {
 
   if (key === "exposures" && status.has_exposures && status.exposures_benchmark) {
     return `${status.exposures_benchmark} — ${status.exposures_managers.length} managers loaded`;
+  }
+
+  if (key === "qualitative" && status.has_qualitative) {
+    return `${status.qualitative_firms ?? 0} firms, ${status.qualitative_strategies ?? 0} strategies loaded`;
   }
 
   if (key === "universe_returns") {

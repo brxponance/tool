@@ -9,6 +9,9 @@ export type BackendStatus = {
   has_exposures: boolean;
   exposures_benchmark: string;
   exposures_managers: string[];
+  has_qualitative: boolean;
+  qualitative_firms: number;
+  qualitative_strategies: number;
   files: Record<string, string | Record<string, string>>;
   clone_stale: boolean;
   clone_run_files: Record<string, string>;

@@ -6,6 +6,7 @@ export const BACKEND_PROXY_BASE = "/api/backend";
 export const APP_NAV_ITEMS = [
   { href: "/setup", label: "Setup", eyebrow: "Connect" },
   { href: "/portfolio", label: "Portfolio", eyebrow: "Weights" },
+  { href: "/overlap", label: "Overlap", eyebrow: "Holdings" },
   { href: "/peer-groups", label: "Peer Groups", eyebrow: "Compare" },
   { href: "/manager-detail", label: "Manager Detail", eyebrow: "Inspect" },
   { href: "/optimize", label: "Optimize", eyebrow: "Solve" },

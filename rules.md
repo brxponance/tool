@@ -1,0 +1,1 @@
+1. Always add a tldr depe review of your text at the end of all your messages 

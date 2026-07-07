@@ -10,6 +10,7 @@ import {
   ReportPerfTrailing,
   ReportQtrExcess,
 } from "../components/report-page3";
+import { PptxExportButton } from "../components/pptx-export-button";
 import { useReportScreen } from "../hooks/use-report-screen";
 import { buildReportView } from "../lib/build-report-view";
 
@@ -88,6 +89,10 @@ export function ReportRoute() {
             >
               Print / Export PDF
             </button>
+            <PptxExportButton
+              clientName={selectedClient}
+              benchmarkName={r.benchmark ?? null}
+            />
           </div>
         </div>
       </div>
@@ -119,17 +124,27 @@ export function ReportRoute() {
 
       <div className="rpt-sheet">
         <ReportCover data={r} />
-        <ReportHoldings managers={r.managers} />
+        <div id="rpt-capture-portfolio-managers">
+          <ReportHoldings managers={r.managers} />
+        </div>
 
         <div className="rpt-row-2col">
-          <ReportVGPositioning portfolioVg={r.portfolio_vg} />
-          <ReportFactsetRisk fr={r.factset_risk} />
+          <div id="rpt-capture-vg-positioning">
+            <ReportVGPositioning portfolioVg={r.portfolio_vg} />
+          </div>
+          <div id="rpt-capture-factset-risk">
+            <ReportFactsetRisk fr={r.factset_risk} />
+          </div>
         </div>
 
         <ReportExposureCards exposures={r.exposures} />
 
-        <ReportMarketCycle placements={r.market_cycle} />
-        <ReportMCR mcr={r.mcr} />
+        <div id="rpt-capture-market-cycle">
+          <ReportMarketCycle placements={r.market_cycle} />
+        </div>
+        <div id="rpt-capture-mcr">
+          <ReportMCR mcr={r.mcr} />
+        </div>
 
         <section className="rpt-section rpt-section-p3 rpt-section-perf">
           <h3 className="rpt-section-title">

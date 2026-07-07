@@ -7,6 +7,9 @@ openpyxl>=3.1.0
 rapidfuzz>=3.0.0
 werkzeug>=2.3.0
 osqp>=0.6.0
+# PowerPoint export (/export_portfolio_pptx)
+python-pptx>=0.6.21
+lxml>=4.9.0
 # AWS deployment dependencies (optional — only used when S3_BUCKET env var is set)
 boto3>=1.28.0
 flask-cors>=4.0.0
