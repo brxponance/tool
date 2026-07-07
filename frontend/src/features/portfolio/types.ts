@@ -274,6 +274,9 @@ export type PortfolioExposuresResponse = {
 export type ClientsResponse = {
   clients: string[];
   benchmarks: Record<string, string>;
+  // True when the Postgres client DB is available, so the UI can offer
+  // add/rename/delete. Absent (undefined) on older backends → treated as false.
+  editable?: boolean;
 };
 
 export type IdealComplementCandidate = {

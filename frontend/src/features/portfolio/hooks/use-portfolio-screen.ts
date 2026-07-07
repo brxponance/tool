@@ -4,6 +4,9 @@ import { startTransition, useEffect, useEffectEvent, useRef, useState } from "re
 import type { BackendStatus } from "@/features/setup/types";
 
 import {
+  createClient,
+  deleteClient,
+  getBenchmarkCatalog,
   getPortfolioContribution,
   getPortfolioContributionPreview,
   getPortfolio,
@@ -15,6 +18,8 @@ import {
   getPortfolioRiskExposures,
   getPortfolioStatus,
   getPortfolioStats,
+  savePortfolioDraft,
+  updateClient,
 } from "../api/get-portfolio-screen-data";
 import {
   getPortfolioManagerCatalog,
@@ -38,6 +43,8 @@ import type {
 type PortfolioScreenState = {
   clients: ClientsResponse["clients"];
   benchmarks: ClientsResponse["benchmarks"];
+  clientsEditable: boolean;
+  benchmarkOptions: string[];
   status: BackendStatus | null;
   selectedClient: string | null;
   portfolio: PortfolioResponse | null;
@@ -64,6 +71,8 @@ type PortfolioScreenState = {
 const initialState: PortfolioScreenState = {
   clients: [],
   benchmarks: {},
+  clientsEditable: false,
+  benchmarkOptions: [],
   status: null,
   selectedClient: null,
   portfolio: null,
@@ -452,9 +461,12 @@ export function usePortfolioScreen() {
     setState((current) => ({ ...current, loading: true, error: null }));
 
     try {
-      const [clientsData, status] = await Promise.all([
+      const [clientsData, status, benchmarkCatalog] = await Promise.all([
         getPortfolioClients(),
         getPortfolioStatus(),
+        // Non-critical: an empty list just means the benchmark dropdown has
+        // only the current value; never let it break client loading.
+        getBenchmarkCatalog().catch(() => ({ benchmarks: [] as string[] })),
       ]);
       const selectedClient = clientsData.clients[0] ?? null;
 
@@ -462,6 +474,8 @@ export function usePortfolioScreen() {
         ...current,
         clients: clientsData.clients,
         benchmarks: clientsData.benchmarks,
+        clientsEditable: Boolean(clientsData.editable),
+        benchmarkOptions: benchmarkCatalog.benchmarks ?? [],
         status,
         selectedClient,
         loading: false,
@@ -617,8 +631,47 @@ export function usePortfolioScreen() {
     state.status,
   ]);
 
+  // "Dirty" when the current portfolio differs from what's persisted in the
+  // DB — drives the Save/Discard button state. Only meaningful when the DB is
+  // on (otherwise there's nothing to save to).
+  const hasUnsavedChanges =
+    state.clientsEditable &&
+    Boolean(state.portfolio) &&
+    portfolioHasDraftChanges(
+      state.portfolio as PortfolioResponse,
+      state.persistedPortfolioManagers,
+    );
+
   return {
     ...state,
+    hasUnsavedChanges,
+    async savePortfolio() {
+      if (!state.selectedClient || !state.portfolio) {
+        throw new Error("Load a client before saving.");
+      }
+      const managers = state.portfolio.managers.map((m) => ({
+        matched_name: m.matched_name,
+        tab: m.tab,
+        current_weight: m.current_weight,
+        proposed_weight: m.proposed_weight,
+        style_buckets: m.style_buckets ?? null,
+      }));
+      await savePortfolioDraft(state.selectedClient, managers);
+      // Snapshot the now-persisted managers so hasUnsavedChanges goes false.
+      setState((current) => ({
+        ...current,
+        persistedPortfolioManagers: current.portfolio
+          ? clonePortfolioManagers(current.portfolio.managers)
+          : current.persistedPortfolioManagers,
+      }));
+    },
+    discardChanges() {
+      // Reload from the backend, dropping in-memory edits back to the saved
+      // version. loadPortfolio resets persistedPortfolioManagers too.
+      if (state.selectedClient) {
+        void loadPortfolio(state.selectedClient);
+      }
+    },
     async addManager(manager: PortfolioManagerCatalogItem) {
       if (!state.portfolio) {
         throw new Error("Load a portfolio before adding managers.");
@@ -721,6 +774,48 @@ export function usePortfolioScreen() {
       startTransition(() => {
         setState((current) => ({ ...current, selectedClient: client }));
       });
+    },
+    // Apply a roster returned by a CRUD endpoint and select `preferred` (or the
+    // first remaining client). Selecting triggers the existing portfolio-load
+    // effect via selectedClient.
+    async addClient(input: { name: string; benchmark?: string | null }) {
+      const data = await createClient(input);
+      const preferred = data.created;
+      setState((current) => ({
+        ...current,
+        clients: data.clients,
+        benchmarks: data.benchmarks,
+        clientsEditable: Boolean(data.editable ?? current.clientsEditable),
+        selectedClient: data.clients.includes(preferred)
+          ? preferred
+          : (data.clients[0] ?? null),
+      }));
+    },
+    async renameClient(
+      currentName: string,
+      input: { name?: string; benchmark?: string | null },
+    ) {
+      const data = await updateClient(currentName, input);
+      const preferred = data.renamed_to;
+      setState((current) => ({
+        ...current,
+        clients: data.clients,
+        benchmarks: data.benchmarks,
+        clientsEditable: Boolean(data.editable ?? current.clientsEditable),
+        selectedClient: data.clients.includes(preferred)
+          ? preferred
+          : (data.clients[0] ?? null),
+      }));
+    },
+    async removeClient(name: string) {
+      const data = await deleteClient(name);
+      setState((current) => ({
+        ...current,
+        clients: data.clients,
+        benchmarks: data.benchmarks,
+        clientsEditable: Boolean(data.editable ?? current.clientsEditable),
+        selectedClient: data.clients[0] ?? null,
+      }));
     },
     updateManagerProposedWeight(managerKey: string, proposedWeightPercent: number) {
       startTransition(() => {

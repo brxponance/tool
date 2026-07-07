@@ -1,5 +1,26 @@
 # Journal
 
+## 2026-07-07 — Moved project off OneDrive to C:\dev\pc_tool (canonical working copy)
+OneDrive's on-demand file hydration was intermittently failing reads of
+node_modules/.next files, which crashed `next build` AND `next dev` with
+`UNKNOWN: unknown error, read` (errno -4094), and even left some uploaded data
+files as unreadable dehydrated placeholders. Fixed by relocating:
+- Fresh `git clone` of origin (HEAD 5a0b69a) into **C:\dev\pc_tool** — this is
+  now the working copy. Reinstalled frontend deps and rebuilt the backend venv
+  there. Copied the gitignored data (backend/uploads/*.xlsx + cache/results.pkl)
+  so it boots fully loaded (139 managers, 12 portfolios, ISC universe).
+- Verified: `npm run dev` binds to **:3000** (no more accidental :3001
+  collision), backend on :3001, browser UI works end-to-end with 0 console
+  errors, and `next build` is fully green WITH the real type-check
+  ("Finished TypeScript in 7.1s", all 11 routes) — so the OneDrive path was the
+  entire cause.
+- Removed the `typescript.ignoreBuildErrors` workaround from next.config.ts
+  (commit e2e51b6, local only — not pushed). The old OneDrive copy and the
+  temporary `C:\Users\BryanRodas\pc_tool_fe` can be retired.
+- Run from now on: backend `cd C:\dev\pc_tool\backend; venv\Scripts\python.exe
+  run.py`; frontend `cd C:\dev\pc_tool\frontend; npm run dev` → open
+  http://localhost:3000.
+
 ## 2026-07-07 — Sync teammate's monolith features into backend + frontend
 
 Ported everything the teammate added in `clone_tool/` (the monolithic HTML/Flask

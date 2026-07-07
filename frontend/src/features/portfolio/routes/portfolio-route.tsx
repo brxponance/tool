@@ -5,6 +5,7 @@ import { useState } from "react";
 import { formatPercent, sum } from "@/lib/utils";
 
 import { AddManagerModal } from "../components/add-manager-modal";
+import { ClientManageModal } from "../components/client-manage-modal";
 import { DiverseOwnershipSection } from "../components/diverse-ownership-section";
 import { IdealComplementSection } from "../components/ideal-complement-section";
 import { PortfolioAnalyticsSections } from "../components/portfolio-analytics-sections";
@@ -13,14 +14,25 @@ import { usePortfolioScreen } from "../hooks/use-portfolio-screen";
 
 export function PortfolioRoute() {
   const [isAddManagerOpen, setIsAddManagerOpen] = useState(false);
+  const [clientModal, setClientModal] = useState<null | "add" | "rename">(null);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const {
+    addClient,
     addManager,
     addableManagers,
     benchmarks,
+    benchmarkOptions,
     clients,
+    clientsEditable,
     contribution,
+    discardChanges,
     ensureManagerCatalog,
     error,
+    hasUnsavedChanges,
+    removeClient,
+    renameClient,
+    savePortfolio,
     exposureMenu,
     loadingAncillary,
     loadingExposures,
@@ -79,6 +91,48 @@ export function PortfolioRoute() {
             ))}
           </select>
         </div>
+        {clientsEditable ? (
+          <div className="flex items-center" style={{ gap: 6 }}>
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              title="Add a new client"
+              onClick={() => setClientModal("add")}
+            >
+              + Add Client
+            </button>
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              title="Rename the selected client"
+              disabled={!selectedClient}
+              onClick={() => setClientModal("rename")}
+            >
+              Rename
+            </button>
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              title="Delete the selected client"
+              disabled={!selectedClient}
+              style={{ color: "var(--danger, #c0392b)", borderColor: "var(--danger, #c0392b)" }}
+              onClick={() => {
+                if (!selectedClient) {
+                  return;
+                }
+                if (
+                  window.confirm(
+                    `Delete client "${selectedClient}"? This removes it and its managers from the database. This cannot be undone.`,
+                  )
+                ) {
+                  void removeClient(selectedClient);
+                }
+              }}
+            >
+              Delete
+            </button>
+          </div>
+        ) : null}
         <button
           type="button"
           className="btn btn-outline btn-sm"
@@ -95,6 +149,47 @@ export function PortfolioRoute() {
             Refreshing...
           </span>
         ) : null}
+        {clientsEditable && hasUnsavedChanges ? (
+          <div className="flex items-center" style={{ gap: 6 }}>
+            <span
+              style={{
+                fontFamily: "var(--mono)",
+                fontSize: 10,
+                color: "var(--warning, #b7791f)",
+              }}
+            >
+              Unsaved changes
+            </span>
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              disabled={saving}
+              onClick={async () => {
+                setSaving(true);
+                setSaveError(null);
+                try {
+                  await savePortfolio();
+                } catch (err) {
+                  setSaveError(
+                    err instanceof Error ? err.message : "Could not save the portfolio.",
+                  );
+                } finally {
+                  setSaving(false);
+                }
+              }}
+            >
+              {saving ? "Saving..." : "Save"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              disabled={saving}
+              onClick={() => discardChanges()}
+            >
+              Discard
+            </button>
+          </div>
+        ) : null}
         <div className="ml-auto flex gap-8 items-center">
           <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)" }}>Proposed total:</span>
           <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--accent)" }}>
@@ -102,6 +197,8 @@ export function PortfolioRoute() {
           </span>
         </div>
       </div>
+
+      {saveError ? <div className="alert alert-error">{saveError}</div> : null}
 
       {error ? <div className="alert alert-error">{error}</div> : null}
 
@@ -166,6 +263,25 @@ export function PortfolioRoute() {
         onAdd={addManager}
         onClose={() => setIsAddManagerOpen(false)}
         open={isAddManagerOpen}
+      />
+      <ClientManageModal
+        open={clientModal !== null}
+        mode={clientModal ?? "add"}
+        initialName={clientModal === "rename" ? (selectedClient ?? "") : ""}
+        initialBenchmark={
+          clientModal === "rename"
+            ? (benchmarks[selectedClient ?? ""] ?? "")
+            : ""
+        }
+        benchmarkOptions={benchmarkOptions}
+        onClose={() => setClientModal(null)}
+        onSubmit={async (input) => {
+          if (clientModal === "rename" && selectedClient) {
+            await renameClient(selectedClient, input);
+          } else {
+            await addClient(input);
+          }
+        }}
       />
     </div>
   );

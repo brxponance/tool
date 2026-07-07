@@ -14,3 +14,7 @@ lxml>=4.9.0
 boto3>=1.28.0
 flask-cors>=4.0.0
 gunicorn>=21.0.0
+# Database (client management) — Postgres via SQLAlchemy, migrations via Alembic
+SQLAlchemy>=2.0.0
+psycopg2-binary>=2.9.0
+alembic>=1.13.0

@@ -1,0 +1,30 @@
+# Local Postgres for the PC Tool.
+#
+#   docker compose up -d        # start Postgres on localhost:5432
+#   docker compose down         # stop (data persists in the named volume)
+#   docker compose down -v      # stop AND wipe the database
+#
+# The app connects via DATABASE_URL. Locally this defaults to the values
+# below; in AWS point DATABASE_URL at your RDS instance instead — no code
+# change required.
+services:
+  db:
+    image: postgres:16
+    container_name: pc_tool_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pc_tool
+      POSTGRES_PASSWORD: pc_tool
+      POSTGRES_DB: pc_tool
+    ports:
+      - "5432:5432"
+    volumes:
+      - pc_tool_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pc_tool -d pc_tool"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pc_tool_pgdata:

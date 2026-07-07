@@ -20,6 +20,68 @@ export async function getPortfolioClients() {
   return backendJson<ClientsResponse>("clients");
 }
 
+// Canonical benchmark labels for the add/rename-client dropdown (strict list,
+// owned by the backend so the UI can't submit a typo'd benchmark).
+export async function getBenchmarkCatalog() {
+  return backendJson<{ benchmarks: string[] }>("benchmarks");
+}
+
+// ── Client management (requires the Postgres client DB) ─────────────────────
+// Each endpoint returns the updated roster so the caller can refresh the UI.
+export async function createClient(input: {
+  name: string;
+  benchmark?: string | null;
+}) {
+  return backendJson<ClientsResponse & { created: string }>("clients", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: input.name, benchmark: input.benchmark ?? null }),
+  });
+}
+
+export async function updateClient(
+  currentName: string,
+  input: { name?: string; benchmark?: string | null },
+) {
+  return backendJson<ClientsResponse & { renamed_to: string }>(
+    `clients/${encodeURIComponent(currentName)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export async function deleteClient(name: string) {
+  return backendJson<ClientsResponse & { deleted: string }>(
+    `clients/${encodeURIComponent(name)}`,
+    { method: "DELETE" },
+  );
+}
+
+// Persist a client's full edited portfolio (manager list + current/proposed
+// weights + placeholder style buckets). Backs the "Save" button.
+export async function savePortfolioDraft(
+  client: string,
+  managers: Array<{
+    matched_name: string;
+    tab: string;
+    current_weight: number;
+    proposed_weight: number;
+    style_buckets?: Record<string, number> | null;
+  }>,
+) {
+  return backendJson<{ ok: true; saved: string }>(
+    `clients/${encodeURIComponent(client)}/portfolio`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ managers }),
+    },
+  );
+}
+
 export async function getPortfolioStatus() {
   return backendJson<BackendStatus>("status");
 }

@@ -584,6 +584,27 @@ def load_weights(filepath):
     return clients, benchmarks
 
 
+# Canonical benchmark labels offered in the client Add/Rename dropdown. These
+# are the client-facing names (not the internal PEER_BENCHMARKS index strings);
+# each one resolves cleanly through resolve_peer_group() below. Keeping this
+# list here — right next to the resolver — is deliberate: adding a benchmark
+# means adding it here AND confirming resolve_peer_group() maps it, in one file.
+# Order is display order in the dropdown.
+CANONICAL_BENCHMARKS = [
+    'MSCI EAFE',
+    'MSCI EAFE SC',
+    'MSCI EAFE + Canada',
+    'MSCI World',
+    'MSCI World ex US SC',
+    'MSCI ACWI',
+    'MSCI ACWI ex-US',
+    'MSCI ACWI ex-US SC',
+    'MSCI EM',
+    'Russell 1000',
+    'Russell 2000',
+]
+
+
 def resolve_peer_group(bench_str):
     """Map a user-supplied benchmark name from the weights file to a
     peer-group tag in risk_engine.PEER_BENCHMARKS. Returns None when no
