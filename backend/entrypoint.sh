@@ -15,15 +15,17 @@ set -e
 echo "[entrypoint] waiting for database + ensuring target DB exists..."
 python - <<'PY'
 import time, sys, os
-from urllib.parse import urlparse
 sys.path.insert(0, "/app")
 from db.session import database_url, get_engine
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 
-url = database_url()                      # postgresql+psycopg2://user:pw@host:5432/pc_tool
-target_db = urlparse(url.replace("postgresql+psycopg2", "postgresql")).path.lstrip("/") or "pc_tool"
+# Use SQLAlchemy's URL parser, which correctly handles special characters in the
+# password (urllib.urlparse chokes on some, e.g. it misreads them as IPv6).
+url_obj = make_url(database_url())
+target_db = url_obj.database or "pc_tool"
 # Admin URL points at the always-present "postgres" maintenance DB on the same server.
-admin_url = url.rsplit("/", 1)[0] + "/postgres"
+admin_url = url_obj.set(database="postgres")
 
 # 1) Wait for the SERVER to accept connections (via the postgres maintenance DB).
 admin_engine = create_engine(admin_url, isolation_level="AUTOCOMMIT")
