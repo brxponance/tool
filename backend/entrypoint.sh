@@ -12,23 +12,62 @@
 # database_url() raises and the container fails fast (by design).
 set -e
 
-echo "[entrypoint] waiting for database..."
+echo "[entrypoint] waiting for database + ensuring target DB exists..."
 python - <<'PY'
-import time, sys
+import time, sys, os
+from urllib.parse import urlparse
 sys.path.insert(0, "/app")
-from db.session import get_engine
-from sqlalchemy import text
+from db.session import database_url, get_engine
+from sqlalchemy import create_engine, text
+
+url = database_url()                      # postgresql+psycopg2://user:pw@host:5432/pc_tool
+target_db = urlparse(url.replace("postgresql+psycopg2", "postgresql")).path.lstrip("/") or "pc_tool"
+# Admin URL points at the always-present "postgres" maintenance DB on the same server.
+admin_url = url.rsplit("/", 1)[0] + "/postgres"
+
+# 1) Wait for the SERVER to accept connections (via the postgres maintenance DB).
+admin_engine = create_engine(admin_url, isolation_level="AUTOCOMMIT")
 for attempt in range(30):
+    try:
+        with admin_engine.connect() as c:
+            c.execute(text("SELECT 1"))
+        print("[entrypoint] database server is up.")
+        break
+    except Exception as e:
+        print(f"[entrypoint] server not ready ({attempt+1}/30): {e}")
+        time.sleep(2)
+else:
+    print("[entrypoint] database server never became reachable; exiting.")
+    sys.exit(1)
+
+# 2) Create the target database if it doesn't exist yet (first-ever boot).
+try:
+    with admin_engine.connect() as c:
+        exists = c.execute(
+            text("SELECT 1 FROM pg_database WHERE datname = :n"), {"n": target_db}
+        ).scalar()
+        if not exists:
+            # CREATE DATABASE can't run in a transaction block; AUTOCOMMIT handles that.
+            c.execute(text(f'CREATE DATABASE "{target_db}"'))
+            print(f"[entrypoint] created database {target_db!r}.")
+        else:
+            print(f"[entrypoint] database {target_db!r} already exists.")
+except Exception as e:
+    print(f"[entrypoint] could not ensure database exists: {e}")
+    sys.exit(1)
+
+# 3) Confirm the target DB now accepts connections.
+for attempt in range(15):
     try:
         with get_engine().connect() as c:
             c.execute(text("SELECT 1"))
-        print("[entrypoint] database is up.")
+        print(f"[entrypoint] connected to {target_db!r}.")
         break
     except Exception as e:
-        print(f"[entrypoint] db not ready ({attempt+1}/30): {e}")
+        print(f"[entrypoint] target db not ready ({attempt+1}/15): {e}")
         time.sleep(2)
 else:
-    print("[entrypoint] database never became reachable; exiting.")
+    print("[entrypoint] target database never became reachable; exiting.")
     sys.exit(1)
 PY
 
