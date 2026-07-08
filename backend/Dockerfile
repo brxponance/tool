@@ -15,12 +15,12 @@ COPY alembic.ini .
 COPY entrypoint.sh .
 RUN chmod +x entrypoint.sh
 
-# Baked cache snapshot (clone results + normalized skill). Clients/weights now
-# live in Postgres, but the heavy analytical cache still loads from disk. In
-# production this is overlaid by S3 when S3_BUCKET is set.
+# Runtime data directories. uploads/ and cache/ are NOT baked into the image
+# (they're gitignored runtime data): uploaded workbooks come from S3, and the
+# analytical cache (results.pkl) is rebuilt on the first /run. Create them empty
+# so the app has somewhere to write. To ship a warm cache, drop a
+# results.pkl into cache/ before building (and un-ignore it), but it's optional.
 RUN mkdir -p uploads cache
-COPY cache/ ./cache/
-COPY uploads/ ./uploads/
 
 EXPOSE 3001
 
