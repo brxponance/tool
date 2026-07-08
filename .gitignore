@@ -46,3 +46,7 @@ yarn-error.log*
 Thumbs.db
 # Production secrets — never commit
 .env
+
+# SSH private keys — NEVER commit
+*.pem
+*.ppk
