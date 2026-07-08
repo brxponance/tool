@@ -2,23 +2,28 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install dependencies first (cached layer)
+# Install dependencies first (cached layer). requirements.txt already includes
+# gunicorn, boto3, SQLAlchemy, psycopg2-binary, and alembic.
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt gunicorn boto3
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy application code: engines, the db package, and Alembic migrations.
 COPY *.py .
+COPY db/ ./db/
+COPY migrations/ ./migrations/
+COPY alembic.ini .
+COPY entrypoint.sh .
+RUN chmod +x entrypoint.sh
 
-# Create directories and bake in the complete local cache snapshot.
-# The Flask app always loads /app/cache/results.pkl at startup. The deploy
-# snapshot is copied from results.pkl.backup and includes the universe clone
-# results + normalized skill data that the smaller active local cache lacks.
+# Baked cache snapshot (clone results + normalized skill). Clients/weights now
+# live in Postgres, but the heavy analytical cache still loads from disk. In
+# production this is overlaid by S3 when S3_BUCKET is set.
 RUN mkdir -p uploads cache
-COPY cache/results.deploy.pkl ./cache/results.pkl
+COPY cache/ ./cache/
 COPY uploads/ ./uploads/
 
-# Expose Flask port
 EXPOSE 3001
 
-# Run with gunicorn — single worker required (shared in-memory state)
-CMD ["gunicorn", "--workers", "1", "--worker-class", "gthread", "--threads", "4", "--bind", "0.0.0.0:3001", "--timeout", "180", "--access-logfile", "-", "app:app"]
+# Entrypoint migrates + seeds the DB, then launches gunicorn (single worker —
+# the app holds shared in-memory state).
+CMD ["./entrypoint.sh"]

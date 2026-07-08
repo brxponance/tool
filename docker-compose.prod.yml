@@ -1,0 +1,47 @@
+# Production stack for a single EC2 host.
+#
+# Runs the two app containers (Flask backend + Next.js frontend). Postgres is
+# NOT run here — it's managed RDS in production (set DATABASE_URL below).
+#
+# Usage on the EC2 box:
+#   1. Put real values in a .env file next to this file (see .env.prod.example).
+#   2. docker compose -f docker-compose.prod.yml up -d --build
+#
+# nginx / the ALB terminates HTTPS and forwards to the frontend on :3000.
+# The frontend proxies /api/backend/* to the backend on :3001 internally.
+services:
+  backend:
+    build:
+      context: ./backend
+    image: pc-tool-backend:latest
+    restart: unless-stopped
+    environment:
+      # RDS connection (required in production). Format:
+      #   postgresql://USER:PASSWORD@your-rds-endpoint:5432/pc_tool
+      DATABASE_URL: ${DATABASE_URL}
+      APP_ENV: production          # makes a missing DATABASE_URL fail fast
+      # S3 for uploaded workbooks + the pickle cache (survives instance loss).
+      S3_BUCKET: ${S3_BUCKET}
+      S3_PREFIX: ${S3_PREFIX:-uploads/}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      # Allow the frontend origin for any direct calls (usually not needed since
+      # the frontend proxies server-side).
+      FRONTEND_URL: ${FRONTEND_URL:-}
+    expose:
+      - "3001"
+    # No host port needed — only the frontend talks to it, over the compose network.
+
+  frontend:
+    build:
+      context: ./frontend
+    image: pc-tool-frontend:latest
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      # Server-side proxy target: the backend service on the compose network.
+      BACKEND_INTERNAL_URL: http://backend:3001
+      PORT: "3000"
+    ports:
+      - "3000:3000"     # nginx/ALB forwards here
+    depends_on:
+      - backend

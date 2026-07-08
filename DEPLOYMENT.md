@@ -1,271 +1,184 @@
 # Deployment Runbook
 
-This tool runs as two services side-by-side:
+The tool is two containers plus two managed AWS services:
 
-- **Backend** — Python 3.11+ / Flask, serves JSON on **port 3001**
-- **Frontend** — Next.js 16 (React 19), serves the UI on **port 3000**
+- **Backend** — Python / Flask + gunicorn, serves JSON on **:3001**
+- **Frontend** — Next.js (standalone), serves the UI on **:3000**, proxies
+  `/api/backend/*` to the backend
+- **RDS Postgres** — the source of truth for clients, weights, and saved drafts
+- **S3** — stores uploaded workbooks (survives instance replacement)
 
-The frontend proxies all `/api/backend/*` requests to the Flask backend, so in
-production both should sit behind the **same domain** (no CORS required).
+Recommended shape for this scale (~3 clients, small internal team):
+**one EC2 box running both containers, behind an ALB, with RDS + S3.**
+~$35–45/month.
+
+```
+Users ─→ ALB :443  (HTTPS + Cognito login)
+            ↓
+       EC2 t3.small   (docker compose -f docker-compose.prod.yml up)
+         ├ frontend :3000  (Next.js)
+         └ backend  :3001  (Flask/gunicorn)
+                ↓                 ↓
+          RDS Postgres        S3 bucket
+       (clients/weights)   (uploaded workbooks)
+```
 
 ---
 
-## Local development (already working)
+## Local development
 
 ```powershell
-# In one terminal — backend
 cd backend
-venv\Scripts\python.exe run.py
-python run.py        # → http://127.0.0.1:3001
+docker compose up -d          # local Postgres
+py run.py                     # backend → :3001
 
-# In another terminal — frontend
-cd frontend
-npm install          # first time only
-npm run dev          # → http://localhost:3000
-```
-
-Open <http://localhost:3000>. Backend auto-opens <http://127.0.0.1:3001> on
-start, but you don't need to use that URL — it's just a JSON API now.
-
----
-
-## Production builds
-
-```powershell
-# Backend — no build step. Install deps then run.
-cd backend
-python -m venv venv
-venv\Scripts\activate
-pip install -r requirements.txt
-
-# Frontend — produces an optimized .next/ bundle
-cd frontend
-npm ci               # clean install from lockfile
-npm run build        # → .next/
-npm run start        # serves the production build on port 3000
-```
-
-Verified production build status (this commit):
-
-- Backend: every .py file compiles clean (`py_compile` over `backend/*.py`)
-- Frontend: `npx tsc --noEmit` clean, `next build` succeeds, all 10 routes
-  prerendered or dynamic as expected
-
----
-
-## AWS deployment — recommended shape
-
-For an internal team tool (your scale: ~3 clients, ~140 managers), the
-simplest deployable shape is **one EC2 instance** behind an **ALB**:
-
-```
-Browser ─→ Cloudfront/Route53
-              ↓
-         ALB :443 (Cognito auth)
-              ↓
-      EC2 t3.medium / t3.large
-        ├ nginx :80 → reverse-proxy to Next.js :3000
-        └ Next.js :3000 → proxies /api/backend/* to Flask :3001
-              ↓
-         Flask :3001 (gunicorn, NOT Flask dev server)
-              ↓
-         EBS volume mounted at /opt/aapryl/
-           ├ uploads/   (user-uploaded XLSX files)
-           └ cache/     (results.pkl — clone cache)
-```
-
-### Why this shape
-
-| Concern | Why one box works |
-|---|---|
-| State | Flask keeps the in-memory `state` dict + `cache/results.pkl` on disk. Sharing across instances would require Redis + S3 — not worth the complexity for a single-team tool. |
-| Uploads | Same — local disk is fine on one box; EBS volume keeps it across restarts. |
-| Scale | The heaviest endpoint (`/run` cloning) takes ~30s once per upload. Concurrent users hit cached results. One t3.medium handles this easily. |
-| Cost | ~$30-50/mo for EC2 + ALB. Far less than ECS/Fargate. |
-
-### Switching to a real WSGI server (do this for prod)
-
-Flask's built-in `app.run()` is a dev server. Use **gunicorn** or **waitress**
-in production:
-
-```bash
-pip install gunicorn
-gunicorn --workers 1 --bind 0.0.0.0:3001 --timeout 120 app:app
-```
-
-`--workers 1` is intentional: the app holds shared state in a Python dict.
-Multiple worker processes would each have their own copy and wouldn't
-share clone results.
-
----
-
-## Environment variables
-
-### Backend
-No required env vars. Optionally:
-
-| Var | Default | Purpose |
-|---|---|---|
-| `PORT` | not used (hardcoded 3001 in `run.py`) | Change requires editing `run.py` |
-
-### Frontend
-| Var | Default | Purpose |
-|---|---|---|
-| `NEXT_PUBLIC_BACKEND_BASE_URL` | `http://127.0.0.1:3001` | Where the Next.js API proxy forwards `/api/backend/*` requests |
-
-In AWS, set `NEXT_PUBLIC_BACKEND_BASE_URL=http://127.0.0.1:3001` if the
-frontend and backend run on the same EC2 (the proxy talks local-loopback).
-If they're on different hosts, set the internal hostname (e.g.
-`http://backend.internal:3001`) — never the public ALB URL, that would
-loop through the LB and add latency.
-
----
-
-## What to deploy / not deploy
-
-### Required
-- `backend/*.py` (12 files: app.py + 11 engines)
-- `backend/requirements.txt`
-- `backend/run.py` (or replace with gunicorn invocation per above)
-- `frontend/src/`
-- `frontend/public/`
-- `frontend/package.json`, `package-lock.json`
-- `frontend/next.config.ts`, `tsconfig.json`, `postcss.config.mjs`
-- `frontend/eslint.config.mjs`
-
-### Created at runtime — provision but don't ship code
-- `backend/uploads/` (mount EBS here)
-- `backend/cache/` (mount EBS here)
-
-### Don't deploy
-- `backend/venv/` — recreate on the host
-- `backend/__pycache__/`
-- `frontend/node_modules/` — `npm ci` recreates
-- `frontend/.next/` — `npm run build` regenerates
-- `.tools/` — local debug scripts
-- `.playwright-mcp/` — local MCP install
-- `clone_tool/` — old monolithic version, kept for reference only
-- `docs/`, `factSet_documentation/`, `factset_programmatic_env/`,
-  `skeletons/` — reference / scratch material
-
-The `.gitignore` already excludes the don't-deploy items from version control,
-so a fresh `git clone` on the target host is clean.
-
----
-
-## First-time host setup (Ubuntu 22.04 example)
-
-```bash
-sudo apt update
-sudo apt install -y python3.11 python3.11-venv python3-pip nginx
-curl -fsSL https://nodejs.org/dist/v22.11.0/node-v22.11.0-linux-x64.tar.xz | sudo tar xJ -C /usr/local --strip-components=1
-
-# Clone
-git clone <your-repo-url> /opt/aapryl
-cd /opt/aapryl
-
-# Backend
-cd backend
-python3.11 -m venv venv
-venv/bin/pip install -r requirements.txt
-venv/bin/pip install gunicorn
-
-# Frontend
 cd ../frontend
-npm ci
-npm run build
+npm run dev                   # frontend → :3000 (or next free port)
 ```
-
-Then run each behind systemd or supervisord. Example systemd unit for
-backend:
-
-```ini
-# /etc/systemd/system/aapryl-backend.service
-[Unit]
-Description=Aapryl Backend
-After=network.target
-
-[Service]
-WorkingDirectory=/opt/aapryl/backend
-ExecStart=/opt/aapryl/backend/venv/bin/gunicorn --workers 1 --bind 0.0.0.0:3001 --timeout 120 app:app
-Restart=on-failure
-User=aapryl
-
-[Install]
-WantedBy=multi-user.target
-```
-
-And frontend:
-
-```ini
-# /etc/systemd/system/aapryl-frontend.service
-[Unit]
-Description=Aapryl Frontend
-After=network.target
-
-[Service]
-WorkingDirectory=/opt/aapryl/frontend
-Environment=NEXT_PUBLIC_BACKEND_BASE_URL=http://127.0.0.1:3001
-Environment=NODE_ENV=production
-ExecStart=/usr/local/bin/node ./node_modules/.bin/next start -p 3000
-Restart=on-failure
-User=aapryl
-
-[Install]
-WantedBy=multi-user.target
-```
-
-`systemctl enable --now aapryl-backend aapryl-frontend` and both come back
-across reboots.
 
 ---
 
-## Authentication
+## What's containerized
 
-**The app has no built-in auth.** Anyone with network access to port 3000
-can upload files and run clones. For internal use, put auth at the
-network layer:
+- `backend/Dockerfile` — installs deps, copies code + `db/` + `migrations/`,
+  runs `entrypoint.sh` (waits for DB → `alembic upgrade head` → idempotent seed
+  → gunicorn).
+- `frontend/Dockerfile` — multi-stage; builds the Next.js standalone bundle and
+  runs `node server.js`.
+- `docker-compose.prod.yml` — runs both containers on the EC2 host. Reads
+  secrets from a local `.env` (see `.env.prod.example`).
 
-- **AWS ALB + Cognito** — easiest, integrates with corporate IdP
-- **Cloudflare Access** — if you're not in AWS
-- **VPN / private subnet only** — simplest, no UI changes needed
+Both images build and run clean (verified: backend migrates+seeds against
+Postgres and serves the API; frontend proxies `/api/backend/*` to it).
 
-Do not expose ports 3000 / 3001 to the public internet without one of
-these in front.
+---
+
+## AWS deployment — step by step
+
+You do these in the AWS console (they need your account). Pick **one region**
+and use it for everything (RDS, S3, EC2 all in the same region).
+
+### 1. S3 bucket (uploads)
+
+1. S3 → Create bucket → name e.g. `pc-tool-uploads-<yourorg>` → your region →
+   Block all public access **ON** → Create.
+
+### 2. RDS Postgres
+
+1. RDS → Create database → **PostgreSQL** → **Free tier** or **Dev/Test**.
+2. Instance: **db.t3.micro**. Storage: 20 GB gp3.
+3. DB name `pc_tool`, master username `pc_tool`, set a strong password.
+4. Connectivity: same VPC as the EC2 you'll create; **Public access: No**.
+5. After it's up, note the **endpoint** — this becomes `DATABASE_URL`.
+
+### 3. EC2 instance
+
+1. EC2 → Launch instance → **Ubuntu 22.04**, **t3.small**.
+2. Same VPC/region as RDS.
+3. **IAM role**: create/attach a role with `AmazonS3FullAccess` (or a policy
+   scoped to just your bucket) so the backend can read/write S3 without keys.
+4. Security group:
+   - Inbound `443` and `80` from the ALB security group only.
+   - Inbound `22` (SSH) from your IP only.
+5. Make sure the **RDS security group allows inbound 5432 from the EC2's
+   security group**.
+
+### 4. Install and run on the EC2
+
+SSH in, then:
+
+```bash
+sudo apt update && sudo apt install -y docker.io docker-compose-plugin git
+sudo usermod -aG docker ubuntu && newgrp docker
+
+git clone <your-repo-url> /opt/pc_tool
+cd /opt/pc_tool
+
+# Create the secrets file
+cp .env.prod.example .env
+nano .env      # fill in DATABASE_URL (RDS endpoint), S3_BUCKET, AWS_REGION
+
+# Build and start both containers
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
+On first boot the backend entrypoint automatically runs migrations and seeds
+the 12 clients from the workbook. Check it:
+
+```bash
+docker compose -f docker-compose.prod.yml logs backend | tail -20
+curl http://localhost:3000/api/backend/clients   # expect {"clients":[...],"editable":true}
+```
+
+### 5. ALB + HTTPS + login
+
+1. EC2 → Target Groups → create one targeting the EC2 on **port 3000**.
+2. EC2 → Load Balancers → **Application Load Balancer**, internet-facing,
+   listener on **443** (attach an ACM cert — request a free one in ACM;
+   for the default AWS URL you can start with an HTTP:80 listener and add
+   HTTPS once you attach a domain).
+3. Forward the listener to the target group.
+4. **Login (Cognito):** on the 443 listener rule, add an **Authenticate
+   (Cognito)** action before Forward. Create a Cognito user pool, add your
+   users. This is how "everyone" logs in securely from anywhere.
+5. Open the ALB's DNS name in a browser → you get the Cognito login → the app.
+
+---
+
+## Environment variables (backend container)
+
+| Var | Required | Purpose |
+|---|---|---|
+| `DATABASE_URL` | **yes** (prod) | RDS connection string |
+| `APP_ENV` | recommended | set to `production` so a missing `DATABASE_URL` fails fast |
+| `S3_BUCKET` | for uploads | enables S3 storage of uploaded workbooks |
+| `S3_PREFIX` | no | key prefix, default `uploads/` |
+| `AWS_REGION` | no | defaults to `us-east-1` |
+
+Frontend container: `BACKEND_INTERNAL_URL=http://backend:3001` (set by compose).
+
+---
+
+## Updating the deployed app
+
+```bash
+cd /opt/pc_tool
+git pull
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
+Migrations run automatically on backend start. Zero manual DB steps.
+
+---
+
+## Backups & data safety
+
+- **Clients / weights / drafts** live in RDS → enable **automated RDS
+  backups** (7-day retention is the default; keep it).
+- **Uploaded workbooks** live in S3 → enable **versioning** on the bucket.
+- **Clone cache** (`cache/results.pkl`) is *derived* data on the container's
+  disk. If the instance is replaced it rebuilds on the next `/run` (~30s). Not
+  backed up on purpose — nothing irreplaceable lives there.
 
 ---
 
 ## Smoke tests after deploy
 
 ```bash
-# Backend health
-curl https://your-host/api/backend/status
-# Expect: {"has_results": ..., "has_weights": ..., ...}
-
-# Frontend
-curl -I https://your-host/setup
-# Expect: HTTP/2 200
-
-# Run the full debug scripts against the deployed URL
-cd .tools
-REPORT_URL=https://your-host/report  node debug-report.mjs
-OPTIMIZE_URL=https://your-host/optimize  BACKEND_URL=https://your-host/api/backend  node debug-optimize.mjs
+curl https://<alb-dns>/api/backend/status     # {"has_results":...}
+curl https://<alb-dns>/api/backend/clients    # {"clients":[...],"editable":true}
+curl -I https://<alb-dns>/portfolio           # HTTP 200
 ```
 
-Both debug scripts should report 0 errors and 200s across the board.
+Then open the app, add a test client, save a weight, refresh — it should
+persist (that's RDS working).
 
 ---
 
-## Known limitations (acceptable for internal tool, document for users)
+## Known limitations (fine for this scale)
 
-- **Single instance only** — scaling horizontally requires moving `state` +
-  `cache/results.pkl` to Redis + S3. Not needed for current scale.
-- **No background-job queue** — `/run` cloning runs in a Flask thread.
-  Acceptable for ~140-manager runs (~30s); if you start cloning 5000+
-  managers, consider Celery + Redis.
-- **No "Actual" client track-record performance** — the Report tab's
-  page-3 section only shows backtested data (computed from current weights
-  × historical manager returns). Adding actual track-record requires a new
-  file-upload type.
-- **Pickle cache is Python-version-specific** — don't change Python minor
-  versions on the host without deleting `cache/results.pkl` first.
+- **Single instance** — a reboot causes a ~1-minute blip. True HA needs 2+
+  instances (triples cost; not needed here).
+- **Single gunicorn worker** — required because the backend holds analytical
+  state in memory. Do not raise `--workers`.
+- **Cache is instance-local** — see Backups above; it self-heals.

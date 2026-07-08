@@ -11,6 +11,10 @@ const internalBackendUrl =
   process.env.BACKEND_INTERNAL_URL ?? backendUrl;
 
 const nextConfig: NextConfig = {
+  // Emit a self-contained server bundle (.next/standalone) so the production
+  // Docker image can run `node server.js` without shipping the full
+  // node_modules tree — smaller, faster-starting image.
+  output: "standalone",
   async rewrites() {
     return [
       {

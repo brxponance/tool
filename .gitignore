@@ -44,3 +44,5 @@ yarn-error.log*
 # OS files
 .DS_Store
 Thumbs.db
+# Production secrets — never commit
+.env

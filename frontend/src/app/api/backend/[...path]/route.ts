@@ -1,11 +1,23 @@
 import type { NextRequest } from "next/server";
 
-const configuredBackendBaseUrl =
-  process.env.BACKEND_BASE_URL ?? process.env.NEXT_PUBLIC_BACKEND_BASE_URL;
+// Where this server-side route forwards /api/backend/* to. Prefer the
+// production internal URL, then explicit overrides. Ignore
+// NEXT_PUBLIC_BACKEND_BASE_URL when it's the relative "/api/backend" path
+// (it's baked at build time for the browser and isn't a valid absolute URL
+// for server-side fetch).
+function resolveBackendBaseUrls(): string[] {
+  const candidates = [
+    process.env.BACKEND_INTERNAL_URL,
+    process.env.BACKEND_BASE_URL,
+    process.env.NEXT_PUBLIC_BACKEND_BASE_URL,
+  ].filter((v): v is string => !!v && /^https?:\/\//.test(v));
+  if (candidates.length > 0) {
+    return [candidates[0]];
+  }
+  return ["http://127.0.0.1:3001", "http://127.0.0.1:5050"];
+}
 
-const backendBaseUrls = configuredBackendBaseUrl
-  ? [configuredBackendBaseUrl]
-  : ["http://127.0.0.1:3001", "http://127.0.0.1:5050"];
+const backendBaseUrls = resolveBackendBaseUrls();
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
