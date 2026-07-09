@@ -28,6 +28,27 @@ _BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DEFAULT_WORKBOOK = os.path.join(_BACKEND_DIR, "uploads", "Manager_Weights_3_31.xlsx")
 
 
+def _resolve_workbook_from_s3(workbook_path: str) -> str | None:
+    """Download the weights workbook from S3 by basename if it isn't on disk.
+    Returns a local path to the downloaded file, or None if unavailable."""
+    try:
+        from s3_storage import is_enabled, download_file
+    except Exception:  # noqa: BLE001
+        return None
+    if not is_enabled():
+        return None
+    basename = os.path.basename(str(workbook_path).replace("\\", "/"))
+    try:
+        # download_file downloads uploads/<basename> to a temp path.
+        local = download_file(basename, suffix=".xlsx")
+        if local and os.path.exists(local):
+            print(f"[seed] pulled workbook {basename!r} from S3.")
+            return local
+    except Exception as e:  # noqa: BLE001
+        print(f"[seed] could not pull workbook from S3: {e}")
+    return None
+
+
 def _ensure_schema() -> None:
     """Bring the DB schema to the latest Alembic revision.
 
@@ -66,8 +87,16 @@ def seed(workbook: str, force: bool = False) -> None:
         )
         return
 
+    # Resolve the workbook. In the cloud the uploads live in S3, not on the
+    # container disk, so fall back to downloading uploads/<basename> from S3.
     if not os.path.exists(workbook):
-        raise SystemExit(f"Workbook not found: {workbook}")
+        resolved = _resolve_workbook_from_s3(workbook)
+        if resolved:
+            workbook = resolved
+        else:
+            print(f"Workbook not found locally or in S3: {workbook} — "
+                  "seed skipped (upload via the app to populate).")
+            return
 
     print(f"Reading weights from {workbook} ...")
     weights, benchmarks = load_weights(workbook)

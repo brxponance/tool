@@ -110,10 +110,14 @@ def _push_cache_to_s3():
     if not s3_enabled():
         return
     try:
-        from s3_storage import upload_file
-        upload_file(app.config['CACHE_FILE'], _CACHE_S3_KEY)
+        from s3_storage import S3_BUCKET
+        import boto3, sys
+        # Store at the bucket ROOT key state/results.pkl (NOT under the uploads/
+        # prefix) — matches where the cache is seeded and kept.
+        boto3.client('s3').upload_file(app.config['CACHE_FILE'], S3_BUCKET, _CACHE_S3_KEY)
+        print(f"[s3] cache pushed to s3://{S3_BUCKET}/{_CACHE_S3_KEY}", flush=True)
     except Exception as e:  # noqa: BLE001
-        print(f"[s3] cache upload skipped: {e}")
+        print(f"[s3] cache upload skipped: {e}", flush=True)
 
 
 def _pull_cache_from_s3():
@@ -124,15 +128,16 @@ def _pull_cache_from_s3():
         return
     cf = app.config['CACHE_FILE']
     if os.path.exists(cf):
+        print(f"[s3] local cache present at {cf}; not pulling from S3.", flush=True)
         return
     try:
-        from s3_storage import download_file, S3_BUCKET, S3_PREFIX
+        from s3_storage import S3_BUCKET
         import boto3
-        key = f"{S3_PREFIX}{_CACHE_S3_KEY}"
-        boto3.client('s3').download_file(S3_BUCKET, key, cf)
-        print(f"[s3] cache restored from s3://{S3_BUCKET}/{key}")
+        # Cache lives at the bucket ROOT (state/results.pkl), no uploads/ prefix.
+        boto3.client('s3').download_file(S3_BUCKET, _CACHE_S3_KEY, cf)
+        print(f"[s3] cache restored from s3://{S3_BUCKET}/{_CACHE_S3_KEY}", flush=True)
     except Exception as e:  # noqa: BLE001
-        print(f"[s3] no cache in S3 to restore ({e}); starting fresh.")
+        print(f"[s3] no cache in S3 to restore ({e}); starting fresh.", flush=True)
 
 
 # ── Client-DB helpers ───────────────────────────────────────────────────────
