@@ -78,3 +78,6 @@ npm run dev
 npm run lint
 npm run build
 ```
+
+
+cd ~/tool && git pull && bash deploy.sh

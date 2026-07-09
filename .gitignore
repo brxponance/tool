@@ -50,3 +50,6 @@ Thumbs.db
 # SSH private keys — NEVER commit
 *.pem
 *.ppk
+
+# Local deployment reference (points at secrets) — do not commit
+AWS_DEPLOYMENT_NOTES.md

@@ -1,184 +1,241 @@
-# Deployment Runbook
+# Deployment Guide — PC Tool (Aapryl Clone Tool)
 
-The tool is two containers plus two managed AWS services:
+> Everything a teammate or agent needs to understand, run, and deploy this app.
+> Written against the **actual live deployment** (AWS ECS Fargate + RDS + S3),
+> not a hypothetical plan.
 
-- **Backend** — Python / Flask + gunicorn, serves JSON on **:3001**
-- **Frontend** — Next.js (standalone), serves the UI on **:3000**, proxies
-  `/api/backend/*` to the backend
-- **RDS Postgres** — the source of truth for clients, weights, and saved drafts
-- **S3** — stores uploaded workbooks (survives instance replacement)
+---
 
-Recommended shape for this scale (~3 clients, small internal team):
-**one EC2 box running both containers, behind an ALB, with RDS + S3.**
-~$35–45/month.
+## 1. What this app is
+
+A portfolio-analysis tool with two parts:
+
+- **Backend** — Python / Flask + gunicorn. JSON API on **port 3001**. Does the
+  cloning/risk/exposure math; owns the Postgres client database.
+- **Frontend** — Next.js (React). UI on **port 3000**. Calls the backend through
+  a same-origin proxy at `/api/backend/*`.
+
+Data stores:
+- **RDS PostgreSQL** — the editable client roster (names, benchmarks, managers,
+  weights, saved drafts). Database name `pc_tool`.
+- **S3** — uploaded Excel workbooks + the analytical cache (`results.pkl`).
+
+---
+
+## 2. Live deployment at a glance
+
+| Thing | Value |
+|---|---|
+| AWS account | `872709212513` (alias `xponance-sandbox`) |
+| Region | `us-east-1` |
+| Compute | ECS Fargate, cluster `pc-tool-cluster`, service `pc-tool` |
+| Task def | `pc-tool` — ONE task, TWO containers (backend + frontend) |
+| Container wiring | frontend → backend over `http://localhost:3001` (same task) |
+| Database | RDS `xponance-db` (PostgreSQL), database `pc_tool` |
+| File storage | S3 bucket `pc-tool-uploads` |
+| Images | ECR: `pc-tool-backend:latest`, `pc-tool-frontend:latest` |
+| Public access | frontend task public IP on port 3000 (no ALB yet) |
+| CI/CD | GitHub Actions (`.github/workflows/deploy.yml`) |
+
+> **Why one task with two containers?** ECS Service Connect (separate services)
+> failed to register instances in this account, so both containers run in a
+> single task and talk over `localhost` — reliable, no service discovery.
+
+---
+
+## 3. Architecture diagram
 
 ```
-Users ─→ ALB :443  (HTTPS + Cognito login)
-            ↓
-       EC2 t3.small   (docker compose -f docker-compose.prod.yml up)
-         ├ frontend :3000  (Next.js)
-         └ backend  :3001  (Flask/gunicorn)
-                ↓                 ↓
-          RDS Postgres        S3 bucket
-       (clients/weights)   (uploaded workbooks)
+Users ─→ http://<frontend-task-public-ip>:3000
+             │
+        ECS Fargate task "pc-tool" (1 task, 2 containers)
+          ├ frontend :3000  (Next.js)  ──localhost:3001──┐
+          └ backend  :3001  (Flask/gunicorn) ◄───────────┘
+                 │                    │
+          RDS xponance-db        S3 pc-tool-uploads
+          (database pc_tool)     (uploads/ + state/results.pkl)
 ```
 
 ---
 
-## Local development
+## 4. How deploys work now (the normal path)
 
-```powershell
-cd backend
-docker compose up -d          # local Postgres
-py run.py                     # backend → :3001
-
-cd ../frontend
-npm run dev                   # frontend → :3000 (or next free port)
-```
-
----
-
-## What's containerized
-
-- `backend/Dockerfile` — installs deps, copies code + `db/` + `migrations/`,
-  runs `entrypoint.sh` (waits for DB → `alembic upgrade head` → idempotent seed
-  → gunicorn).
-- `frontend/Dockerfile` — multi-stage; builds the Next.js standalone bundle and
-  runs `node server.js`.
-- `docker-compose.prod.yml` — runs both containers on the EC2 host. Reads
-  secrets from a local `.env` (see `.env.prod.example`).
-
-Both images build and run clean (verified: backend migrates+seeds against
-Postgres and serves the API; frontend proxies `/api/backend/*` to it).
-
----
-
-## AWS deployment — step by step
-
-You do these in the AWS console (they need your account). Pick **one region**
-and use it for everything (RDS, S3, EC2 all in the same region).
-
-### 1. S3 bucket (uploads)
-
-1. S3 → Create bucket → name e.g. `pc-tool-uploads-<yourorg>` → your region →
-   Block all public access **ON** → Create.
-
-### 2. RDS Postgres
-
-1. RDS → Create database → **PostgreSQL** → **Free tier** or **Dev/Test**.
-2. Instance: **db.t3.micro**. Storage: 20 GB gp3.
-3. DB name `pc_tool`, master username `pc_tool`, set a strong password.
-4. Connectivity: same VPC as the EC2 you'll create; **Public access: No**.
-5. After it's up, note the **endpoint** — this becomes `DATABASE_URL`.
-
-### 3. EC2 instance
-
-1. EC2 → Launch instance → **Ubuntu 22.04**, **t3.small**.
-2. Same VPC/region as RDS.
-3. **IAM role**: create/attach a role with `AmazonS3FullAccess` (or a policy
-   scoped to just your bucket) so the backend can read/write S3 without keys.
-4. Security group:
-   - Inbound `443` and `80` from the ALB security group only.
-   - Inbound `22` (SSH) from your IP only.
-5. Make sure the **RDS security group allows inbound 5432 from the EC2's
-   security group**.
-
-### 4. Install and run on the EC2
-
-SSH in, then:
+**Just push to `main`.** GitHub Actions does the rest:
 
 ```bash
-sudo apt update && sudo apt install -y docker.io docker-compose-plugin git
-sudo usermod -aG docker ubuntu && newgrp docker
-
-git clone <your-repo-url> /opt/pc_tool
-cd /opt/pc_tool
-
-# Create the secrets file
-cp .env.prod.example .env
-nano .env      # fill in DATABASE_URL (RDS endpoint), S3_BUCKET, AWS_REGION
-
-# Build and start both containers
-docker compose -f docker-compose.prod.yml up -d --build
+git add -A && git commit -m "your change" && git push origin main
 ```
 
-On first boot the backend entrypoint automatically runs migrations and seeds
-the 12 clients from the workbook. Check it:
+The workflow (`.github/workflows/deploy.yml`) then automatically:
+1. Builds the backend and frontend Docker images
+2. Pushes them to ECR
+3. Forces the ECS service to redeploy with the new images
+4. Waits until the service is stable
 
-```bash
-docker compose -f docker-compose.prod.yml logs backend | tail -20
-curl http://localhost:3000/api/backend/clients   # expect {"clients":[...],"editable":true}
-```
+Watch it run at: **https://github.com/brxponance/tool/actions**
 
-### 5. ALB + HTTPS + login
+No CloudShell, no manual Docker builds. A deploy takes ~5–8 minutes.
 
-1. EC2 → Target Groups → create one targeting the EC2 on **port 3000**.
-2. EC2 → Load Balancers → **Application Load Balancer**, internet-facing,
-   listener on **443** (attach an ACM cert — request a free one in ACM;
-   for the default AWS URL you can start with an HTTP:80 listener and add
-   HTTPS once you attach a domain).
-3. Forward the listener to the target group.
-4. **Login (Cognito):** on the 443 listener rule, add an **Authenticate
-   (Cognito)** action before Forward. Create a Cognito user pool, add your
-   users. This is how "everyone" logs in securely from anywhere.
-5. Open the ALB's DNS name in a browser → you get the Cognito login → the app.
+> Triggers only when files under `backend/`, `frontend/`, or the workflow
+> itself change. You can also run it manually: Actions tab → "Build and Deploy
+> to ECS" → "Run workflow".
 
 ---
 
-## Environment variables (backend container)
+## 5. Credentials & secrets — where everything lives
 
-| Var | Required | Purpose |
+**No secrets are stored in this repo.** They live in AWS/GitHub:
+
+| Secret | Where it lives | Purpose |
 |---|---|---|
-| `DATABASE_URL` | **yes** (prod) | RDS connection string |
-| `APP_ENV` | recommended | set to `production` so a missing `DATABASE_URL` fails fast |
-| `S3_BUCKET` | for uploads | enables S3 storage of uploaded workbooks |
-| `S3_PREFIX` | no | key prefix, default `uploads/` |
-| `AWS_REGION` | no | defaults to `us-east-1` |
+| RDS master password | AWS Secrets Manager: `rds!db-220cca1f-...` | DB master (`postgres`) password |
+| Full `DATABASE_URL` | AWS Secrets Manager: `pc-tool/database-url` | Injected into the backend container at runtime |
+| GitHub → AWS deploy auth | GitHub OIDC + IAM role `pc-tool-gh-deploy` | Lets Actions push to ECR + redeploy ECS (no long-lived keys) |
+| `AWS_DEPLOY_ROLE_ARN` | GitHub repo secret | `arn:aws:iam::872709212513:role/pc-tool-gh-deploy` |
 
-Frontend container: `BACKEND_INTERNAL_URL=http://backend:3001` (set by compose).
-
----
-
-## Updating the deployed app
-
+Retrieve the DB password if ever needed:
 ```bash
-cd /opt/pc_tool
-git pull
-docker compose -f docker-compose.prod.yml up -d --build
+aws secretsmanager get-secret-value \
+  --secret-id 'arn:aws:secretsmanager:us-east-1:872709212513:secret:rds!db-220cca1f-3c4a-483d-a491-9db3aeca5ad0-SuoyWk' \
+  --region us-east-1 --query SecretString --output text
 ```
 
-Migrations run automatically on backend start. Zero manual DB steps.
+`DATABASE_URL` format (password is URL-encoded):
+`postgresql://postgres:<url-encoded-pw>@xponance-db.c6jsaqkqwyk4.us-east-1.rds.amazonaws.com:5432/pc_tool`
 
 ---
 
-## Backups & data safety
+## 6. Key AWS resource IDs
 
-- **Clients / weights / drafts** live in RDS → enable **automated RDS
-  backups** (7-day retention is the default; keep it).
-- **Uploaded workbooks** live in S3 → enable **versioning** on the bucket.
-- **Clone cache** (`cache/results.pkl`) is *derived* data on the container's
-  disk. If the instance is replaced it rebuilds on the next `/run` (~30s). Not
-  backed up on purpose — nothing irreplaceable lives there.
-
----
-
-## Smoke tests after deploy
-
-```bash
-curl https://<alb-dns>/api/backend/status     # {"has_results":...}
-curl https://<alb-dns>/api/backend/clients    # {"clients":[...],"editable":true}
-curl -I https://<alb-dns>/portfolio           # HTTP 200
+```
+VPC:                vpc-0a80f9aa9ec30d318 (gire-vpc)
+Public subnets:     subnet-0117510ecaa995dd2 (us-east-1a)
+                    subnet-0648b89505cb4cf4b (us-east-1b)
+Task security group: sg-04375bcde7b5211c5 (pc-tool-tasks)
+RDS security group:  sg-0a6469eda7b097066 (allows 5432 from task SG)
+RDS endpoint:        xponance-db.c6jsaqkqwyk4.us-east-1.rds.amazonaws.com:5432
+S3 bucket:           pc-tool-uploads
+ECR backend:         872709212513.dkr.ecr.us-east-1.amazonaws.com/pc-tool-backend
+ECR frontend:        872709212513.dkr.ecr.us-east-1.amazonaws.com/pc-tool-frontend
+IAM task exec role:  pc-tool-exec   (ECR pull, read DB secret, logs)
+IAM task role:       pc-tool-task   (S3 access)
+IAM deploy role:     pc-tool-gh-deploy (GitHub Actions OIDC)
+CloudWatch logs:     /ecs/pc-tool
 ```
 
-Then open the app, add a test client, save a weight, refresh — it should
-persist (that's RDS working).
+---
+
+## 7. How data loads (important — read this)
+
+On every container start, the backend `entrypoint.sh`:
+1. Waits for RDS, creates the `pc_tool` database if missing
+2. Runs Alembic migrations to head
+3. Seeds the client roster: downloads the weights workbook from S3 and imports
+   the clients into RDS (idempotent — skips if clients already exist)
+4. Starts gunicorn; `app.py` then restores the analytical cache from
+   `s3://pc-tool-uploads/state/results.pkl`
+
+**Result: the app boots fully populated with no manual upload.** Users just open
+the URL. Uploading new files via the Setup tab saves them to S3 and persists.
+
+To refresh the source data: upload new files via the app's **Setup** tab, or
+replace the objects in S3 (`uploads/` prefix) and re-run clones in the app.
 
 ---
 
-## Known limitations (fine for this scale)
+## 8. Finding the current URL (it changes on redeploy)
 
-- **Single instance** — a reboot causes a ~1-minute blip. True HA needs 2+
-  instances (triples cost; not needed here).
-- **Single gunicorn worker** — required because the backend holds analytical
-  state in memory. Do not raise `--workers`.
-- **Cache is instance-local** — see Backups above; it self-heals.
+The frontend task gets a new public IP each redeploy (no ALB yet). Get the
+current one:
+
+```bash
+TASK=$(aws ecs list-tasks --cluster pc-tool-cluster --service-name pc-tool --region us-east-1 --desired-status RUNNING --query 'taskArns[0]' --output text)
+ENI=$(aws ecs describe-tasks --cluster pc-tool-cluster --tasks "$TASK" --region us-east-1 --query 'tasks[0].attachments[?type==`ElasticNetworkInterface`].details[]' --output json | python3 -c "import sys,json;d=json.load(sys.stdin);print([x['value'] for x in d if x['name']=='networkInterfaceId'][0])")
+aws ec2 describe-network-interfaces --network-interface-ids "$ENI" --region us-east-1 --query 'NetworkInterfaces[0].Association.PublicIp' --output text
+```
+
+> **TODO for a stable URL:** add an Application Load Balancer (~$16/mo). Gives a
+> permanent hostname + HTTPS and removes the changing-IP problem. Not done yet.
+
+---
+
+## 9. Viewing logs & debugging
+
+```bash
+# live tail of both containers
+aws logs tail /ecs/pc-tool --region us-east-1 --follow
+
+# last 10 minutes
+aws logs tail /ecs/pc-tool --region us-east-1 --since 10m
+
+# is the service healthy?
+aws ecs describe-services --cluster pc-tool-cluster --services pc-tool \
+  --region us-east-1 --query 'services[0].{running:runningCount,pending:pendingCount}' --output table
+```
+
+Also viewable in the console: **CloudWatch → Log groups → `/ecs/pc-tool`**.
+
+---
+
+## 10. Local development
+
+```bash
+# backend (needs local Postgres — docker compose in backend/)
+cd backend
+docker compose up -d        # local Postgres on :5432
+py run.py                   # backend on :3001
+
+# frontend (separate terminal)
+cd frontend
+npm run dev                 # UI on :3000, proxies to backend
+```
+
+First-time DB setup locally: `py -m alembic upgrade head && py -m db.seed`.
+
+---
+
+## 11. Manual deploy (fallback if GitHub Actions is unavailable)
+
+Only needed if CI is broken. In AWS CloudShell:
+
+```bash
+git clone https://github.com/brxponance/tool.git && cd tool
+ACCT=872709212513; REGION=us-east-1; ECR=$ACCT.dkr.ecr.$REGION.amazonaws.com
+aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $ECR
+docker system prune -af      # CloudShell has ~16GB; prune to avoid "no space"
+docker build -t $ECR/pc-tool-backend:latest ./backend && docker push $ECR/pc-tool-backend:latest
+docker build -t $ECR/pc-tool-frontend:latest ./frontend && docker push $ECR/pc-tool-frontend:latest
+aws ecs update-service --cluster pc-tool-cluster --service pc-tool --force-new-deployment --region us-east-1
+```
+
+---
+
+## 12. First-time infrastructure setup (already done — for reference/rebuild)
+
+If this ever needs to be rebuilt from scratch in a new account, the order was:
+1. S3 bucket `pc-tool-uploads`
+2. Reuse RDS `xponance-db`; app auto-creates the `pc_tool` database on boot
+3. Store `DATABASE_URL` in Secrets Manager (`pc-tool/database-url`), password URL-encoded
+4. IAM roles: `pc-tool-exec` (+ AmazonECSTaskExecutionRolePolicy, SecretsManagerReadWrite),
+   `pc-tool-task` (+ AmazonS3FullAccess)
+5. Security groups: `pc-tool-tasks`; open RDS SG 5432 from it
+6. ECR repos; build + push both images
+7. ECS task def `pc-tool` (2 containers) + service `pc-tool` (assignPublicIp ENABLED)
+8. Seed data: upload workbooks + `results.pkl` to S3
+9. GitHub Actions: OIDC provider + role `pc-tool-gh-deploy`, secret `AWS_DEPLOY_ROLE_ARN`
+
+Full command history for these steps is in the git log and this repo's earlier
+setup notes.
+
+---
+
+## 13. Known limitations / TODO
+
+- **No stable URL / HTTPS** — add an ALB (changing IP + "Not secure" today).
+- **No app-level auth** — anyone with the URL can use it. Add nginx basic-auth,
+  Cognito at an ALB, or an IP allowlist before broad use.
+- **Single task** — a redeploy causes a ~1-minute blip. Fine for internal use.
+- **Sandbox account** — EC2 (`ec2:RunInstances`) and IAM inline policies
+  (`iam:PutRolePolicy`) are DENIED here; that's why the app uses Fargate and
+  attach-managed-policy (not inline). Keep this in mind if extending.
+- **Clone cache is derived data** — safe to lose; rebuilds from uploaded files.
