@@ -19,7 +19,9 @@ from db.models import Base  # noqa: E402
 from db.session import database_url  # noqa: E402
 
 config = context.config
-config.set_main_option("sqlalchemy.url", database_url())
+# Escape literal % so ConfigParser doesn't treat it as interpolation syntax.
+# A URL-encoded DB password (e.g. %5B for '[') otherwise breaks set_main_option.
+config.set_main_option("sqlalchemy.url", database_url().replace("%", "%%"))
 
 target_metadata = Base.metadata
 
