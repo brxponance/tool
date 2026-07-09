@@ -915,19 +915,29 @@ def _clients_payload():
 
 
 def _validate_benchmark(bench):
-    """Return a cleaned benchmark or raise ValueError if it isn't in the
-    canonical list. None/empty is allowed (benchmark is optional). This is the
-    server-side enforcement of the 'strict dropdown' guarantee."""
+    """Return a cleaned benchmark, or raise ValueError only for values the risk
+    engine genuinely can't use. None/empty is allowed (benchmark is optional).
+
+    Accepts a value if EITHER it's one of the canonical dropdown labels OR it
+    resolves to a real peer group via resolve_peer_group(). This is deliberately
+    more permissive than the dropdown: the weights workbook carries real spelling
+    variants ('MSCI EAFE+CANADA', 'MSCI ACWI ex US') that aren't canonical
+    strings but DO resolve to a peer group, so renaming such a client in the UI
+    must not reject its existing benchmark. Only truly unrecognizable strings
+    (that resolve to nothing) are rejected."""
     if bench is None:
         return None
     b = str(bench).strip()
     if not b or b.lower() == 'none':
         return None
-    if b not in CANONICAL_BENCHMARKS:
-        raise ValueError(
-            f"Unknown benchmark {b!r}. Choose one of the supported benchmarks."
-        )
-    return b
+    if b in CANONICAL_BENCHMARKS:
+        return b
+    from data_loader import resolve_peer_group
+    if resolve_peer_group(b) is not None:
+        return b   # non-canonical spelling, but resolvable — keep it verbatim
+    raise ValueError(
+        f"Unrecognized benchmark {b!r}. Pick one of the supported benchmarks."
+    )
 
 
 def _db_error_response(action):
