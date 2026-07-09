@@ -94,8 +94,45 @@ def save_cache():
                 'mc_universe_cache':       state.get('mc_universe_cache') or {},
             }, f)
         print("Cache saved.")
+        # Also push the cache to S3 so it survives container/instance
+        # replacement (Fargate tasks have ephemeral disks). On next boot,
+        # load_cache() pulls it back if there's no local copy.
+        _push_cache_to_s3()
     except Exception as e:
         print(f"Cache save error: {e}")
+
+
+# S3 object key for the persisted cache pickle.
+_CACHE_S3_KEY = 'state/results.pkl'
+
+
+def _push_cache_to_s3():
+    if not s3_enabled():
+        return
+    try:
+        from s3_storage import upload_file
+        upload_file(app.config['CACHE_FILE'], _CACHE_S3_KEY)
+    except Exception as e:  # noqa: BLE001
+        print(f"[s3] cache upload skipped: {e}")
+
+
+def _pull_cache_from_s3():
+    """If there's no local cache but one exists in S3, download it. Lets a
+    fresh Fargate task recover the last saved analytical state (clone results,
+    uploaded-file references) without a manual re-run."""
+    if not s3_enabled():
+        return
+    cf = app.config['CACHE_FILE']
+    if os.path.exists(cf):
+        return
+    try:
+        from s3_storage import download_file, S3_BUCKET, S3_PREFIX
+        import boto3
+        key = f"{S3_PREFIX}{_CACHE_S3_KEY}"
+        boto3.client('s3').download_file(S3_BUCKET, key, cf)
+        print(f"[s3] cache restored from s3://{S3_BUCKET}/{key}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[s3] no cache in S3 to restore ({e}); starting fresh.")
 
 
 # ── Client-DB helpers ───────────────────────────────────────────────────────
@@ -324,7 +361,9 @@ def load_cache():
     except Exception as e:
         print(f"Cache load error (will recompute): {e}")
 
-# Load cache on startup
+# Load cache on startup. First try to restore it from S3 (Fargate disks are
+# ephemeral, so a fresh task has no local cache) — then load whatever is on disk.
+_pull_cache_from_s3()
 load_cache()
 
 # The client roster (names/benchmarks/managers/weights) comes from Postgres
