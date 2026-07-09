@@ -30,22 +30,45 @@ _DEFAULT_WORKBOOK = os.path.join(_BACKEND_DIR, "uploads", "Manager_Weights_3_31.
 
 def _resolve_workbook_from_s3(workbook_path: str) -> str | None:
     """Download the weights workbook from S3 by basename if it isn't on disk.
-    Returns a local path to the downloaded file, or None if unavailable."""
+    Returns a local path to the downloaded file, or None if unavailable.
+
+    Tries the exact expected filename first, then falls back to discovering ANY
+    weights-style workbook under the S3 uploads/ prefix — so a fresh deploy
+    whose weights file is named differently (e.g. a Q2 refresh
+    'Manager_Weights_6_30.xlsx') still seeds without hardcoding the name."""
     try:
-        from s3_storage import is_enabled, download_file
+        from s3_storage import is_enabled, download_file, S3_BUCKET, S3_PREFIX
+        import boto3
     except Exception:  # noqa: BLE001
         return None
     if not is_enabled():
         return None
     basename = os.path.basename(str(workbook_path).replace("\\", "/"))
     try:
-        # download_file downloads uploads/<basename> to a temp path.
-        local = download_file(basename, suffix=".xlsx")
+        local = download_file(basename, suffix=".xlsx")   # uploads/<basename>
         if local and os.path.exists(local):
             print(f"[seed] pulled workbook {basename!r} from S3.")
             return local
     except Exception as e:  # noqa: BLE001
-        print(f"[seed] could not pull workbook from S3: {e}")
+        print(f"[seed] exact workbook {basename!r} not in S3 ({e}); searching...")
+    # Fallback: list uploads/ and pick the first weights-style workbook.
+    try:
+        s3 = boto3.client("s3")
+        resp = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix=S3_PREFIX)
+        candidates = [
+            obj["Key"] for obj in resp.get("Contents", [])
+            if obj["Key"].lower().endswith(".xlsx")
+            and "weight" in obj["Key"].lower()
+        ]
+        if candidates:
+            key = sorted(candidates)[0]
+            name = os.path.basename(key)
+            local = download_file(name, suffix=".xlsx")
+            if local and os.path.exists(local):
+                print(f"[seed] discovered + pulled weights workbook {name!r} from S3.")
+                return local
+    except Exception as e:  # noqa: BLE001
+        print(f"[seed] could not discover a weights workbook in S3: {e}")
     return None
 
 

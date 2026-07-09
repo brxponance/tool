@@ -160,6 +160,17 @@ def refresh_clients_from_db():
         return False
     try:
         weights, benchmarks = client_db.load_weights_from_db()
+        # Guard: never wipe a populated roster with an empty DB. If Postgres is
+        # reachable but has no clients (seed skipped/failed, or a transient
+        # empty read), keep whatever the cache/Excel already loaded rather than
+        # blanking the app. Only overwrite state when the DB actually has clients.
+        if not weights:
+            existing = len(state.get('weights') or {})
+            if existing:
+                print(f"[db] DB roster is empty — keeping {existing} cached clients "
+                      "(not overwriting with an empty roster).")
+                return False
+            # Both empty: nothing to preserve, fall through to set the empty roster.
         state['weights'] = weights
         state['client_benchmarks'] = benchmarks
         print(f"[db] client roster loaded from Postgres — {len(weights)} clients.")
@@ -1708,6 +1719,39 @@ def manager_detail(tab, mgr_name):
 def peer_group_view(tab):
     if not state['clone_results']:
         return jsonify({'error': 'No results'})
+
+    # Special peer group: synthesise placeholders from every weights-file
+    # manager that doesn't fuzzy-match into clone_results / universe_clone_results.
+    # Bucket overrides come from state['placeholder_buckets'] (default Core=1.0).
+    # (Ported from clone_tool — the sibling /peer_skill_summary kept this; this
+    # endpoint had accidentally dropped it, leaving the Placeholder table empty.)
+    if tab == 'Placeholder':
+        ph_buckets = state.get('placeholder_buckets') or {}
+        out = []
+        for name in sorted(_enumerate_placeholder_candidates(), key=str.lower):
+            sb = dict(ph_buckets.get(name) or {'Core': 1.0})
+            v = sum(w for b, w in sb.items() if b == 'Value')
+            y = sum(w for b, w in sb.items() if b == 'Yield')
+            g = sum(w for b, w in sb.items() if b == 'Growth')
+            vg = round((v + y) - g, 6)
+            out.append({
+                'name':            name,
+                'r2_full':         None,
+                'r2_3factor':      None,
+                'vg_full':         vg,
+                'vg_3factor':      vg,
+                'style_buckets':   sb,
+                'pct_small':       sb.get('Small Cap', 0) or 0,
+                'pct_em':          0,
+                'betas_full':      {},
+                'betas_3factor':   {},
+                'dates':           [],
+                'manager_returns': [],
+                'static_clone_full': [],
+                'is_placeholder':  True,
+            })
+        return jsonify({'tab': tab, 'managers': out})
+
     td = state['clone_results'].get(tab, {})
     out = []
     for name, d in td.items():
