@@ -105,3 +105,18 @@ export async function GET(request: NextRequest, context: RouteContext) {
 export async function POST(request: NextRequest, context: RouteContext) {
   return forward(request, context);
 }
+
+// The client-management endpoints use PATCH (rename/benchmark), DELETE
+// (remove client), and PUT (save portfolio). Without these handlers Next.js
+// returns 405 before the request ever reaches the Flask backend.
+export async function PATCH(request: NextRequest, context: RouteContext) {
+  return forward(request, context);
+}
+
+export async function PUT(request: NextRequest, context: RouteContext) {
+  return forward(request, context);
+}
+
+export async function DELETE(request: NextRequest, context: RouteContext) {
+  return forward(request, context);
+}
