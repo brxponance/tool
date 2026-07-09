@@ -266,8 +266,17 @@ def _resolve_cached_path(p):
     """
     if not p:
         return None
-    # S3 mode: key starts with the S3 prefix or doesn't exist locally
+    # S3 mode: the cached path may be a stale absolute path from another
+    # machine (e.g. a Windows dev box: c:\...\uploads\file.xlsx). The S3 object
+    # is stored under the prefix by BASENAME, so strip to the basename and let
+    # resolve_path download it from S3. This lets a fresh cloud task rebind
+    # every cached file to its S3 copy instead of failing on the dead path.
     if s3_enabled():
+        basename = os.path.basename(str(p).replace('\\', '/'))
+        resolved = resolve_path(basename, app.config['UPLOAD_FOLDER'])
+        if resolved and os.path.exists(resolved):
+            return resolved
+        # Fall back to trying the path as given (in case it was already a key).
         resolved = resolve_path(p, app.config['UPLOAD_FOLDER'])
         return resolved if resolved and os.path.exists(resolved) else None
     if os.path.isabs(p) and os.path.exists(p):
