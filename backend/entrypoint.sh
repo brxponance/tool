@@ -78,7 +78,18 @@ alembic upgrade head
 
 echo "[entrypoint] seeding client roster if empty..."
 # Seed is idempotent: does nothing when clients already exist.
-python -m db.seed || echo "[entrypoint] seed skipped/failed (non-fatal)."
+#
+# SEED_RESET=1 forces a one-time roster CUTOVER: wipe the existing clients and
+# re-import from the workbook. Used to replace a test roster (Client 1-12) with
+# the real client names when the names change entirely (so upsert alone would
+# accumulate both). After the cutover deploy succeeds, unset SEED_RESET so
+# normal restarts stay idempotent and never wipe user edits.
+if [ "${SEED_RESET:-0}" = "1" ]; then
+  echo "[entrypoint] SEED_RESET=1 -> resetting roster before re-import."
+  python -m db.seed --reset || echo "[entrypoint] seed --reset skipped/failed (non-fatal)."
+else
+  python -m db.seed || echo "[entrypoint] seed skipped/failed (non-fatal)."
+fi
 
 echo "[entrypoint] starting gunicorn..."
 exec gunicorn --workers 1 --worker-class gthread --threads 4 \

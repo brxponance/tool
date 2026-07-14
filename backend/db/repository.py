@@ -45,6 +45,19 @@ def count_clients() -> int:
         return s.query(Client).count()
 
 
+def delete_all_clients() -> int:
+    """Remove every client (and cascade their managers). Returns the count
+    deleted. Used for a full roster RESET — e.g. swapping a test roster for the
+    real one when the client names change entirely. Destructive: only call on a
+    deliberate reset (seed --reset / SEED_RESET)."""
+    with session_scope() as s:
+        clients = s.query(Client).all()
+        n = len(clients)
+        for c in clients:
+            s.delete(c)
+        return n
+
+
 def _get_client(s: Session, name: str) -> Client:
     client = s.scalar(select(Client).where(Client.name == name))
     if client is None:

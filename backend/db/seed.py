@@ -93,7 +93,7 @@ def _ensure_schema() -> None:
         init_db()
 
 
-def seed(workbook: str, force: bool = False) -> None:
+def seed(workbook: str, force: bool = False, reset: bool = False) -> None:
     if not is_enabled():
         raise SystemExit(
             "Database is not reachable. Start it with `docker compose up -d` "
@@ -101,6 +101,14 @@ def seed(workbook: str, force: bool = False) -> None:
         )
 
     _ensure_schema()  # bring the schema to head via Alembic (creates + stamps)
+
+    # --reset: wipe the existing roster first, so a workbook with an entirely
+    # different client set (e.g. test 'Client N' → real names) fully replaces it
+    # rather than accumulating alongside the old rows. Implies force.
+    if reset:
+        n = repository.delete_all_clients()
+        print(f"[seed] --reset: removed {n} existing client(s) before import.")
+        force = True
 
     existing = repository.count_clients()
     if existing and not force:
@@ -138,10 +146,12 @@ def seed(workbook: str, force: bool = False) -> None:
 
 
 def main(argv: list[str]) -> None:
-    args = [a for a in argv if a not in ("--force",)]
+    flags = ("--force", "--reset")
+    args = [a for a in argv if a not in flags]
     force = "--force" in argv
+    reset = "--reset" in argv
     workbook = args[0] if args else _DEFAULT_WORKBOOK
-    seed(workbook, force=force)
+    seed(workbook, force=force, reset=reset)
 
 
 if __name__ == "__main__":
