@@ -7,5 +7,3 @@ openpyxl>=3.1.0
 rapidfuzz>=3.0.0
 werkzeug>=2.3.0
 osqp>=0.6.0
-python-pptx>=0.6.21
-lxml>=4.9.0

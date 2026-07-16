@@ -25,9 +25,6 @@ state = {
     'risk_data': None,
     'universe_clone_results': None, 'universe_dfs': None,
     'exposures_data': None,
-    # Qualitative firm/strategy data (firm AUM, ownership, diverse/woman %,
-    # strategy AUM) parsed from the layered upload. See qualitative_loader.
-    'qualitative_data': None,
     'norm_skill_by_tab': {},
     'progress': [], 'running': False, 'error': None, 'files': {},
     'progress_current': 0, 'progress_total': 0, 'progress_phase': '',
@@ -64,7 +61,6 @@ def save_cache():
                 'risk_data':               state['risk_data'],
                 'universe_clone_results':  state['universe_clone_results'],
                 'exposures_data':          state['exposures_data'],
-                'qualitative_data':        state.get('qualitative_data'),
                 'norm_skill_by_tab':       state['norm_skill_by_tab'],
                 'files':                   state['files'],
                 'clone_run_files':         state['clone_run_files'],
@@ -171,7 +167,6 @@ def load_cache():
         state['security_risk_data']     = data.get('security_risk_data')
         state['universe_clone_results'] = data.get('universe_clone_results')
         state['exposures_data']         = data.get('exposures_data')
-        state['qualitative_data']       = data.get('qualitative_data')
         state['norm_skill_by_tab']      = data.get('norm_skill_by_tab', {})
         state['mc_universe_cache']      = data.get('mc_universe_cache', {})
         state['placeholder_buckets']    = data.get('placeholder_buckets', {})
@@ -594,8 +589,7 @@ def reload_inputs():
 
     Returns a status dict indicating which inputs were refreshed.
     """
-    status = {'weights': 'skipped', 'risk': 'skipped', 'exposures': 'skipped',
-              'qualitative': 'skipped'}
+    status = {'weights': 'skipped', 'risk': 'skipped', 'exposures': 'skipped'}
     errors = {}
 
     # Weights
@@ -625,17 +619,6 @@ def reload_inputs():
         except Exception as e:
             status['exposures'] = 'error'
             errors['exposures'] = str(e)
-
-    # Qualitative firm/strategy data
-    if 'qualitative' in state['files'] and os.path.exists(state['files']['qualitative']):
-        try:
-            from qualitative_loader import parse_qualitative_file
-            state['qualitative_data'] = parse_qualitative_file(state['files']['qualitative'])
-            _QUAL_MATCH_CACHE.clear()   # names may have changed
-            status['qualitative'] = 'ok'
-        except Exception as e:
-            status['qualitative'] = 'error'
-            errors['qualitative'] = str(e)
 
     save_cache()
     return jsonify({
@@ -733,12 +716,8 @@ def portfolio(client_name):
     # return None across the board)
     for m in data.get('managers', []):
         if m.get('is_placeholder'):
-            # Placeholders still get qualitative fields (they may be a known
-            # firm with FactSet data but no clone), just not norm-skill.
-            m.update(_qual_fields(m.get('matched_name'), m.get('weight_file_name')))
             continue
         m.update(_norm_skill_for(m['tab'], m['matched_name']))
-        m.update(_qual_fields(m['matched_name'], m.get('weight_file_name')))
     # Surface the client's benchmark (as given in the weights file) so the
     # UI can label the risk/exposures tables with the right benchmark name.
     data['client_benchmark'] = (state.get('client_benchmarks') or {}).get(client_name)
@@ -1107,7 +1086,6 @@ def peer_skill_summary(tab):
             'si_skill':  sp.get('si'),
         }
         row.update(_norm_skill_for(tab, name))
-        row.update(_qual_fields(name))
         out.append(row)
     return jsonify({'tab': tab, 'managers': out})
 
@@ -2181,61 +2159,6 @@ CLIENT_CYCLE_BENCH = {
 }
 
 
-@app.route('/export_portfolio_pptx', methods=['POST'])
-def export_portfolio_pptx():
-    """Build the 'Print Memo Report' PowerPoint deck for the current portfolio.
-
-    Request JSON (assembled by the frontend from already-rendered data):
-      {
-        "client_name":      str,
-        "benchmark_name":   str | null,
-        "portfolio_managers": [...],
-        "vg_positioning":   {current_3f, proposed_3f, current_full, proposed_full},
-        "factset_risk":     {...} | null,
-        "mcr":              {...} | null,
-        "market_cycle":     {...} | null
-      }
-
-    Returns the binary .pptx with Content-Disposition set for download.
-    If a section's data is missing the slide is skipped; the response header
-    'X-Skipped-Slides' communicates that back to the UI.
-    """
-    from pptx_export import build_portfolio_pptx
-    from flask import Response
-
-    payload = request.get_json(silent=True) or {}
-    images = payload.get('images') or {}
-    if not any(images.get(k) for k in
-               ('portfolio_managers', 'vg_positioning', 'factset_risk', 'mcr', 'market_cycle')):
-        return jsonify({'status': 'error',
-                        'error': 'No panel screenshots provided — '
-                                 'select a client and wait for the page to fully render.'}), 400
-
-    try:
-        data, summary = build_portfolio_pptx(payload)
-    except Exception as e:
-        import traceback
-        return jsonify({'status': 'error', 'error': str(e),
-                        'trace': traceback.format_exc()}), 500
-
-    # Filename: {ClientName}_Memo_Report_{YYYY-MM-DD}.pptx
-    from datetime import date
-    client = (payload.get('client_name') or 'Portfolio').replace(' ', '_')
-    safe   = ''.join(ch for ch in client if ch.isalnum() or ch in '_-')
-    fname  = f"{safe}_Memo_Report_{date.today().isoformat()}.pptx"
-
-    resp = Response(
-        data,
-        mimetype='application/vnd.openxmlformats-officedocument.presentationml.presentation',
-    )
-    resp.headers['Content-Disposition'] = f'attachment; filename="{fname}"'
-    resp.headers['Content-Length']      = str(len(data))
-    # Comma-separated list of section names that were omitted, if any
-    if summary.get('skipped'):
-        resp.headers['X-Skipped-Slides'] = '; '.join(summary['skipped'])
-    return resp
-
-
 @app.route('/reset_universe', methods=['POST'])
 def reset_universe():
     """Wipe all universe clone results and normalised-skill data from state
@@ -2633,152 +2556,7 @@ def upload_exposures():
                         'traceback': traceback.format_exc()})
 
 
-@app.route('/upload_qualitative', methods=['POST'])
-def upload_qualitative():
-    """Accept the layered firm/strategy qualitative XLSX, parse it, cache it."""
-    from qualitative_loader import parse_qualitative_file
-    f = request.files.get('qualitative')
-    if not f:
-        return jsonify({'status': 'error', 'message': 'No file provided.'})
-    fname = secure_filename(f.filename)
-    path  = os.path.join(app.config['UPLOAD_FOLDER'], fname)
-    f.save(path)
-    state['files']['qualitative'] = path
-    try:
-        data = parse_qualitative_file(path)
-        state['qualitative_data'] = data
-        save_cache()
-        return jsonify({
-            'status':       'ok',
-            'n_firms':      data['n_firms'],
-            'n_strategies': data['n_strategies'],
-            'warnings':     data.get('warnings', []),
-        })
-    except Exception as e:
-        import traceback
-        return jsonify({'status': 'error', 'message': str(e),
-                        'traceback': traceback.format_exc()})
-
-
-# ── Qualitative join: manager name → firm/strategy record ──────────────────
-# Cache the fuzzy match per (qualitative-version, name) so the peer tables and
-# portfolio view don't re-run rapidfuzz for every row on every render.
-_QUAL_MATCH_CACHE = {}
-
-
-def _qual_lookup(name, weight_file_name=None):
-    """Return the qualitative record for a manager, matching its name (or the
-    weights-file label) against the strategy keys in the qualitative file.
-    Cascade: exact → whitespace/case-normalised → fuzzy (WRatio ≥ 86).
-    Returns None if no confident match or no qualitative data loaded."""
-    qd = state.get('qualitative_data')
-    if not qd or not qd.get('strategies'):
-        return None
-    strategies = qd['strategies']
-
-    for cand in (name, weight_file_name):
-        if not cand:
-            continue
-        c = str(cand).strip()
-        # 1 — exact
-        if c in strategies:
-            return strategies[c]
-        # 2 — whitespace/case-normalised (handles 'Ativo ' vs 'Ativo',
-        #     'Castleark' vs 'CastleArk')
-        cl = c.lower().strip()
-        for k, v in strategies.items():
-            if str(k).lower().strip() == cl:
-                return v
-
-    # 3 — fuzzy fallback, guarded by a high cutoff so we don't mis-attach
-    from rapidfuzz import process, fuzz
-    keys = list(strategies.keys())
-    ck = f"{id(qd)}::{name}::{weight_file_name}"
-    if ck in _QUAL_MATCH_CACHE:
-        hit = _QUAL_MATCH_CACHE[ck]
-        return strategies.get(hit) if hit else None
-    best = None
-    for cand in (name, weight_file_name):
-        if not cand:
-            continue
-        m = process.extractOne(str(cand), keys, scorer=fuzz.WRatio, score_cutoff=86)
-        if m:
-            best = m[0]
-            break
-    _QUAL_MATCH_CACHE[ck] = best
-    return strategies.get(best) if best else None
-
-
-def _qual_fields(name, weight_file_name=None):
-    """Flat dict of qualitative fields for a manager, always the same shape
-    (None-filled when unmatched) so the frontend can render uniformly."""
-    rec = _qual_lookup(name, weight_file_name)
-    if not rec:
-        return {'q_firm': None, 'q_firm_aum': None, 'q_strategy_aum': None,
-                'q_ownership': None, 'q_diverse_pct': None}
-    return {
-        'q_firm':         rec.get('firm'),
-        'q_firm_aum':     rec.get('firm_aum'),
-        'q_strategy_aum': rec.get('strategy_aum'),
-        'q_ownership':    rec.get('ownership'),
-        'q_diverse_pct':  rec.get('diverse_pct'),
-    }
-
-
-@app.route('/diverse_ownership', methods=['POST'])
-def diverse_ownership():
-    """
-    Portfolio-level diverse/woman-owned exposure. Rolls managers up to firms
-    (a client can hold several strategies from one firm), then answers:
-    how much of the portfolio sits with firms whose diverse/woman ownership
-    is >= threshold (default 50%), by weight and by firm count.
-    """
-    qd = state.get('qualitative_data')
-    if not qd or not qd.get('strategies'):
-        return jsonify({'has_data': False})
-    payload   = request.get_json(silent=True) or {}
-    managers  = payload.get('managers', [])
-    threshold = float(payload.get('threshold', 50) or 50)
-
-    def rollup(wkey):
-        firms = {}
-        unknown_w = 0.0
-        total_w = 0.0
-        for m in managers:
-            w = float(m.get(wkey, 0) or 0)
-            if w <= 0:
-                continue
-            total_w += w
-            rec = _qual_lookup(m.get('matched_name'), m.get('weight_file_name'))
-            if not rec or not rec.get('firm'):
-                unknown_w += w
-                continue
-            f = rec['firm']
-            if f not in firms:
-                firms[f] = {'weight': 0.0, 'diverse_pct': rec.get('diverse_pct')}
-            firms[f]['weight'] += w
-        n_firms = len(firms)
-        div_firms = [f for f, d in firms.items()
-                     if d['diverse_pct'] is not None and d['diverse_pct'] >= threshold]
-        div_w = sum(firms[f]['weight'] for f in div_firms)
-        wpct = (100.0 * div_w / total_w) if total_w > 0 else 0.0
-        return {
-            'weight_pct':   round(wpct, 2),
-            'n_diverse':    len(div_firms),
-            'n_firms':      n_firms,
-            'ratio_pct':    round(100.0 * len(div_firms) / n_firms, 1) if n_firms else 0.0,
-            'unknown_weight_pct': round(100.0 * unknown_w / total_w, 1) if total_w > 0 else 0.0,
-        }
-
-    return jsonify({
-        'has_data':  True,
-        'threshold': threshold,
-        'current':   rollup('current_weight'),
-        'proposed':  rollup('proposed_weight'),
-    })
-
-
-
+# Per-client FactSet-exposures benchmark override. The exposures file is a
 # snapshot of stocks and factor values across multiple candidate benchmarks
 # and manager portfolios; this dict tells the tool which benchmark each
 # client should be compared to. Falls back to the default (first-listed)
@@ -2839,85 +2617,3 @@ def portfolio_exposures():
     )
     return jsonify(result)
 
-
-
-# ─────────────────────────────────────────────────────────────────────────
-#  Holdings-overlap matrix (Portfolio tab)
-# ─────────────────────────────────────────────────────────────────────────
-def _resolve_overlap_benchmark(client_name, bmk_name):
-    """Same benchmark-resolution cascade the exposures tab uses, so the
-    overlap matrix matches managers to the same exposure-file sleeves."""
-    if not bmk_name and client_name:
-        bmk_name = (state.get('client_benchmarks') or {}).get(client_name)
-    if not bmk_name and client_name:
-        bmk_name = CLIENT_EXPOSURE_BENCHMARK.get(client_name)
-    return bmk_name
-
-
-@app.route('/holdings_overlap', methods=['POST'])
-def holdings_overlap():
-    """
-    Pairwise holdings-overlap matrix for the current or proposed portfolio.
-
-    POST JSON: {
-        managers: [{matched_name, weight_file_name?, current_weight, proposed_weight}],
-        client_name:  str (optional — resolves the benchmark matching hint),
-        weight_state: 'current' | 'proposed'  (default 'current'),
-        benchmark_name: str (optional explicit override)
-    }
-    Returns the matrix (see overlap_engine.compute_holdings_overlap).
-    """
-    from overlap_engine import compute_holdings_overlap
-    if state['exposures_data'] is None:
-        return jsonify({'error': 'No exposure data loaded. Upload a FactSet '
-                                 'exposures file on the Setup tab.'})
-    payload      = request.get_json(silent=True) or {}
-    managers     = payload.get('managers', [])
-    client_name  = payload.get('client_name')
-    weight_state = payload.get('weight_state', 'current')
-    match_basis  = payload.get('match_basis', 'sedol')
-    bmk_name     = _resolve_overlap_benchmark(client_name,
-                                              payload.get('benchmark_name'))
-    if not managers:
-        return jsonify({'error': 'No managers provided.'})
-    result = compute_holdings_overlap(
-        managers, state['exposures_data'],
-        benchmark_name=bmk_name, weight_state=weight_state,
-        match_basis=match_basis,
-    )
-    return jsonify(result)
-
-
-@app.route('/holdings_overlap_detail', methods=['POST'])
-def holdings_overlap_detail():
-    """
-    Shared-security detail for one manager pair (drill-down panel).
-
-    POST JSON: {
-        managers: [...same as /holdings_overlap...],
-        name_i: str, name_j: str,
-        client_name: str (optional), weight_state: 'current'|'proposed',
-        top_n: int (optional — cap the returned rows)
-    }
-    """
-    from overlap_engine import compute_pair_detail
-    if state['exposures_data'] is None:
-        return jsonify({'error': 'No exposure data loaded.'})
-    payload      = request.get_json(silent=True) or {}
-    managers     = payload.get('managers', [])
-    name_i       = payload.get('name_i')
-    name_j       = payload.get('name_j')
-    client_name  = payload.get('client_name')
-    weight_state = payload.get('weight_state', 'current')
-    match_basis  = payload.get('match_basis', 'sedol')
-    top_n        = payload.get('top_n')
-    bmk_name     = _resolve_overlap_benchmark(client_name,
-                                              payload.get('benchmark_name'))
-    if not (managers and name_i and name_j):
-        return jsonify({'error': 'managers, name_i and name_j are required.'})
-    result = compute_pair_detail(
-        managers, state['exposures_data'], name_i, name_j,
-        benchmark_name=bmk_name, weight_state=weight_state, top_n=top_n,
-        match_basis=match_basis,
-    )
-    return jsonify(result)
