@@ -2180,7 +2180,10 @@ def upload_security_risk():
     path = save_uploaded_file(f, secure_filename(f.filename), app.config['UPLOAD_FOLDER'])
     try:
         from security_risk_engine import parse_security_risk_file
-        parsed = parse_security_risk_file(path)
+        # Resolve to a local path first — in S3 mode `path` is an S3 key, not a
+        # local file, so the parser must read the downloaded copy.
+        local = resolve_path(path, app.config['UPLOAD_FOLDER'], suffix='.xlsx')
+        parsed = parse_security_risk_file(local)
         if not parsed['managers']:
             return jsonify({'status': 'error',
                             'message': 'No manager sections found. Check the '
@@ -3783,7 +3786,8 @@ def upload_qualitative():
     path  = save_uploaded_file(f, fname, app.config['UPLOAD_FOLDER'])
     state['files']['qualitative'] = path
     try:
-        data = parse_qualitative_file(path)
+        local = resolve_path(path, app.config['UPLOAD_FOLDER'], suffix='.xlsx')
+        data = parse_qualitative_file(local)
         state['qualitative_data'] = data
         _QUAL_MATCH_CACHE.clear()
         save_cache()
