@@ -1,55 +1,44 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback } from "react";
 
-import { STYLE_BUCKET_KEYS, type StyleBucketKey } from "../types";
+import {
+  clearAllBucketOverrides,
+  clearManagerBucketOverrides,
+  setBucketOverride,
+  setBucketOverrideExclusive,
+  useBucketOverrideMap,
+  type BucketOverrideMap,
+  type StyleBucketKey,
+} from "@/lib/state/bucket-overrides";
 
-export type BucketOverrideMap = Record<string, Partial<Record<StyleBucketKey, number>>>;
+export type { BucketOverrideMap };
 
 const overrideKey = (tab: string, name: string) => `${tab}|${name}`;
 
+// Thin feature-facing wrapper around the shared bucket-override store
+// (lib/state/bucket-overrides). The store is module-level so edits made on
+// the Peer Groups tab flow through to the Portfolio tab in the same session.
 export function useBucketOverrides() {
-  const [overrides, setOverrides] = useState<BucketOverrideMap>({});
+  const overrides = useBucketOverrideMap();
 
-  const setOne = useCallback((tab: string, name: string, bucket: StyleBucketKey, value: string) => {
-    const k = overrideKey(tab, name);
-    setOverrides((prev) => {
-      const next = { ...prev };
-      const cur = { ...(next[k] || {}) };
-      const parsed = parseFloat(value);
-      if (value === "" || Number.isNaN(parsed)) {
-        delete cur[bucket];
-      } else {
-        // accept either decimal (0.55) or percent (55)
-        cur[bucket] = parsed > 1.5 ? parsed / 100 : parsed;
-      }
-      if (Object.keys(cur).length === 0) delete next[k];
-      else next[k] = cur;
-      return next;
-    });
-  }, []);
+  const setOne = useCallback(
+    (tab: string, name: string, bucket: StyleBucketKey, value: string) => {
+      setBucketOverride(tab, name, bucket, value);
+    },
+    [],
+  );
 
   const setExclusive = useCallback((tab: string, name: string, bucket: StyleBucketKey) => {
-    const k = overrideKey(tab, name);
-    const ov: Partial<Record<StyleBucketKey, number>> = {};
-    STYLE_BUCKET_KEYS.forEach((b) => {
-      ov[b] = b === bucket ? 1.0 : 0.0;
-    });
-    setOverrides((prev) => ({ ...prev, [k]: ov }));
+    setBucketOverrideExclusive(tab, name, bucket);
   }, []);
 
   const clearOne = useCallback((tab: string, name: string) => {
-    const k = overrideKey(tab, name);
-    setOverrides((prev) => {
-      if (!prev[k]) return prev;
-      const next = { ...prev };
-      delete next[k];
-      return next;
-    });
+    clearManagerBucketOverrides(tab, name);
   }, []);
 
   const clearAll = useCallback(() => {
-    setOverrides({});
+    clearAllBucketOverrides();
   }, []);
 
   const getFor = useCallback(

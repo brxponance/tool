@@ -102,12 +102,19 @@ export function usePeerGroupsScreen() {
     void loadTab(selection.tab);
   }
 
+  // Drop a tab's cached response so the next visit refetches (used after
+  // persisting placeholder buckets server-side).
+  function invalidate(tab: string) {
+    cache.current.delete(tab);
+  }
+
   const allManagers = useMemo(() => state.data?.managers ?? [], [state.data]);
 
   return {
     selection,
     select,
     reload,
+    invalidate,
     loading: state.loading,
     error: state.error,
     data: state.data,

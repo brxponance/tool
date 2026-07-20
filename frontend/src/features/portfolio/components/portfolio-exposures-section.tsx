@@ -15,7 +15,26 @@ type PortfolioExposuresSectionProps = {
   selectedCategorical: string | null;
   selectedContinuous: string | null;
   onSelectionChange(categorical: string | null, continuous: string | null): void;
+  // Manager-detail mode (mirrors the reference UI's mgr-exp table): hides the
+  // Proposed / Prop vs Bmk columns (4-column layout) and rewrites the
+  // Benchmark / Cur vs Bmk headers to the shortened resolved benchmark name.
+  // Defaults to false so the Portfolio tab is unchanged.
+  hideProposed?: boolean;
 };
+
+// Trim noisy index-name suffixes ("Net Total Return USD", "Standard",
+// "Index") so headers stay readable. Port of the reference UI's
+// shortenExpBenchmark().
+function shortenExpBenchmark(s: string | null | undefined): string | null {
+  if (!s) return null;
+  return String(s)
+    .replace(/\s+(?:Net|Gross)\s+Total\s+Return\s+(?:Index|USD)?$/i, "")
+    .replace(/\s+NR\s+USD$/i, "")
+    .replace(/\s+TR\s+USD$/i, "")
+    .replace(/\s+Standard$/i, "")
+    .replace(/\s+Index$/i, "")
+    .trim();
+}
 
 // ── Quintile preview specs (mirrors old index.html) ──────────────────────
 // Used only when backend hasn't returned children yet; produces plausible
@@ -164,6 +183,7 @@ export function PortfolioExposuresSection({
   selectedCategorical,
   selectedContinuous,
   onSelectionChange,
+  hideProposed = false,
 }: PortfolioExposuresSectionProps) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
@@ -211,11 +231,32 @@ export function PortfolioExposuresSection({
     let mv = 1;
     let md = 1;
     rows.forEach((r) => {
-      mv = Math.max(mv, r.benchmark || 0, r.current || 0, r.proposed || 0);
-      md = Math.max(md, Math.abs(r.delta_current || 0), Math.abs(r.delta_proposed || 0));
+      mv = Math.max(
+        mv,
+        r.benchmark || 0,
+        r.current || 0,
+        hideProposed ? 0 : r.proposed || 0,
+      );
+      md = Math.max(
+        md,
+        Math.abs(r.delta_current || 0),
+        hideProposed ? 0 : Math.abs(r.delta_proposed || 0),
+      );
     });
     return { maxValue: mv, maxDelta: md };
-  }, [rows]);
+  }, [rows, hideProposed]);
+
+  const columnCount = hideProposed ? 4 : 6;
+
+  // Manager-detail mode surfaces the resolved benchmark name in the column
+  // headers (reference UI's applyExpBenchmarkHeaders + shortenExpBenchmark).
+  const benchShort = hideProposed
+    ? shortenExpBenchmark(data?.benchmark_name)
+    : null;
+  const benchHeaderLabel = benchShort ?? "Benchmark";
+  const curVsHeaderLabel = benchShort ? `Cur vs ${benchShort}` : "Cur vs Bmk";
+  const benchHeaderTitle =
+    hideProposed && data?.benchmark_name ? data.benchmark_name : undefined;
 
   const coverageNote = data
     ? `Portfolio coverage: ${data.coverage_current}% current / ${data.coverage_proposed}% proposed`
@@ -299,41 +340,49 @@ export function PortfolioExposuresSection({
                 <th style={{ textAlign: "left", minWidth: 160 }} id="exp-col-header">
                   {headerLabel}
                 </th>
-                <th className="mono" style={{ minWidth: 90 }}>Benchmark</th>
+                <th className="mono" style={{ minWidth: 90 }} title={benchHeaderTitle}>
+                  {benchHeaderLabel}
+                </th>
                 <th className="mono" style={{ minWidth: 90 }}>Current</th>
-                <th className="mono" style={{ minWidth: 90 }}>Proposed</th>
-                <th className="mono" style={{ minWidth: 90 }}>Cur vs Bmk</th>
-                <th className="mono" style={{ minWidth: 90 }}>Prop vs Bmk</th>
+                {!hideProposed && (
+                  <th className="mono" style={{ minWidth: 90 }}>Proposed</th>
+                )}
+                <th className="mono" style={{ minWidth: 90 }} title={benchHeaderTitle}>
+                  {curVsHeaderLabel}
+                </th>
+                {!hideProposed && (
+                  <th className="mono" style={{ minWidth: 90 }}>Prop vs Bmk</th>
+                )}
               </tr>
             </thead>
             <tbody id="exp-tbody">
               {!exposureMenu.length ? (
                 <tr>
-                  <td colSpan={6} style={{ textAlign: "center", color: "var(--text3)", padding: 20 }}>
+                  <td colSpan={columnCount} style={{ textAlign: "center", color: "var(--text3)", padding: 20 }}>
                     Upload a FactSet Exposures file on the Setup tab.
                   </td>
                 </tr>
               ) : !grouping ? (
                 <tr>
-                  <td colSpan={6} style={{ textAlign: "center", color: "var(--text3)", padding: 20 }}>
+                  <td colSpan={columnCount} style={{ textAlign: "center", color: "var(--text3)", padding: 20 }}>
                     Pick a grouping in row A or row B above.
                   </td>
                 </tr>
               ) : loading && !data ? (
                 <tr>
-                  <td colSpan={6} style={{ textAlign: "center", color: "var(--text3)", padding: 16, fontFamily: "var(--mono)", fontSize: 10 }}>
+                  <td colSpan={columnCount} style={{ textAlign: "center", color: "var(--text3)", padding: 16, fontFamily: "var(--mono)", fontSize: 10 }}>
                     Loading…
                   </td>
                 </tr>
               ) : data?.error ? (
                 <tr>
-                  <td colSpan={6} style={{ textAlign: "center", color: "var(--amber)", padding: 16, fontFamily: "var(--mono)", fontSize: 10 }}>
+                  <td colSpan={columnCount} style={{ textAlign: "center", color: "var(--amber)", padding: 16, fontFamily: "var(--mono)", fontSize: 10 }}>
                     ⚠ {data.error}
                   </td>
                 </tr>
               ) : !rows.length ? (
                 <tr>
-                  <td colSpan={6} style={{ textAlign: "center", color: "var(--text3)", padding: 16 }}>
+                  <td colSpan={columnCount} style={{ textAlign: "center", color: "var(--text3)", padding: 16 }}>
                     No data.
                   </td>
                 </tr>
@@ -366,9 +415,13 @@ export function PortfolioExposuresSection({
                       </td>
                       <ValueCell value={row.benchmark} fillClass="exp-bmk-fill" maxAbs={maxValue} />
                       <ValueCell value={row.current} fillClass="exp-cur-fill" maxAbs={maxValue} />
-                      <ValueCell value={row.proposed} fillClass="exp-prop-fill" maxAbs={maxValue} />
+                      {!hideProposed && (
+                        <ValueCell value={row.proposed} fillClass="exp-prop-fill" maxAbs={maxValue} />
+                      )}
                       <DeltaCell value={row.delta_current} maxAbs={maxDelta} />
-                      <DeltaCell value={row.delta_proposed} maxAbs={maxDelta} />
+                      {!hideProposed && (
+                        <DeltaCell value={row.delta_proposed} maxAbs={maxDelta} />
+                      )}
                     </tr>
                   );
 
@@ -406,9 +459,13 @@ export function PortfolioExposuresSection({
                         </td>
                         <ValueCell value={c.benchmark || 0} fillClass="exp-bmk-fill" maxAbs={maxValue} />
                         <ValueCell value={c.current || 0} fillClass="exp-cur-fill" maxAbs={maxValue} />
-                        <ValueCell value={c.proposed || 0} fillClass="exp-prop-fill" maxAbs={maxValue} />
+                        {!hideProposed && (
+                          <ValueCell value={c.proposed || 0} fillClass="exp-prop-fill" maxAbs={maxValue} />
+                        )}
                         <DeltaCell value={c.delta_current || 0} maxAbs={maxDelta} />
-                        <DeltaCell value={c.delta_proposed || 0} maxAbs={maxDelta} />
+                        {!hideProposed && (
+                          <DeltaCell value={c.delta_proposed || 0} maxAbs={maxDelta} />
+                        )}
                       </tr>
                     );
                   });

@@ -4,6 +4,8 @@ import { useState } from "react";
 
 import { formatPercent, sum } from "@/lib/utils";
 
+import { OptimizerPanel } from "@/features/optimize/components/optimizer-panel";
+
 import { AddManagerModal } from "../components/add-manager-modal";
 import { ClientManageModal } from "../components/client-manage-modal";
 import { DiverseOwnershipSection } from "../components/diverse-ownership-section";
@@ -208,27 +210,34 @@ export function PortfolioRoute() {
         </div>
       ) : null}
 
-      <div className="panel mb-16">
-        <div className="panel-header">
-          <span className="panel-title">Portfolio Managers</span>
-          <span style={{ marginLeft: "auto", fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)" }}>
-            Edit proposed weight to model changes
-          </span>
+      <div className="mb-16" style={{ position: "relative" }}>
+        <div
+          className="panel"
+          id="portfolio-managers-panel"
+          style={{ width: "calc(50% - 8px)", minWidth: 0 }}
+        >
+          <div className="panel-header">
+            <span className="panel-title">Portfolio Managers</span>
+            <span style={{ marginLeft: "auto", fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)" }}>
+              Edit proposed weight to model changes
+            </span>
+          </div>
+          <div className="panel-body" style={{ padding: 0 }}>
+            {portfolio ? (
+              <PortfolioTable
+                managers={portfolio.managers}
+                onProposedWeightChange={updateManagerProposedWeight}
+                onRemoveManager={removeManager}
+                onPlaceholderSaved={reload}
+              />
+            ) : (
+              <div style={{ padding: 24, textAlign: "center", color: "var(--text3)" }}>
+                No portfolio payload is available yet. Start the backend and load weights.
+              </div>
+            )}
+          </div>
         </div>
-        <div className="panel-body" style={{ padding: 0 }}>
-          {portfolio ? (
-            <PortfolioTable
-              managers={portfolio.managers}
-              onProposedWeightChange={updateManagerProposedWeight}
-              onRemoveManager={removeManager}
-              onPlaceholderSaved={reload}
-            />
-          ) : (
-            <div style={{ padding: 24, textAlign: "center", color: "var(--text3)" }}>
-              No portfolio payload is available yet. Start the backend and load weights.
-            </div>
-          )}
-        </div>
+        <OptimizerPanel clientName={selectedClient} />
       </div>
 
       <PortfolioAnalyticsSections

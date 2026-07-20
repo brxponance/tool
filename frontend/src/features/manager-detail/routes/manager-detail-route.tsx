@@ -17,6 +17,7 @@ import { ManagerRiskExposuresPanel } from "../components/manager-risk-exposures-
 import { StyleBucketDonut } from "../components/style-bucket-donut";
 import { useManagerDetailScreen } from "../hooks/use-manager-detail-screen";
 import { useManagerExposures } from "../hooks/use-manager-exposures";
+import { mgrBenchmarkHint } from "../lib/benchmark-hint";
 import type { PeriodReturnKey } from "../types";
 
 const PERIOD_KEYS: PeriodReturnKey[] = ["qtd", "ytd", "t1", "t3", "t5", "si"];
@@ -34,6 +35,35 @@ function fmtPct(value: number | null | undefined) {
   return `${(value * 100).toFixed(1)}%`;
 }
 
+// Placeholder managers (< 3 years of returns) have no clone, so the
+// clone-derived chart boxes render the reference UI's N/A stub instead.
+function PlaceholderNaBox({ title }: { title: string }) {
+  return (
+    <div
+      className="chart-box"
+      style={{ display: "flex", flexDirection: "column" }}
+    >
+      <div className="chart-title">{title}</div>
+      <div
+        style={{
+          flex: 1,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: "30px 16px",
+          textAlign: "center",
+          color: "var(--text3)",
+          fontFamily: "var(--mono)",
+          fontSize: 11,
+          lineHeight: 1.5,
+        }}
+      >
+        N/A — manager has &lt; 3 years of returns
+      </div>
+    </div>
+  );
+}
+
 type ManagerDetailRouteProps = {
   initialManager?: string | null;
   initialTab?: string | null;
@@ -43,8 +73,16 @@ export function ManagerDetailRoute({
   initialManager,
   initialTab,
 }: ManagerDetailRouteProps) {
-  const { data, directory, error, loadingDetail, loadingDirectory, selected, selectManager } =
-    useManagerDetailScreen({ manager: initialManager, tab: initialTab });
+  const {
+    data,
+    directory,
+    error,
+    loadingDetail,
+    loadingDirectory,
+    selected,
+    selectManager,
+    clearSelection,
+  } = useManagerDetailScreen({ manager: initialManager, tab: initialTab });
 
   const [search, setSearch] = useState(initialManager ?? "");
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -68,10 +106,18 @@ export function ManagerDetailRoute({
     };
   }, []);
 
+  // Benchmark hint for the FactSet risk + exposures requests. Mirrors the
+  // reference UI's mgrBenchmarkHint(): manual overrides, xUS→ACWI-ex-US
+  // rerouting, and tab inference for Placeholder managers — instead of the
+  // regression benchmark from /manager_skill_summary.
+  const benchmarkHint = selected
+    ? mgrBenchmarkHint(selected.name, selected.tab)
+    : null;
+
   const exposures = useManagerExposures({
     name: selected?.name ?? null,
     tab: selected?.tab ?? null,
-    benchmarkHint: data?.summary.benchmark_name ?? null,
+    benchmarkHint,
     hasExposures: !!status?.has_exposures,
   });
 
@@ -110,6 +156,7 @@ export function ManagerDetailRoute({
     .trim();
 
   const periodReturns = data?.summary.period_returns;
+  const isPlaceholder = !!data?.summary.is_placeholder;
 
   return (
     <div>
@@ -133,6 +180,7 @@ export function ManagerDetailRoute({
             onClick={() => {
               setSearch("");
               setShowSuggestions(false);
+              clearSelection();
             }}
           >
             Clear
@@ -242,14 +290,18 @@ export function ManagerDetailRoute({
                 minWidth: 0,
               }}
             >
-              <div className="chart-box">
-                <div className="chart-title">Factor Composition (Full Model)</div>
-                <StyleBucketDonut buckets={data.summary.style_buckets} />
-              </div>
+              {isPlaceholder ? (
+                <PlaceholderNaBox title="Factor Composition (Full Model)" />
+              ) : (
+                <div className="chart-box">
+                  <div className="chart-title">Factor Composition (Full Model)</div>
+                  <StyleBucketDonut buckets={data.summary.style_buckets} />
+                </div>
+              )}
               <ManagerRiskExposuresPanel
                 name={data.summary.name}
                 tab={data.summary.tab}
-                benchmarkHint={data.summary.benchmark_name ?? null}
+                benchmarkHint={benchmarkHint}
                 useSecurityRisk={!!status?.has_security_risk}
                 hasRiskFile={
                   !!status?.has_risk || !!status?.has_security_risk
@@ -264,13 +316,17 @@ export function ManagerDetailRoute({
                 minWidth: 0,
               }}
             >
-              <div className="chart-box">
-                <div className="chart-title">Cumulative Skill vs Static Clone</div>
-                <CumulativeSkillChart
-                  dates={data.summary.dates}
-                  values={data.summary.cumulative_skill}
-                />
-              </div>
+              {isPlaceholder ? (
+                <PlaceholderNaBox title="Cumulative Skill vs Static Clone" />
+              ) : (
+                <div className="chart-box">
+                  <div className="chart-title">Cumulative Skill vs Static Clone</div>
+                  <CumulativeSkillChart
+                    dates={data.summary.dates}
+                    values={data.summary.cumulative_skill}
+                  />
+                </div>
+              )}
             </div>
           </div>
 
@@ -331,6 +387,7 @@ export function ManagerDetailRoute({
               selectedCategorical={exposures.selectedCategorical}
               selectedContinuous={exposures.selectedContinuous}
               onSelectionChange={exposures.setSelection}
+              hideProposed
             />
           </div>
         </>

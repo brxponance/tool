@@ -2,7 +2,10 @@
 
 import { useMemo } from "react";
 
+import { getBucketOverride, STYLE_BUCKET_KEYS } from "@/lib/state/bucket-overrides";
 import { cn } from "@/lib/utils";
+
+import { updatePlaceholderBuckets } from "@/features/portfolio/api/get-portfolio-screen-data";
 
 import { SkillTable } from "../components/skill-table";
 import { StyleExposuresTable } from "../components/style-exposures-table";
@@ -15,8 +18,56 @@ import {
 import { filterByStyle } from "../lib/peer-helpers";
 
 export function PeerGroupsRoute() {
-  const { selection, select, reload, loading, error, allManagers } = usePeerGroupsScreen();
+  const { selection, select, reload, invalidate, loading, error, allManagers } =
+    usePeerGroupsScreen();
   const overrides = useBucketOverrides();
+
+  // Persist Placeholder edits so they survive a refresh / backend restart —
+  // mirrors savePlaceholderBuckets in the reference UI. Other peer-group
+  // overrides remain session-only ("what-if" analysis on cloned managers).
+  const tableOverrides = useMemo(() => {
+    const persistPlaceholderBuckets = (name: string) => {
+      // Merge server-truth buckets with the live overrides (the store is
+      // synchronous, so reading right after setOne sees the new state).
+      const manager = allManagers.find((m) => m.name === name);
+      const merged: Record<string, number> = { ...(manager?.style_buckets ?? {}) };
+      const override = getBucketOverride("Placeholder", name) ?? {};
+      STYLE_BUCKET_KEYS.forEach((key) => {
+        if (key in override) {
+          merged[key] = override[key] as number;
+        }
+      });
+      // Drop zero/empty entries to keep the persisted state clean.
+      const clean: Record<string, number> = {};
+      Object.keys(merged).forEach((key) => {
+        if ((merged[key] || 0) > 0.0005) {
+          clean[key] = merged[key];
+        }
+      });
+      void updatePlaceholderBuckets(name, clean)
+        .then(() => invalidate("Placeholder"))
+        .catch((persistError: unknown) => {
+          console.error("Failed to persist placeholder buckets:", persistError);
+        });
+    };
+
+    return {
+      ...overrides,
+      setOne: (tab: string, name: string, bucket: (typeof STYLE_BUCKET_KEYS)[number], value: string) => {
+        overrides.setOne(tab, name, bucket, value);
+        if (tab === "Placeholder") {
+          persistPlaceholderBuckets(name);
+        }
+      },
+      setExclusive: (tab: string, name: string, bucket: (typeof STYLE_BUCKET_KEYS)[number]) => {
+        overrides.setExclusive(tab, name, bucket);
+        if (tab === "Placeholder") {
+          persistPlaceholderBuckets(name);
+        }
+      },
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overrides, allManagers]);
 
   const filtered = useMemo(
     () => filterByStyle(allManagers, selection.style, selection.tab),
@@ -91,7 +142,7 @@ export function PeerGroupsRoute() {
             managers={filtered}
             tab={selection.tab}
             displayLabel={displayLabel}
-            overrides={overrides}
+            overrides={tableOverrides}
           />
           <SkillTable managers={filtered} tab={selection.tab} />
         </>

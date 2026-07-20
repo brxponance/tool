@@ -125,47 +125,48 @@ export function useManagerDetailScreen(requestedSelection: RequestedSelection) {
     void loadDirectory();
   }, []);
 
+  // Match the reference UI: no auto-select on load — the page shows an empty
+  // "Search for a manager above" state until the user picks one. The single
+  // exception is an explicit query-param deep link (?manager=...), applied
+  // once when the directory arrives.
+  const [requestApplied, setRequestApplied] = useState(false);
+
   useEffect(() => {
-    if (!state.directory.length) {
+    if (requestApplied || !state.directory.length) {
       return;
     }
 
-    const hasValidCurrentSelection = state.selected
-      ? state.directory.some(
-          (item) =>
-            item.name === state.selected?.name &&
-            item.tab === state.selected?.tab,
-        )
-      : false;
-
-    if (hasValidCurrentSelection) {
+    if (!requestedSelection.manager) {
+      setRequestApplied(true);
       return;
     }
 
-    const requested =
-      requestedSelection.manager && requestedSelection.tab
-        ? state.directory.find(
-            (item) =>
-              item.name === requestedSelection.manager &&
-              item.tab === requestedSelection.tab,
-          )
-        : null;
+    const requested = state.directory.find(
+      (item) =>
+        item.name === requestedSelection.manager &&
+        (!requestedSelection.tab || item.tab === requestedSelection.tab),
+    );
 
-    const fallback = requested ?? state.directory[0] ?? null;
-    if (!fallback) {
+    setRequestApplied(true);
+
+    if (!requested) {
+      logManagerDetail("requested manager not found in directory", {
+        requestedManager: requestedSelection.manager,
+        requestedTab: requestedSelection.tab ?? null,
+      });
       return;
     }
 
     logManagerDetail("selection initialized", {
-      requestedManager: requestedSelection.manager ?? null,
+      requestedManager: requestedSelection.manager,
       requestedTab: requestedSelection.tab ?? null,
-      selectedManager: fallback.name,
-      selectedTab: fallback.tab,
-      source: requested ? "requested" : "directory-default",
+      selectedManager: requested.name,
+      selectedTab: requested.tab,
+      source: "requested",
     });
 
-    setState((current) => ({ ...current, selected: fallback }));
-  }, [requestedSelection.manager, requestedSelection.tab, state.directory, state.selected]);
+    setState((current) => ({ ...current, selected: requested }));
+  }, [requestApplied, requestedSelection.manager, requestedSelection.tab, state.directory]);
 
   useEffect(() => {
     if (!state.selected) {
@@ -190,6 +191,19 @@ export function useManagerDetailScreen(requestedSelection: RequestedSelection) {
 
       startTransition(() => {
         setState((current) => ({ ...current, selected }));
+      });
+    },
+    clearSelection() {
+      logManagerDetail("selection cleared");
+
+      startTransition(() => {
+        setState((current) => ({
+          ...current,
+          selected: null,
+          data: null,
+          error: null,
+          loadingDetail: false,
+        }));
       });
     },
     reload() {

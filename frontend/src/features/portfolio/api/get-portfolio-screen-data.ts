@@ -14,6 +14,7 @@ import type {
   PortfolioStats,
   RiskAnalysisResponse,
   RiskExposuresResponse,
+  SleeveOptionsResponse,
 } from "../types";
 
 export async function getPortfolioClients() {
@@ -92,13 +93,15 @@ export async function getPortfolio(client: string) {
   return backendJson<PortfolioResponse>(`portfolio/${encodeURIComponent(client)}`);
 }
 
-export async function getPortfolioStats(portfolio: PortfolioResponse) {
+// Accepts a plain manager list (rather than the whole portfolio payload) so
+// callers can send override-resolved vg_full / vg_3factor / style_buckets.
+export async function getPortfolioStats(managers: PortfolioResponse["managers"]) {
   return backendJson<PortfolioStats>("compute_portfolio_stats", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ managers: portfolio.managers }),
+    body: JSON.stringify({ managers }),
   });
 }
 
@@ -106,6 +109,8 @@ export async function getPortfolioRiskExposures(
   client: string,
   managers: PortfolioResponse["managers"],
   useSecurityRisk: boolean,
+  sleeve?: string | null,
+  bench?: string | null,
 ) {
   return backendJson<RiskExposuresResponse>(
     useSecurityRisk ? "compute_security_risk_exposures" : "compute_risk_exposures",
@@ -114,9 +119,23 @@ export async function getPortfolioRiskExposures(
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ client_name: client, managers }),
+      body: JSON.stringify(
+        useSecurityRisk
+          ? { client_name: client, managers, sleeve: sleeve ?? null, bench: bench ?? null }
+          : { client_name: client, managers },
+      ),
     },
   );
+}
+
+// Sleeve breakdown options for the FactSet Risk Exposures panel (security-
+// level risk data only). Returns [{label, sleeve, bench}].
+export async function getSleeveOptions(client: string) {
+  return backendJson<SleeveOptionsResponse>("sleeve_options", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ client_name: client }),
+  });
 }
 
 export async function getPortfolioRiskAnalysis(

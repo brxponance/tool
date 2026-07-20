@@ -19,8 +19,16 @@ type ProgressSnapshot = {
 
 type UploadWarning = {
   type: string;
+  missing?: string[];
   missing_count?: number;
+  expected_count?: number;
+  tab_impact?: Record<string, string[]>;
   message?: string;
+};
+
+type UploadWarningState = {
+  warning: UploadWarning;
+  filename: string;
 };
 
 type UploadResponse = {
@@ -33,6 +41,23 @@ type UploadResponse = {
 type RunResponse = {
   status: string;
   message?: string;
+};
+
+type UniverseStatusResponse = {
+  tabs?: Record<string, number>;
+  managers_by_tab?: Record<string, number>;
+};
+
+type UniverseFilesResponse = {
+  tabs?: string[];
+};
+
+type ReloadInputsResponse = {
+  status: string;
+  message?: string;
+  refreshed?: Record<string, string>;
+  errors?: Record<string, string>;
+  clients?: string[];
 };
 
 type AllManagersResponse = {
@@ -228,30 +253,42 @@ function universeNote(status: BackendStatus | undefined) {
   return "";
 }
 
-function uploadWarningMessage(warning: UploadWarning | undefined) {
-  if (!warning) {
-    return null;
+function staleDetailText(status: BackendStatus | undefined) {
+  if (!status?.clone_stale) {
+    return "";
   }
 
-  if (warning.type === "missing_factors" && warning.missing_count) {
-    return `${warning.missing_count} expected factor${warning.missing_count === 1 ? " is" : "s are"} missing from the uploaded factor file.`;
+  const runFiles = status.clone_run_files ?? {};
+  const files = status.files ?? {};
+  const currentManager = typeof files.manager_returns === "string" ? files.manager_returns : "";
+  const currentFactor = typeof files.factor_returns === "string" ? files.factor_returns : "";
+  const diffs: string[] = [];
+
+  if (runFiles.manager_returns && currentManager && runFiles.manager_returns !== currentManager) {
+    diffs.push(`Manager returns: was ${runFiles.manager_returns}, now ${currentManager}`);
   }
 
-  if (warning.type === "sniff_error" && warning.message) {
-    return `Could not validate the factor file: ${warning.message}`;
+  if (runFiles.factor_returns && currentFactor && runFiles.factor_returns !== currentFactor) {
+    diffs.push(`Factor returns: was ${runFiles.factor_returns}, now ${currentFactor}`);
   }
 
-  return null;
+  return diffs.length ? `(${diffs.join("; ")})` : "";
 }
 
 export function SetupRoute() {
   const { data, loading, error, reload } = useSetupSnapshot();
   const [feedback, setFeedback] = useState<FeedbackState | null>(null);
+  const [uploadWarning, setUploadWarning] = useState<UploadWarningState | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
   const [dragKey, setDragKey] = useState<UploadSlot["key"] | null>(null);
   const [managerCounts, setManagerCounts] = useState<Record<string, number>>({});
+  const [universeTabs, setUniverseTabs] = useState<string[]>([]);
   const pollTimerRef = useRef<number | null>(null);
+  // Tracks whether we've observed running=true at least once during this
+  // poll cycle. Without this we can't distinguish "run just finished" from
+  // "no run was ever kicked off" — both show running=false.
+  const sawRunningRef = useRef(false);
 
   const status = data?.status;
   const requiredUploadsReady = Boolean(status?.files.manager_returns && status?.files.factor_returns);
@@ -299,16 +336,26 @@ export function SetupRoute() {
       const next = await backendJson<ProgressSnapshot>("progress");
       setProgress(next);
 
-      if (!next.running) {
+      if (next.running) {
+        sawRunningRef.current = true;
+      }
+
+      if (next.error) {
         stopPolling();
         await reload(false);
-        await refreshManagerSummary(Boolean(data?.status.has_results || next.done));
+        await refreshManagerSummary(Boolean(data?.status.has_results));
+        setFeedback({ tone: "error", text: next.error.split("\n")[0] });
+        return;
+      }
 
-        if (next.error) {
-          setFeedback({ tone: "error", text: next.error.split("\n")[0] });
-        } else if (next.done) {
-          setFeedback({ tone: "success", text: "Clone run completed." });
-        }
+      // "Done" requires we actually saw a run in progress — avoids the race
+      // where a run terminates on the very first poll because results were
+      // already populated from a previous run.
+      if (sawRunningRef.current && !next.running && next.done) {
+        stopPolling();
+        await reload(false);
+        await refreshManagerSummary(true);
+        setFeedback({ tone: "success", text: "Clone run completed." });
       }
     } catch (progressError) {
       stopPolling();
@@ -324,6 +371,7 @@ export function SetupRoute() {
 
   function startPolling() {
     stopPolling();
+    sawRunningRef.current = false;
     pollTimerRef.current = window.setInterval(() => {
       void refreshProgress();
     }, 1000);
@@ -371,6 +419,40 @@ export function SetupRoute() {
     };
   }, [status?.has_results]);
 
+  const hasFactorReturns = Boolean(status?.files.factor_returns);
+  const stagedUniverseKey = status?.universe_files_staged.join("|") ?? "";
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!hasFactorReturns) {
+      // Title logic ignores stale tabs while factor returns are missing.
+      return;
+    }
+
+    void backendJson<UniverseFilesResponse>("universe_files")
+      .then((response) => {
+        if (!cancelled) {
+          setUniverseTabs(response.tabs ?? []);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setUniverseTabs([]);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hasFactorReturns, stagedUniverseKey]);
+
+  const universeButtonTitle = !hasFactorReturns
+    ? "Upload factor returns first"
+    : universeTabs.length
+      ? `Re-run universe clones for: ${universeTabs.join(", ")} (~3-5 min per peer group)`
+      : "Upload at least one universe file to enable";
+
   async function handleUpload(slot: UploadSlot, file: File) {
     const formData = new FormData();
     formData.append(slot.field, file);
@@ -384,9 +466,9 @@ export function SetupRoute() {
         body: formData,
       });
 
-      const warningText = uploadWarningMessage(response.warnings?.[slot.field]);
-      if (warningText) {
-        setFeedback({ tone: "warning", text: warningText });
+      const warning = response.warnings?.[slot.field];
+      if (warning) {
+        setUploadWarning({ warning, filename: file.name });
       } else if (response.status === "staged") {
         const recognised = response.recognised_tabs?.length
           ? ` (${response.recognised_tabs.join(", ")})`
@@ -418,6 +500,28 @@ export function SetupRoute() {
   }
 
   async function handleRun(endpoint: "run" | "run_universe") {
+    if (endpoint === "run_universe") {
+      // Check how many managers are already cached so we can tell the user
+      // whether this is a fresh run or a resume.
+      let confirmMessage = "Run universe clones? This may take several minutes per peer group.";
+      try {
+        const universeStatus = await backendJson<UniverseStatusResponse>("universe_status");
+        const done = Object.values(universeStatus.managers_by_tab ?? {}).reduce(
+          (sum, count) => sum + count,
+          0,
+        );
+        if (done > 0) {
+          confirmMessage = `Resume universe clones? ${done.toLocaleString()} managers already done and will be skipped. Only the remaining managers will be cloned.`;
+        }
+      } catch {
+        // Status endpoint unavailable — fall back to the fresh-run prompt.
+      }
+
+      if (!window.confirm(confirmMessage)) {
+        return;
+      }
+    }
+
     try {
       setBusyAction(endpoint);
       setFeedback(null);
@@ -425,6 +529,17 @@ export function SetupRoute() {
       const response = await backendJson<RunResponse>(endpoint, {
         method: "POST",
       });
+
+      if (
+        response.status === "already_running" ||
+        (response.status === "error" && response.message === "Another run is in progress")
+      ) {
+        setFeedback({
+          tone: "error",
+          text: "Another clone run is already in progress (likely a universe run). Wait for it to finish or stop the server before starting a buy-list run.",
+        });
+        return;
+      }
 
       if (response.status !== "started") {
         throw new Error(response.message ?? "The backend did not start the requested run.");
@@ -456,8 +571,56 @@ export function SetupRoute() {
     }
   }
 
+  async function handleReloadInputs() {
+    try {
+      setBusyAction("reload_inputs");
+      setFeedback(null);
+
+      const response = await backendJson<ReloadInputsResponse>("reload_inputs", {
+        method: "POST",
+      });
+
+      if (response.status !== "ok") {
+        setFeedback({ tone: "error", text: `Reload failed: ${response.message ?? "unknown"}` });
+        return;
+      }
+
+      await reload(false);
+
+      // Build a compact success message from what actually refreshed.
+      const refreshed = response.refreshed ?? {};
+      const parts: string[] = [];
+      if (refreshed.weights === "ok") {
+        parts.push("weights");
+      }
+      if (refreshed.risk === "ok") {
+        parts.push("risk summary");
+      }
+      if (refreshed.exposures === "ok") {
+        parts.push("exposures");
+      }
+
+      const errorEntries = Object.entries(response.errors ?? {});
+      let text = parts.length ? `Reloaded: ${parts.join(", ")}.` : "Nothing to reload.";
+      if (errorEntries.length) {
+        text += `\n\nErrors:\n${errorEntries.map(([key, value]) => `  ${key}: ${value}`).join("\n")}`;
+      }
+
+      setFeedback({ tone: errorEntries.length ? "warning" : "success", text });
+    } catch (reloadError) {
+      setFeedback({
+        tone: "error",
+        text: `Reload request failed: ${
+          reloadError instanceof Error ? reloadError.message : String(reloadError)
+        }`,
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   async function handleSimpleAction(
-    endpoint: "clear_cache" | "reload_inputs" | "reset_universe",
+    endpoint: "clear_cache" | "reset_universe",
     successMessage: string,
   ) {
     try {
@@ -489,7 +652,12 @@ export function SetupRoute() {
           <button
             type="button"
             className="btn btn-danger btn-sm ml-auto"
-            onClick={() => void handleSimpleAction("clear_cache", "Saved cache cleared.")}
+            onClick={() => {
+              if (!window.confirm("Clear all results? You will need to re-run the cloning engine.")) {
+                return;
+              }
+              void handleSimpleAction("clear_cache", "Saved cache cleared.");
+            }}
             disabled={busyAction !== null || Boolean(progress?.running)}
           >
             Clear &amp; Reset
@@ -513,7 +681,12 @@ export function SetupRoute() {
             fontSize: 11,
           }}
         >
-          ⚠ Uploaded files have changed since the last clone run — clone results may be out of date. Click <strong>Run Buy List Clones</strong> to update.
+          <span>
+            ⚠ Uploaded files have changed since the last clone run — clone results may be out of date. Click <strong>Run Buy List Clones</strong> to update.
+            {staleDetailText(status) ? (
+              <span style={{ color: "var(--text3)", marginLeft: 4 }}>{staleDetailText(status)}</span>
+            ) : null}
+          </span>
         </div>
       ) : null}
 
@@ -526,8 +699,69 @@ export function SetupRoute() {
                 ? "alert-warn"
                 : "alert-error"
           }`}
+          style={{ whiteSpace: "pre-line" }}
         >
           {feedback.text}
+        </div>
+      ) : null}
+
+      {uploadWarning ? (
+        <div
+          className="alert alert-warn"
+          style={{ fontSize: 11, lineHeight: 1.45, padding: "8px 10px" }}
+        >
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              gap: 8,
+              alignItems: "flex-start",
+            }}
+          >
+            <div>
+              {uploadWarning.warning.type === "missing_factors" ? (
+                <>
+                  <strong>
+                    {uploadWarning.warning.missing_count ?? 0} expected factor
+                    {(uploadWarning.warning.missing_count ?? 0) === 1 ? "" : "s"} missing from{" "}
+                    {uploadWarning.filename}.
+                  </strong>{" "}
+                  File loaded with{" "}
+                  {(uploadWarning.warning.expected_count ?? 0) -
+                    (uploadWarning.warning.missing_count ?? 0)}{" "}
+                  of {uploadWarning.warning.expected_count ?? 0} expected factors. Clones for the
+                  affected peer groups will run with a smaller factor universe than the historical R
+                  workflow, which can shift R² and beta selection. Fix the FactSet export and
+                  re-upload to match prior results.
+                  {Object.keys(uploadWarning.warning.tab_impact ?? {})
+                    .sort()
+                    .map((tab) => (
+                      <div key={tab} style={{ marginTop: 4 }}>
+                        <strong>{tab}:</strong>{" "}
+                        {(uploadWarning.warning.tab_impact?.[tab] ?? []).join(", ")}
+                      </div>
+                    ))}
+                </>
+              ) : (
+                <>Could not validate factor file: {uploadWarning.warning.message ?? ""}</>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => setUploadWarning(null)}
+              style={{
+                background: "none",
+                border: "none",
+                color: "var(--text2)",
+                cursor: "pointer",
+                fontSize: 16,
+                lineHeight: 1,
+                padding: "0 4px",
+              }}
+            >
+              ×
+            </button>
+          </div>
         </div>
       ) : null}
 
@@ -602,14 +836,25 @@ export function SetupRoute() {
               className="btn btn-primary"
               onClick={() => void handleRun("run_universe")}
               disabled={!universeReady || busyAction !== null || Boolean(progress?.running)}
+              title={universeButtonTitle}
             >
               Run Universe Clones
             </button>
             <button
               type="button"
               className="btn btn-outline btn-sm"
-              onClick={() => void handleSimpleAction("reset_universe", "Universe clone results cleared.")}
+              onClick={() => {
+                if (
+                  !window.confirm(
+                    "Clear all universe clone results and normalized skill data? This cannot be undone — you will need to re-run universe clones from scratch.",
+                  )
+                ) {
+                  return;
+                }
+                void handleSimpleAction("reset_universe", "Universe clone results cleared.");
+              }}
               disabled={busyAction !== null || Boolean(progress?.running)}
+              title="Clear all universe clone results and normalized skill data so you can start fresh"
             >
               Reset Universe
             </button>
@@ -617,10 +862,11 @@ export function SetupRoute() {
               <button
                 type="button"
                 className="btn btn-outline btn-sm"
-                onClick={() => void handleSimpleAction("reload_inputs", "Inputs reloaded.")}
+                onClick={() => void handleReloadInputs()}
                 disabled={busyAction !== null || Boolean(progress?.running)}
+                title="Re-read weights, FactSet Risk Summary, and FactSet Exposures files without re-running clones"
               >
-                Reload Inputs
+                {busyAction === "reload_inputs" ? "Reloading…" : "Reload Inputs"}
               </button>
             ) : null}
             <div

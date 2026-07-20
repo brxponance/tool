@@ -500,7 +500,10 @@ def upload_files():
                     try:
                         from clone_engine import FACTOR_CATEGORIES
                         from data_loader import _resolve_factors_ci
-                        fdf = load_factor_returns(path)
+                        # In S3 mode `path` is an S3 key — resolve to a local
+                        # copy before parsing (local mode returns path as-is).
+                        fdf = load_factor_returns(
+                            resolve_path(path, app.config['UPLOAD_FOLDER'], suffix='.xlsx'))
                         # Build a single union of all expected factors, then
                         # check which ones the file actually provides using
                         # the same case-insensitive matcher the clone engine
@@ -608,7 +611,9 @@ def upload_universe_consolidated():
     # running any cloning yet. Cheap — just inspects sheet names.
     try:
         import pandas as pd
-        xl = pd.ExcelFile(path, engine='openpyxl')
+        # In S3 mode `path` is an S3 key — resolve to a local copy first.
+        xl = pd.ExcelFile(resolve_path(path, app.config['UPLOAD_FOLDER'], suffix='.xlsx'),
+                          engine='openpyxl')
         from data_loader import _UNIVERSE_SHEET_TO_TAB
         recognised = sorted({_UNIVERSE_SHEET_TO_TAB[s.strip()]
                              for s in xl.sheet_names
@@ -1353,9 +1358,9 @@ def _build_portfolio_contribution_rows(managers):
         if not tab or not mgr_name:
             continue
 
+        # Managers without clone data (placeholders, unmatched names) still
+        # get a row with None-filled stats — matches clone_tool reference.
         d = (state['clone_results'].get(tab, {}) or {}).get(mgr_name, {})
-        if not d:
-            continue
 
         mgr_rets = d.get('manager_returns', [])
         clone_rets = d.get('static_clone_full', [])
@@ -1965,8 +1970,7 @@ def portfolio_contribution(client_name):
     from data_loader import build_portfolio_view
     portfolio = build_portfolio_view(client_name, state['weights'][client_name],
                                      state['clone_results'], state['manager_dfs'],
-                                     universe_clone_results=state.get('universe_clone_results'),
-                                     placeholder_buckets=state.get('placeholder_buckets') or {})
+                                     universe_clone_results=state.get('universe_clone_results'))
     result = _build_portfolio_contribution_rows(portfolio['managers'])
     result['unmatched'] = portfolio.get('unmatched', [])
     return jsonify(result)
@@ -3238,6 +3242,11 @@ def _start_universe_run():
             set_progress_phase('Loading universe files')
             loaded_tabs = []   # list of (peer_tab, tab_df) in run order
             consolidated_path = uni_map.get('__all__')
+            if consolidated_path:
+                # Freshly staged paths may be S3 keys — resolve to a local
+                # copy before the existence check (no-op in local mode).
+                consolidated_path = resolve_path(
+                    consolidated_path, app.config['UPLOAD_FOLDER'], suffix='.xlsx')
             if consolidated_path and os.path.exists(consolidated_path):
                 cb("Loading consolidated universe file...")
                 cons_map = load_universe_returns_consolidated(consolidated_path)
@@ -3252,6 +3261,8 @@ def _start_universe_run():
                 if peer_tab == '__all__':
                     continue
                 cb(f"Loading universe file for {peer_tab}...")
+                # Resolve S3 keys to a local copy first (no-op in local mode).
+                p = resolve_path(p, app.config['UPLOAD_FOLDER'], suffix='.xlsx')
                 if not os.path.exists(p):
                     cb(f"WARNING: file missing for {peer_tab}: {p}")
                     continue

@@ -100,3 +100,11 @@ export type OptimizerRequest = {
   peer_group: PeerGroup | string;
   forced_managers: ForcedManagerInput[];
 } & Partial<OptimizerConstraints>;
+
+// Client-scoped request payload for POST /optimize_portfolio (reference UX).
+// The backend derives the peer group from the client and applies its fixed
+// constraints — no peer group or constraint overrides are sent.
+export type ClientOptimizerRequest = {
+  client_name: string;
+  forced_managers: ForcedManagerInput[];
+};

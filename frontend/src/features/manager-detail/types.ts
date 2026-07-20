@@ -58,7 +58,11 @@ export type PeriodReturnSeries = Record<PeriodReturnKey, number | null>;
 export type ManagerSkillSummary = {
   name: string;
   tab: string;
-  benchmark_name: string;
+  // Null for Placeholder managers (no clone → no regression benchmark).
+  benchmark_name: string | null;
+  // True when the manager is a Placeholder (< 3 years of returns, no clone).
+  // The detail screen renders N/A stubs for clone-derived panels.
+  is_placeholder?: boolean;
   skill_periods: Record<string, number | null>;
   cumulative_skill: Array<number | null>;
   dates: string[];

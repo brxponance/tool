@@ -101,7 +101,28 @@ export type RiskExposuresResponse = {
     available_columns?: string[];
     fallback_absolute?: boolean;
   };
+  // Security-level (bottom-up) responses only: coverage of the selected
+  // sleeve plus data-quality diagnostics.
+  sleeve_info?: {
+    sleeve?: string | null;
+    sleeve_wt?: number | null;
+    sleeve_wt_proposed?: number | null;
+    no_country_wt?: number | null;
+    flags?: string[];
+  };
   error?: string;
+};
+
+// One sleeve breakdown option from POST /sleeve_options.
+export type SleeveOption = {
+  label: string;
+  sleeve: string | null;
+  bench: string | null;
+};
+
+export type SleeveOptionsResponse = {
+  options: SleeveOption[];
+  benchmark?: string | null;
 };
 
 export type RiskScenarioMetrics = {
