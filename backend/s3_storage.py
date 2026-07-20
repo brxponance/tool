@@ -68,5 +68,18 @@ def resolve_path(path_or_key: str, upload_folder: str, suffix: str = '.xlsx') ->
         return alt if os.path.exists(alt) else path_or_key
     # S3 mode
     if path_or_key.startswith(S3_PREFIX) or not os.path.exists(path_or_key):
-        return download_file(path_or_key, suffix=suffix)
+        # Download to a STABLE local path named by the real basename — NOT a
+        # random temp name. This matters because the returned path gets stored
+        # in state['files'] and pickled into the cache; a random tmpXXXX name
+        # would be baked in and then couldn't be found in S3 on the next restart
+        # (the file is in S3 under its real name, not the temp name). Preserving
+        # the basename lets the reference round-trip across restarts.
+        basename = os.path.basename(str(path_or_key).replace('\\', '/'))
+        os.makedirs(upload_folder, exist_ok=True)
+        local_dest = os.path.join(upload_folder, basename)
+        if not os.path.exists(local_dest):
+            s3_key = path_or_key if path_or_key.startswith(S3_PREFIX) else f"{S3_PREFIX}{basename}"
+            _client().download_file(S3_BUCKET, s3_key, local_dest)
+            print(f"[s3] downloaded s3://{S3_BUCKET}/{s3_key} → {local_dest}")
+        return local_dest
     return path_or_key
