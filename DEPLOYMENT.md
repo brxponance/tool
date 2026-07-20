@@ -34,7 +34,8 @@ Data stores:
 | Database | RDS `xponance-db` (PostgreSQL), database `pc_tool` |
 | File storage | S3 bucket `pc-tool-uploads` |
 | Images | ECR: `pc-tool-backend:latest`, `pc-tool-frontend:latest` |
-| Public access | frontend task public IP on port 3000 (no ALB yet) |
+| Public access | **ALB (stable URL)** → `http://pc-tool-alb-149658130.us-east-1.elb.amazonaws.com` (HTTP only, no HTTPS yet) |
+| Load balancer | ALB `pc-tool-alb` (HTTP:80) → target group `pc-tool-target-group` (IP targets, port 3000, health check `/api/health`) |
 | CI/CD | GitHub Actions (`.github/workflows/deploy.yml`) |
 
 > **Why one task with two containers?** ECS Service Connect (separate services)
@@ -46,7 +47,11 @@ Data stores:
 ## 3. Architecture diagram
 
 ```
-Users ─→ http://<frontend-task-public-ip>:3000
+Users ─→ http://pc-tool-alb-149658130.us-east-1.elb.amazonaws.com   (stable)
+             │
+        ALB "pc-tool-alb"  (HTTP:80, internet-facing, 2 public subnets)
+          │  forwards to target group "pc-tool-target-group"
+          │  (IP targets :3000, health check GET /api/health → 200)
              │
         ECS Fargate task "pc-tool" (1 task, 2 containers)
           ├ frontend :3000  (Next.js)  ──localhost:3001──┐
@@ -55,6 +60,9 @@ Users ─→ http://<frontend-task-public-ip>:3000
           RDS xponance-db        S3 pc-tool-uploads
           (database pc_tool)     (uploads/ + state/results.pkl)
 ```
+
+The ALB DNS name never changes on redeploy — that was the whole point of adding
+it (the raw Fargate task IP used to change every deploy). See §14.
 
 ---
 
@@ -112,14 +120,18 @@ VPC:                vpc-0a80f9aa9ec30d318 (gire-vpc)
 Public subnets:     subnet-0117510ecaa995dd2 (us-east-1a)
                     subnet-0648b89505cb4cf4b (us-east-1b)
 Task security group: sg-04375bcde7b5211c5 (pc-tool-tasks)
+ALB security group:  sg-036ad14316364f3ca (pc-tool-loadbalancer-firewall; 80 from 0.0.0.0/0)
 RDS security group:  sg-0a6469eda7b097066 (allows 5432 from task SG)
 RDS endpoint:        xponance-db.c6jsaqkqwyk4.us-east-1.rds.amazonaws.com:5432
 S3 bucket:           pc-tool-uploads
 ECR backend:         872709212513.dkr.ecr.us-east-1.amazonaws.com/pc-tool-backend
 ECR frontend:        872709212513.dkr.ecr.us-east-1.amazonaws.com/pc-tool-frontend
+ALB:                 pc-tool-alb (DNS pc-tool-alb-149658130.us-east-1.elb.amazonaws.com)
+Target group:        pc-tool-target-group (arn .../targetgroup/pc-tool-target-group/85653a11fb7458d4)
 IAM task exec role:  pc-tool-exec   (ECR pull, read DB secret, logs)
 IAM task role:       pc-tool-task   (S3 access)
 IAM deploy role:     pc-tool-gh-deploy (GitHub Actions OIDC)
+GitHub OIDC provider: arn:aws:iam::872709212513:oidc-provider/token.actions.githubusercontent.com
 CloudWatch logs:     /ecs/pc-tool
 ```
 
@@ -143,10 +155,19 @@ replace the objects in S3 (`uploads/` prefix) and re-run clones in the app.
 
 ---
 
-## 8. Finding the current URL (it changes on redeploy)
+## 8. The URL (stable, via the ALB)
 
-The frontend task gets a new public IP each redeploy (no ALB yet). Get the
-current one:
+As of 2026-07-20 there is a **permanent URL** that survives redeploys:
+
+```
+http://pc-tool-alb-149658130.us-east-1.elb.amazonaws.com
+```
+
+This is the ALB's DNS name — it never changes. Use this everywhere. (HTTP only
+for now; HTTPS is a follow-up — see §13/§14.) Full ALB setup is in §14.
+
+The old raw-task-IP still exists and changes on every redeploy; you should not
+need it now that the ALB is up, but to find it for direct debugging:
 
 ```bash
 TASK=$(aws ecs list-tasks --cluster pc-tool-cluster --service-name pc-tool --region us-east-1 --desired-status RUNNING --query 'taskArns[0]' --output text)
@@ -154,8 +175,12 @@ ENI=$(aws ecs describe-tasks --cluster pc-tool-cluster --tasks "$TASK" --region 
 aws ec2 describe-network-interfaces --network-interface-ids "$ENI" --region us-east-1 --query 'NetworkInterfaces[0].Association.PublicIp' --output text
 ```
 
-> **TODO for a stable URL:** add an Application Load Balancer (~$16/mo). Gives a
-> permanent hostname + HTTPS and removes the changing-IP problem. Not done yet.
+Check the target's health (this is what determines if the URL serves traffic):
+```bash
+aws elbv2 describe-target-health \
+  --target-group-arn arn:aws:elasticloadbalancing:us-east-1:872709212513:targetgroup/pc-tool-target-group/85653a11fb7458d4 \
+  --region us-east-1 --query 'TargetHealthDescriptions[].TargetHealth.State' --output text
+```
 
 ---
 
@@ -223,6 +248,11 @@ If this ever needs to be rebuilt from scratch in a new account, the order was:
 7. ECS task def `pc-tool` (2 containers) + service `pc-tool` (assignPublicIp ENABLED)
 8. Seed data: upload workbooks + `results.pkl` to S3
 9. GitHub Actions: OIDC provider + role `pc-tool-gh-deploy`, secret `AWS_DEPLOY_ROLE_ARN`
+   - The OIDC **identity provider** (`token.actions.githubusercontent.com`, audience
+     `sts.amazonaws.com`) must actually exist in IAM — the role's trust policy
+     references it. If it's missing, deploys fail with *"Could not assume role with
+     OIDC: the web identity token could not be validated."* (This bit us 2026-07-20.)
+10. ALB for a stable URL — see §14 for the full step-by-step.
 
 Full command history for these steps is in the git log and this repo's earlier
 setup notes.
@@ -231,11 +261,64 @@ setup notes.
 
 ## 13. Known limitations / TODO
 
-- **No stable URL / HTTPS** — add an ALB (changing IP + "Not secure" today).
-- **No app-level auth** — anyone with the URL can use it. Add nginx basic-auth,
-  Cognito at an ALB, or an IP allowlist before broad use.
+- ✅ **Stable URL** — DONE 2026-07-20 via the ALB (see §14). No more changing IP.
+- **No HTTPS yet** — the ALB is HTTP:80 only. Can't issue a cert without a domain.
+  Plan: put **CloudFront** in front of the ALB (free `*.cloudfront.net` cert, no
+  domain needed) for `https://…`, OR register/point a domain and add a 443
+  listener with an ACM cert.
+- **No app-level auth** — anyone with the URL can use it. Plan: add a **Cognito**
+  authentication action on the ALB HTTP listener (login page), then **tighten the
+  task SG**: replace the `3000 from 0.0.0.0/0` rule with `3000 from
+  pc-tool-loadbalancer-firewall` only, so nobody can bypass the login by hitting
+  the task's raw IP directly.
 - **Single task** — a redeploy causes a ~1-minute blip. Fine for internal use.
 - **Sandbox account** — EC2 (`ec2:RunInstances`) and IAM inline policies
   (`iam:PutRolePolicy`) are DENIED here; that's why the app uses Fargate and
   attach-managed-policy (not inline). Keep this in mind if extending.
 - **Clone cache is derived data** — safe to lose; rebuilds from uploaded files.
+
+---
+
+## 14. ALB / stable URL setup (added 2026-07-20)
+
+Added an **Application Load Balancer** so the app has a permanent URL instead of
+the Fargate task's ever-changing public IP. All done in the AWS console (this
+account has no IaC; the deploy workflow only builds/pushes images).
+
+**Resources created:**
+- **Security group** `pc-tool-loadbalancer-firewall` (`sg-036ad14316364f3ca`) —
+  inbound **HTTP 80 from 0.0.0.0/0**, outbound all. The ALB's public front door.
+- **ALB** `pc-tool-alb` — internet-facing, IPv4, in the 2 public subnets of
+  `gire-vpc`. Listener **HTTP:80** → forwards to the target group.
+  DNS: `pc-tool-alb-149658130.us-east-1.elb.amazonaws.com`.
+- **Target group** `pc-tool-target-group` — **target type IP** (required for
+  Fargate), protocol **HTTP:3000**, health check path **`/api/health`**, success
+  codes **200**. No targets registered manually — ECS registers the task IP.
+
+**Wiring:** updated the ECS service `pc-tool` (Update service → Load balancing) to
+attach `pc-tool-alb`, container **frontend:3000**, listener **HTTP:80**, target
+group **pc-tool-target-group**. This forces a rolling redeploy that registers the
+running task into the target group.
+
+**Task SG:** `pc-tool-tasks` already had `3000 from 0.0.0.0/0`, so the ALB can
+reach the task with no extra rule. (See §13 — tighten this to ALB-only when auth
+is added.)
+
+### Health check gotcha (important)
+The frontend root `/` **redirects (307) to `/setup`** (`frontend/src/app/page.tsx`),
+so a health check on `/` with a 200-only matcher **never** goes healthy → tasks
+loop unhealthy → `wait services-stable` times out in CI. Fix: added a dedicated
+liveness route **`frontend/src/app/api/health/route.ts`** returning
+`{status:"ok"}` 200, and pointed the target group health check at **`/api/health`**.
+Don't point the ALB health check at `/`.
+
+### To rebuild the ALB from scratch (order)
+1. Create SG `pc-tool-loadbalancer-firewall` (inbound 80 from 0.0.0.0/0) in `gire-vpc`.
+2. Create target group `pc-tool-target-group`: type IP, HTTP:3000, health `/api/health`, codes 200, VPC `gire-vpc`, no targets.
+3. Create ALB `pc-tool-alb`: internet-facing, IPv4, 2 public subnets, SG = pc-tool-loadbalancer-firewall, listener HTTP:80 → forward to pc-tool-target-group.
+4. ECS → service `pc-tool` → Update service → Load balancing → attach ALB, container frontend:3000, listener HTTP:80, existing target group. Update (rolling redeploy).
+5. Confirm the target goes **healthy** in the target group's Targets tab, then hit the ALB DNS name.
+
+
+#tool-url
+http://pc-tool-alb-149658130.us-east-1.elb.amazonaws.com

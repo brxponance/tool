@@ -121,3 +121,55 @@ came up normally with the clone running in the background.
   `os.path.exists`, which is true for placeholders — but the clone itself would
   fail to read them. Off OneDrive this is a non-issue; on OneDrive, ensure the
   staged universe file is "Always keep on this device".
+
+## 2026-07-20 — Fixed broken deploys + added a stable URL (ALB)
+
+Spent the session getting the GitHub Actions deploy green and giving the app a
+permanent URL. Four distinct things, in order:
+
+### 1. Deploy failure #1 — GitHub→AWS OIDC auth
+The workflow died at the `configure-aws-credentials` step: *"Could not assume
+role with OIDC: the web identity token provided could not be validated."* The
+`pc-tool-gh-deploy` role's trust policy was correct (`sub` = `repo:brxponance/tool:*`,
+`aud` = `sts.amazonaws.com`), but **the IAM OIDC identity provider itself did not
+exist** — Identity providers list was empty. The role referenced a provider ARN
+that wasn't there. Fix: created the OIDC provider (Provider URL
+`https://token.actions.githubusercontent.com`, audience `sts.amazonaws.com`).
+No role change needed. Documented in DEPLOYMENT.md §12 step 9.
+
+### 2. Deploy failure #2 — frontend TypeScript build error
+Next build failed: `use-portfolio-screen.ts:394` passed `getPortfolioStats(portfolio)`
+but the fn takes `PortfolioResponse["managers"]`. Fixed to
+`getPortfolioStats(portfolio.managers)` (every sibling call in that block already
+used `portfolio.managers`). `tsc --noEmit` + full `next build` clean.
+
+### 3. Added an Application Load Balancer for a stable URL
+Fargate assigns a fresh public IP every redeploy, and you can't pin an Elastic IP
+to a Fargate ENI — so the fix is an ALB. Built entirely in the console (no IaC in
+this account). Stable URL is now:
+**`http://pc-tool-alb-149658130.us-east-1.elb.amazonaws.com`** (never changes).
+Resources: SG `pc-tool-loadbalancer-firewall` (sg-036ad14316364f3ca, 80 from
+0.0.0.0/0); ALB `pc-tool-alb` (internet-facing, 2 public subnets, HTTP:80);
+target group `pc-tool-target-group` (IP targets, HTTP:3000). Wired the ECS
+service to it (container frontend:3000, listener HTTP:80). Task SG already allowed
+3000 from 0.0.0.0/0 so no extra rule was needed. Full runbook in DEPLOYMENT.md §14.
+
+### 4. Health-check gotcha (the thing that kept the deploy "failing")
+After wiring the ALB, deploys still failed — but only at the final
+`wait services-stable` step (build + ECR push succeeded). Root cause: the target
+group health check hit `/`, which **307-redirects to `/setup`**
+(`frontend/src/app/page.tsx`), and the ALB only accepts 200 → target never
+healthy → service never stabilizes → CI waiter times out. Fix (proper, not a
+matcher hack): added a dedicated liveness route
+**`frontend/src/app/api/health/route.ts`** (returns `{status:"ok"}` 200,
+`force-dynamic`, `nodejs` runtime) and pointed the target group health check path
+at **`/api/health`** (success codes 200). Rule of thumb: never point an ALB health
+check at a route that redirects.
+
+### Still open (follow-ups, see DEPLOYMENT.md §13)
+- **HTTPS** — ALB is HTTP-only (no domain → no cert). Plan: CloudFront in front
+  (free `*.cloudfront.net` cert) or a real domain + ACM cert on a 443 listener.
+- **Auth** — app is wide open. Plan: Cognito auth action on the ALB listener, and
+  then tighten the task SG (`3000 from 0.0.0.0/0` → `3000 from
+  pc-tool-loadbalancer-firewall` only) so the login can't be bypassed via the raw
+  task IP.
