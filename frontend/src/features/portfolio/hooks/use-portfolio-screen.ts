@@ -391,7 +391,7 @@ export function usePortfolioScreen() {
         marketCycleResult,
         exposuresResult,
       ] = await Promise.allSettled([
-        getPortfolioStats(portfolio),
+        getPortfolioStats(portfolio.managers),
         status.has_security_risk || status.has_risk
           ? getPortfolioRiskExposures(client, portfolio.managers, status.has_security_risk)
           : Promise.resolve(null),
