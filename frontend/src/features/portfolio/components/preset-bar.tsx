@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { useConfirm } from "@/components/layout/confirm-dialog";
+
 import {
   createPreset,
   deletePreset,
@@ -46,6 +48,7 @@ export function PresetBar({ client, managers, onApplyPreset, onSelectDefault }: 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saveOpen, setSaveOpen] = useState(false);
+  const { confirm, dialog } = useConfirm();
 
   const refresh = useCallback(async () => {
     if (!client) {
@@ -116,7 +119,13 @@ export function PresetBar({ client, managers, onApplyPreset, onSelectDefault }: 
     if (!preset) {
       return;
     }
-    if (!window.confirm(`Delete preset “${preset.name}”? This cannot be undone.`)) {
+    const ok = await confirm({
+      title: "Delete preset",
+      message: `Are you sure you want to delete preset “${preset.name}”? This cannot be undone.`,
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (!ok) {
       return;
     }
     setBusy(true);
@@ -131,7 +140,7 @@ export function PresetBar({ client, managers, onApplyPreset, onSelectDefault }: 
     } finally {
       setBusy(false);
     }
-  }, [client, selected, presets, refresh, onSelectDefault]);
+  }, [client, selected, presets, refresh, onSelectDefault, confirm]);
 
   return (
     <div className="flex items-center" style={{ gap: 6 }}>
@@ -182,6 +191,7 @@ export function PresetBar({ client, managers, onApplyPreset, onSelectDefault }: 
         onClose={() => setSaveOpen(false)}
         onSubmit={handleSaveSubmit}
       />
+      {dialog}
     </div>
   );
 }

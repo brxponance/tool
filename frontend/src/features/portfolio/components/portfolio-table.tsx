@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import { useConfirm } from "@/components/layout/confirm-dialog";
 import { formatNumber, formatPercent } from "@/lib/utils";
 
 import type { IdealComplementResponse, PortfolioManager } from "../types";
@@ -135,6 +136,7 @@ export function PortfolioTable({
 }: PortfolioTableProps) {
   const [draftWeights, setDraftWeights] = useState<Record<string, string>>(() => draftWeightsFor(managers));
   const [editingPlaceholder, setEditingPlaceholder] = useState<PortfolioManager | null>(null);
+  const { confirm, dialog } = useConfirm();
 
   useEffect(() => {
     setDraftWeights(draftWeightsFor(managers));
@@ -289,7 +291,17 @@ export function PortfolioTable({
                   <td>
                     <button
                       type="button"
-                      onClick={() => onRemoveManager(managerKey)}
+                      onClick={async () => {
+                        const ok = await confirm({
+                          title: "Remove manager",
+                          message: `Are you sure you want to remove "${manager.matched_name}" from this portfolio?`,
+                          confirmLabel: "Remove",
+                          danger: true,
+                        });
+                        if (ok) {
+                          onRemoveManager(managerKey);
+                        }
+                      }}
                       style={{ color: "var(--text3)", cursor: "pointer" }}
                       aria-label={`Remove ${manager.matched_name}`}
                     >
@@ -317,6 +329,7 @@ export function PortfolioTable({
           onPlaceholderSaved?.();
         }}
       />
+      {dialog}
     </div>
   );
 }

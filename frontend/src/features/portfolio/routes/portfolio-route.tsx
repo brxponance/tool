@@ -4,6 +4,8 @@ import { useState } from "react";
 
 import { formatPercent, sum } from "@/lib/utils";
 
+import { useConfirm } from "@/components/layout/confirm-dialog";
+
 import { OptimizerPanel } from "@/features/optimize/components/optimizer-panel";
 
 import { AddManagerModal } from "../components/add-manager-modal";
@@ -20,6 +22,7 @@ export function PortfolioRoute() {
   const [clientModal, setClientModal] = useState<null | "add" | "rename">(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const { confirm, dialog } = useConfirm();
   const {
     addClient,
     addManager,
@@ -121,15 +124,17 @@ export function PortfolioRoute() {
               title="Delete the selected client"
               disabled={!selectedClient}
               style={{ color: "var(--danger, #c0392b)", borderColor: "var(--danger, #c0392b)" }}
-              onClick={() => {
+              onClick={async () => {
                 if (!selectedClient) {
                   return;
                 }
-                if (
-                  window.confirm(
-                    `Delete client "${selectedClient}"? This removes it and its managers from the database. This cannot be undone.`,
-                  )
-                ) {
+                const ok = await confirm({
+                  title: "Delete client",
+                  message: `Are you sure you want to delete client "${selectedClient}"? This removes it and its managers from the database. This cannot be undone.`,
+                  confirmLabel: "Delete",
+                  danger: true,
+                });
+                if (ok) {
                   void removeClient(selectedClient);
                 }
               }}
@@ -170,6 +175,15 @@ export function PortfolioRoute() {
               className="btn btn-primary btn-sm"
               disabled={saving}
               onClick={async () => {
+                const ok = await confirm({
+                  title: "Save changes",
+                  message:
+                    "Are you sure you want to save these changes? This overwrites the client's saved portfolio.",
+                  confirmLabel: "Save",
+                });
+                if (!ok) {
+                  return;
+                }
                 setSaving(true);
                 setSaveError(null);
                 try {
@@ -189,7 +203,18 @@ export function PortfolioRoute() {
               type="button"
               className="btn btn-outline btn-sm"
               disabled={saving}
-              onClick={() => discardChanges()}
+              onClick={async () => {
+                const ok = await confirm({
+                  title: "Discard changes",
+                  message:
+                    "Are you sure you want to discard your unsaved changes? This cannot be undone.",
+                  confirmLabel: "Discard",
+                  danger: true,
+                });
+                if (ok) {
+                  discardChanges();
+                }
+              }}
             >
               Discard
             </button>
@@ -300,6 +325,7 @@ export function PortfolioRoute() {
           }
         }}
       />
+      {dialog}
     </div>
   );
 }

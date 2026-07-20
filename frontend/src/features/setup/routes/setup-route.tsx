@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { useConfirm } from "@/components/layout/confirm-dialog";
 import { backendJson } from "@/lib/backend";
 import { useSetupSnapshot } from "../hooks/use-setup-snapshot";
 import type { BackendStatus } from "../types";
@@ -277,6 +278,7 @@ function staleDetailText(status: BackendStatus | undefined) {
 
 export function SetupRoute() {
   const { data, loading, error, reload } = useSetupSnapshot();
+  const { confirm, dialog } = useConfirm();
   const [feedback, setFeedback] = useState<FeedbackState | null>(null);
   const [uploadWarning, setUploadWarning] = useState<UploadWarningState | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
@@ -517,7 +519,12 @@ export function SetupRoute() {
         // Status endpoint unavailable — fall back to the fresh-run prompt.
       }
 
-      if (!window.confirm(confirmMessage)) {
+      const ok = await confirm({
+        title: "Run universe clones",
+        message: confirmMessage,
+        confirmLabel: "Run",
+      });
+      if (!ok) {
         return;
       }
     }
@@ -652,8 +659,15 @@ export function SetupRoute() {
           <button
             type="button"
             className="btn btn-danger btn-sm ml-auto"
-            onClick={() => {
-              if (!window.confirm("Clear all results? You will need to re-run the cloning engine.")) {
+            onClick={async () => {
+              const ok = await confirm({
+                title: "Clear & reset",
+                message:
+                  "Are you sure you want to clear all results? You will need to re-run the cloning engine.",
+                confirmLabel: "Clear & Reset",
+                danger: true,
+              });
+              if (!ok) {
                 return;
               }
               void handleSimpleAction("clear_cache", "Saved cache cleared.");
@@ -843,12 +857,15 @@ export function SetupRoute() {
             <button
               type="button"
               className="btn btn-outline btn-sm"
-              onClick={() => {
-                if (
-                  !window.confirm(
-                    "Clear all universe clone results and normalized skill data? This cannot be undone — you will need to re-run universe clones from scratch.",
-                  )
-                ) {
+              onClick={async () => {
+                const ok = await confirm({
+                  title: "Reset universe",
+                  message:
+                    "Are you sure you want to clear all universe clone results and normalized skill data? This cannot be undone — you will need to re-run universe clones from scratch.",
+                  confirmLabel: "Reset Universe",
+                  danger: true,
+                });
+                if (!ok) {
                   return;
                 }
                 void handleSimpleAction("reset_universe", "Universe clone results cleared.");
@@ -939,6 +956,7 @@ export function SetupRoute() {
           </div>
         </div>
       ) : null}
+      {dialog}
     </div>
   );
 }
