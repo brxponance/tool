@@ -9,6 +9,5 @@ export const APP_NAV_ITEMS = [
   { href: "/overlap", label: "Overlap", eyebrow: "Holdings" },
   { href: "/peer-groups", label: "Peer Groups", eyebrow: "Compare" },
   { href: "/manager-detail", label: "Manager Detail", eyebrow: "Inspect" },
-  { href: "/optimize", label: "Optimize", eyebrow: "Solve" },
   { href: "/report", label: "Report", eyebrow: "Print" },
 ] as const;

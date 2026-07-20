@@ -10,6 +10,9 @@ import type {
   PlaceholderBucketUpdateResponse,
   PortfolioExposuresMenuResponse,
   PortfolioExposuresResponse,
+  PortfolioPresetDetail,
+  PortfolioPresetPayload,
+  PortfolioPresetSummary,
   PortfolioResponse,
   PortfolioStats,
   RiskAnalysisResponse,
@@ -82,6 +85,40 @@ export async function savePortfolioDraft(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ managers }),
     },
+  );
+}
+
+// ── Portfolio presets (named saved scenarios) ──────────────────────────────
+export async function listPresets(client: string) {
+  return backendJson<{ presets: PortfolioPresetSummary[] }>(
+    `clients/${encodeURIComponent(client)}/presets`,
+  );
+}
+
+export async function createPreset(
+  client: string,
+  input: { name: string; created_by?: string | null; payload: PortfolioPresetPayload },
+) {
+  return backendJson<{ ok: true; preset: PortfolioPresetSummary }>(
+    `clients/${encodeURIComponent(client)}/presets`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export async function getPreset(client: string, presetId: number) {
+  return backendJson<PortfolioPresetDetail>(
+    `clients/${encodeURIComponent(client)}/presets/${presetId}`,
+  );
+}
+
+export async function deletePreset(client: string, presetId: number) {
+  return backendJson<{ ok: true; deleted: number }>(
+    `clients/${encodeURIComponent(client)}/presets/${presetId}`,
+    { method: "DELETE" },
   );
 }
 

@@ -1130,6 +1130,108 @@ def save_client_portfolio(client_name):
     return jsonify({'ok': True, 'saved': client_name})
 
 
+# ── Portfolio presets (named saved scenarios) ───────────────────────────────
+@app.route('/clients/<path:client_name>/presets', methods=['GET'])
+def list_presets(client_name):
+    """List a client's saved presets (summaries only, no payload). The client's
+    own base book is the implicit 'Default' and is not included here."""
+    guard = _require_db()
+    if guard:
+        return guard
+    try:
+        presets = client_db.repository.list_presets(client_name)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 404
+    except Exception:  # noqa: BLE001
+        return _db_error_response('List presets')
+    return jsonify({'presets': presets})
+
+
+@app.route('/clients/<path:client_name>/presets', methods=['POST'])
+def create_preset(client_name):
+    """Create a named preset. Body: {name, created_by?, payload:{managers,...}}.
+    payload holds INPUTS only (weights, managers, style overrides, forced
+    managers) — numbers recompute on load."""
+    guard = _require_db()
+    if guard:
+        return guard
+    body = request.get_json(silent=True) or {}
+    payload = body.get('payload')
+    if not isinstance(payload, dict):
+        return jsonify({'error': 'Body must include a "payload" object.'}), 400
+    try:
+        preset = client_db.repository.create_preset(
+            client_name,
+            name=body.get('name') or '',
+            payload=payload,
+            created_by=body.get('created_by'),
+        )
+    except ValueError as e:
+        msg = str(e)
+        code = 404 if 'not found' in msg.lower() else 400
+        return jsonify({'error': msg}), code
+    except Exception:  # noqa: BLE001
+        return _db_error_response('Create preset')
+    return jsonify({'ok': True, 'preset': preset})
+
+
+@app.route('/clients/<path:client_name>/presets/<int:preset_id>', methods=['GET'])
+def get_preset(client_name, preset_id):
+    """Return one preset including its payload (used when loading a scenario)."""
+    guard = _require_db()
+    if guard:
+        return guard
+    try:
+        preset = client_db.repository.get_preset(client_name, preset_id)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 404
+    except Exception:  # noqa: BLE001
+        return _db_error_response('Get preset')
+    return jsonify(preset)
+
+
+@app.route('/clients/<path:client_name>/presets/<int:preset_id>', methods=['PUT'])
+def update_preset(client_name, preset_id):
+    """Update a preset's name/payload/creator. Any omitted field is unchanged."""
+    guard = _require_db()
+    if guard:
+        return guard
+    body = request.get_json(silent=True) or {}
+    payload = body.get('payload')
+    if payload is not None and not isinstance(payload, dict):
+        return jsonify({'error': '"payload" must be an object.'}), 400
+    try:
+        preset = client_db.repository.update_preset(
+            client_name,
+            preset_id,
+            name=body.get('name'),
+            payload=payload,
+            created_by=body.get('created_by'),
+            created_by_provided=('created_by' in body),
+        )
+    except ValueError as e:
+        msg = str(e)
+        code = 404 if 'not found' in msg.lower() else 400
+        return jsonify({'error': msg}), code
+    except Exception:  # noqa: BLE001
+        return _db_error_response('Update preset')
+    return jsonify({'ok': True, 'preset': preset})
+
+
+@app.route('/clients/<path:client_name>/presets/<int:preset_id>', methods=['DELETE'])
+def delete_preset(client_name, preset_id):
+    guard = _require_db()
+    if guard:
+        return guard
+    try:
+        client_db.repository.delete_preset(client_name, preset_id)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 404
+    except Exception:  # noqa: BLE001
+        return _db_error_response('Delete preset')
+    return jsonify({'ok': True, 'deleted': preset_id})
+
+
 # ── Save-payload validation helpers ─────────────────────────────────────────
 def _validate_weight(value, field, manager):
     """Coerce a weight to a finite float >= 0, or raise ValueError."""

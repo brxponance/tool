@@ -9,9 +9,10 @@ import { OptimizerPanel } from "@/features/optimize/components/optimizer-panel";
 import { AddManagerModal } from "../components/add-manager-modal";
 import { ClientManageModal } from "../components/client-manage-modal";
 import { DiverseOwnershipSection } from "../components/diverse-ownership-section";
-import { IdealComplementSection } from "../components/ideal-complement-section";
 import { PortfolioAnalyticsSections } from "../components/portfolio-analytics-sections";
 import { PortfolioTable } from "../components/portfolio-table";
+import { PresetBar } from "../components/preset-bar";
+import { useIdealComplement } from "../hooks/use-ideal-complement";
 import { usePortfolioScreen } from "../hooks/use-portfolio-screen";
 
 export function PortfolioRoute() {
@@ -22,6 +23,7 @@ export function PortfolioRoute() {
   const {
     addClient,
     addManager,
+    applyPreset,
     addableManagers,
     benchmarks,
     benchmarkOptions,
@@ -58,6 +60,7 @@ export function PortfolioRoute() {
   } = usePortfolioScreen();
 
   const managers = portfolio?.managers ?? [];
+  const idealComplement = useIdealComplement(selectedClient, managers);
   const proposedTotal = sum(managers.map((manager) => manager.proposed_weight));
   const benchmark = portfolio?.client_benchmark ?? benchmarks[selectedClient ?? ""] ?? "--";
   const unmatched = portfolio?.unmatched ?? [];
@@ -192,6 +195,14 @@ export function PortfolioRoute() {
             </button>
           </div>
         ) : null}
+        {clientsEditable && selectedClient ? (
+          <PresetBar
+            client={selectedClient}
+            managers={managers}
+            onApplyPreset={applyPreset}
+            onSelectDefault={discardChanges}
+          />
+        ) : null}
         <div className="ml-auto flex gap-8 items-center">
           <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)" }}>Proposed total:</span>
           <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--accent)" }}>
@@ -229,6 +240,9 @@ export function PortfolioRoute() {
                 onProposedWeightChange={updateManagerProposedWeight}
                 onRemoveManager={removeManager}
                 onPlaceholderSaved={reload}
+                idealComplement={idealComplement.data}
+                idealComplementLoading={idealComplement.loading}
+                idealComplementError={idealComplement.error}
               />
             ) : (
               <div style={{ padding: 24, textAlign: "center", color: "var(--text3)" }}>
@@ -255,10 +269,6 @@ export function PortfolioRoute() {
         selectedExposureContinuous={selectedExposureContinuous}
         stats={stats}
       />
-
-      {portfolio && (
-        <IdealComplementSection client={selectedClient} managers={managers} />
-      )}
 
       {portfolio && (
         <DiverseOwnershipSection client={selectedClient} managers={managers} />

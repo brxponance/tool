@@ -36,6 +36,7 @@ import type {
   PortfolioExposuresResponse,
   PortfolioResponse,
   PortfolioStats,
+  PresetManagerInput,
   RiskAnalysisResponse,
   RiskExposuresResponse,
 } from "../types";
@@ -859,6 +860,43 @@ export function usePortfolioScreen() {
               ...current.portfolio,
               managers: nextManagers,
             },
+          };
+        });
+      });
+    },
+    // Apply a saved preset's inputs to the loaded portfolio: overwrite each
+    // matching manager's proposed weight (and placeholder style buckets) from
+    // the preset. Managers not in the preset are left as-is. This is a plain
+    // state mutation, so the debounced derived-data effect recomputes all the
+    // numbers live — matching the "live recompute" preset model.
+    applyPreset(presetManagers: PresetManagerInput[]) {
+      startTransition(() => {
+        setState((current) => {
+          if (!current.portfolio) {
+            return current;
+          }
+          const byKey = new Map<string, PresetManagerInput>();
+          for (const m of presetManagers ?? []) {
+            const key = `${m.tab ?? ""}::${m.matched_name ?? m.manager_name ?? ""}`;
+            byKey.set(key, m);
+          }
+          const nextManagers = current.portfolio.managers.map((manager) => {
+            const preset = byKey.get(`${manager.tab}::${manager.matched_name}`);
+            if (!preset) {
+              return manager;
+            }
+            return {
+              ...manager,
+              proposed_weight:
+                typeof preset.proposed_weight === "number"
+                  ? preset.proposed_weight
+                  : manager.proposed_weight,
+              style_buckets: preset.style_buckets ?? manager.style_buckets,
+            };
+          });
+          return {
+            ...current,
+            portfolio: { ...current.portfolio, managers: nextManagers },
           };
         });
       });

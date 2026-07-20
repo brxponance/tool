@@ -73,6 +73,48 @@ class Client(Base):
         return {m.manager_name: m.current_weight for m in self.managers}
 
 
+class PortfolioPreset(Base):
+    """A named, saved scenario for a client's portfolio.
+
+    A preset stores INPUTS only (the manager list with proposed weights, style
+    overrides, and optimizer forced-managers) as a JSON payload — never the
+    computed numbers. Loading a preset restores those inputs and the normal
+    analytical pipeline recomputes everything fresh against current clone data
+    (the "live recompute" model). The client's own base book is the implicit
+    "Default" preset and is NOT stored here.
+    """
+
+    __tablename__ = "portfolio_presets"
+    __table_args__ = (
+        # A preset name is unique within a client.
+        UniqueConstraint("client_id", "name", name="uq_preset_client_name"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(
+        ForeignKey("clients.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # Display name the user gives the preset (e.g. "Q2 rebalance idea").
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Optional free-text creator label (the tool has no login). May be null.
+    created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Full scenario inputs: {"managers": [...], "forced_managers": [...], ...}.
+    # JSON (not computed numbers) so it stays valid as clone data is refreshed.
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        default=_utcnow,
+        onupdate=_utcnow,
+    )
+
+    client: Mapped["Client"] = relationship()
+
+
 class ClientManager(Base):
     __tablename__ = "client_managers"
     __table_args__ = (

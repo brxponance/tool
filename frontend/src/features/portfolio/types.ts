@@ -339,6 +339,37 @@ export type PlaceholderBucketUpdateResponse = {
   message?: string;
 };
 
+// ── Portfolio presets (named saved scenarios) ──────────────────────────────
+// One manager's saved inputs within a preset. Matched back to a live manager
+// by `tab::matched_name` on load; numbers recompute from these inputs.
+export type PresetManagerInput = {
+  tab?: string;
+  matched_name?: string;
+  manager_name?: string;
+  weight_file_name?: string;
+  current_weight?: number;
+  proposed_weight?: number | null;
+  style_buckets?: Record<string, number> | null;
+  is_placeholder?: boolean;
+};
+
+export type PortfolioPresetPayload = {
+  managers: PresetManagerInput[];
+  forced_managers?: unknown[];
+};
+
+export type PortfolioPresetSummary = {
+  id: number;
+  name: string;
+  created_by: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+export type PortfolioPresetDetail = PortfolioPresetSummary & {
+  payload: PortfolioPresetPayload;
+};
+
 // Diverse / woman-owned exposure rollup (from /diverse_ownership).
 export type DiverseOwnershipRollup = {
   weight_pct: number; // % of portfolio weight in diverse firms

@@ -2,14 +2,21 @@ import { useEffect, useState } from "react";
 
 import { formatNumber, formatPercent } from "@/lib/utils";
 
-import type { PortfolioManager } from "../types";
+import type { IdealComplementResponse, PortfolioManager } from "../types";
 import { PlaceholderBucketsModal } from "./placeholder-buckets-modal";
+
+// Total column count of the managers table — used for full-width ideal
+// complement rows appended to the table body.
+const COLSPAN_ALL = 17;
 
 type PortfolioTableProps = {
   managers: PortfolioManager[];
   onProposedWeightChange(managerKey: string, proposedWeightPercent: number): void;
   onRemoveManager(managerKey: string): void;
   onPlaceholderSaved?: () => void;
+  idealComplement?: IdealComplementResponse | null;
+  idealComplementLoading?: boolean;
+  idealComplementError?: string | null;
 };
 
 function proposedWeightLabel(manager: PortfolioManager) {
@@ -22,11 +29,109 @@ function draftWeightsFor(managers: PortfolioManager[]) {
   );
 }
 
+function IdealComplementRows({
+  data,
+  loading,
+  error,
+}: {
+  data?: IdealComplementResponse | null;
+  loading?: boolean;
+  error?: string | null;
+}) {
+  const best = data?.best;
+
+  let stat: React.ReactNode;
+  if (loading && !best) {
+    stat = <span style={{ color: "var(--text3)" }}>Computing…</span>;
+  } else if (error || data?.error) {
+    stat = <span style={{ color: "var(--text3)" }}>{error ?? data?.error}</span>;
+  } else if (!best) {
+    stat = (
+      <span style={{ color: "var(--text3)" }}>
+        Select a portfolio to see the best-fit complement.
+      </span>
+    );
+  } else {
+    const hr = `${(best.hit_rate * 100).toFixed(1)}%`;
+    const ae = `${((best.avg_excess ?? 0) * 100).toFixed(2)}%`;
+    const bench = data?.benchmark_name || data?.peer_benchmark || "benchmark";
+    stat = (
+      <>
+        Hit rate <strong>{hr}</strong> · Avg excess <strong>{ae}</strong> ·{" "}
+        {best.n_months} mo (of {data?.n_underperform_months ?? "?"} underperformance
+        mo) · <span style={{ color: "var(--text3)" }}>vs {bench}</span>
+      </>
+    );
+  }
+
+  const vg3 = best?.vg_3factor ?? 0;
+  const vgF = best?.vg_full ?? 0;
+  const vg3Class = vg3 > 0.05 ? "val-pos" : vg3 < -0.05 ? "val-neg" : "val-neu";
+  const vgFClass = vgF > 0.05 ? "val-pos" : vgF < -0.05 ? "val-neg" : "val-neu";
+  const nsZ = best?.ns_z;
+  const nsClass = nsZ == null ? "" : nsZ > 0 ? "skill-pos" : "skill-neg";
+
+  return (
+    <>
+      <tr>
+        <td
+          colSpan={COLSPAN_ALL}
+          style={{
+            borderTop: "2px solid var(--accent)",
+            background: "var(--surface2)",
+            padding: "8px 10px",
+          }}
+        >
+          <span
+            style={{
+              fontFamily: "var(--mono)",
+              fontWeight: 600,
+              fontSize: 11,
+              textTransform: "uppercase",
+              letterSpacing: 0.5,
+              color: "var(--accent)",
+              marginRight: 12,
+            }}
+          >
+            Ideal Complement
+          </span>
+          <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text2)" }}>
+            {stat}
+          </span>
+        </td>
+      </tr>
+      {best ? (
+        <tr style={{ background: "var(--surface2)" }}>
+          <td>
+            <span className="badge badge-blue mono">{best.tab}</span>
+          </td>
+          <td style={{ fontWeight: 500 }}>{best.name}</td>
+          <td className="mono" style={{ color: "var(--text3)" }}>
+            —
+          </td>
+          <td className="mono" style={{ color: "var(--text3)" }}>
+            —
+          </td>
+          <td className={`mono ${vg3Class}`}>{formatPercent(vg3)}</td>
+          <td className={`mono ${vgFClass}`}>{formatPercent(vgF)}</td>
+          <td className={`mono ${nsClass}`}>
+            {nsZ == null ? "--" : `${nsZ >= 0 ? "+" : ""}${formatNumber(nsZ, 2)}`}
+          </td>
+          <td colSpan={COLSPAN_ALL - 7} />
+        </tr>
+      ) : null}
+    </>
+  );
+}
+
 export function PortfolioTable({
   managers,
   onProposedWeightChange,
   onRemoveManager,
   onPlaceholderSaved,
+  idealComplement,
+  idealComplementLoading,
+  idealComplementError,
 }: PortfolioTableProps) {
   const [draftWeights, setDraftWeights] = useState<Record<string, string>>(() => draftWeightsFor(managers));
   const [editingPlaceholder, setEditingPlaceholder] = useState<PortfolioManager | null>(null);
@@ -194,6 +299,13 @@ export function PortfolioTable({
                 </tr>
               );
             })}
+            {managers.length ? (
+              <IdealComplementRows
+                data={idealComplement}
+                loading={idealComplementLoading}
+                error={idealComplementError}
+              />
+            ) : null}
           </tbody>
         </table>
       </div>

@@ -16,10 +16,10 @@ translate them into 400/404 responses.
 """
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .models import Client, ClientManager
+from .models import Client, ClientManager, PortfolioPreset
 from .session import session_scope
 
 
@@ -329,3 +329,134 @@ def _clean_benchmark(bench: str | None) -> str | None:
     if not b or b.lower() in ("none", ""):
         return None
     return b
+
+
+# ── Portfolio presets (named saved scenarios) ─────────────────────────────
+def _preset_summary(p: PortfolioPreset) -> dict:
+    """Lightweight preset descriptor for list views (no payload)."""
+    return {
+        "id": p.id,
+        "name": p.name,
+        "created_by": p.created_by,
+        "created_at": p.created_at.isoformat() if p.created_at else None,
+        "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+    }
+
+
+def list_presets(client_name: str) -> list[dict]:
+    """Return preset summaries for a client, oldest first. Raises ValueError if
+    the client doesn't exist."""
+    with session_scope() as s:
+        client = _get_client(s, client_name)
+        presets = (
+            s.scalars(
+                select(PortfolioPreset)
+                .where(PortfolioPreset.client_id == client.id)
+                .order_by(PortfolioPreset.id)
+            ).all()
+        )
+        return [_preset_summary(p) for p in presets]
+
+
+def create_preset(
+    client_name: str,
+    name: str,
+    payload: dict,
+    created_by: str | None = None,
+) -> dict:
+    """Create a named preset for a client. Preset name is unique per client
+    (case-insensitive). Returns the new preset's summary."""
+    name = _normalize_name(name)
+    if not isinstance(payload, dict):
+        raise ValueError("Preset payload must be an object.")
+    with session_scope() as s:
+        client = _get_client(s, client_name)
+        exists = s.scalar(
+            select(PortfolioPreset).where(
+                PortfolioPreset.client_id == client.id,
+                func.lower(PortfolioPreset.name) == name.lower(),
+            )
+        )
+        if exists:
+            raise ValueError(f"A preset named {name!r} already exists for this client.")
+        preset = PortfolioPreset(
+            client_id=client.id,
+            name=name,
+            created_by=(created_by or "").strip() or None,
+            payload=payload,
+        )
+        s.add(preset)
+        s.flush()  # assign id before the session closes
+        return _preset_summary(preset)
+
+
+def get_preset(client_name: str, preset_id: int) -> dict:
+    """Return one preset including its payload. Raises ValueError if not found
+    for this client."""
+    with session_scope() as s:
+        client = _get_client(s, client_name)
+        preset = s.scalar(
+            select(PortfolioPreset).where(
+                PortfolioPreset.id == preset_id,
+                PortfolioPreset.client_id == client.id,
+            )
+        )
+        if preset is None:
+            raise ValueError(f"Preset not found: {preset_id}")
+        return {**_preset_summary(preset), "payload": preset.payload}
+
+
+def update_preset(
+    client_name: str,
+    preset_id: int,
+    name: str | None = None,
+    payload: dict | None = None,
+    created_by: str | None = None,
+    created_by_provided: bool = False,
+) -> dict:
+    """Update a preset's name, payload, and/or creator. Returns its summary."""
+    with session_scope() as s:
+        client = _get_client(s, client_name)
+        preset = s.scalar(
+            select(PortfolioPreset).where(
+                PortfolioPreset.id == preset_id,
+                PortfolioPreset.client_id == client.id,
+            )
+        )
+        if preset is None:
+            raise ValueError(f"Preset not found: {preset_id}")
+        if name is not None:
+            new_name = _normalize_name(name)
+            clash = s.scalar(
+                select(PortfolioPreset).where(
+                    PortfolioPreset.client_id == client.id,
+                    func.lower(PortfolioPreset.name) == new_name.lower(),
+                    PortfolioPreset.id != preset.id,
+                )
+            )
+            if clash:
+                raise ValueError(
+                    f"A preset named {new_name!r} already exists for this client."
+                )
+            preset.name = new_name
+        if payload is not None:
+            if not isinstance(payload, dict):
+                raise ValueError("Preset payload must be an object.")
+            preset.payload = payload
+        if created_by_provided:
+            preset.created_by = (created_by or "").strip() or None
+        return _preset_summary(preset)
+
+
+def delete_preset(client_name: str, preset_id: int) -> None:
+    with session_scope() as s:
+        client = _get_client(s, client_name)
+        preset = s.scalar(
+            select(PortfolioPreset).where(
+                PortfolioPreset.id == preset_id,
+                PortfolioPreset.client_id == client.id,
+            )
+        )
+        if preset is None:
+            raise ValueError(f"Preset not found: {preset_id}")
+        s.delete(preset)
