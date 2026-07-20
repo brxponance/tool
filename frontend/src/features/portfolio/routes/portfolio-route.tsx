@@ -203,12 +203,6 @@ export function PortfolioRoute() {
             onSelectDefault={discardChanges}
           />
         ) : null}
-        <div className="ml-auto flex gap-8 items-center">
-          <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)" }}>Proposed total:</span>
-          <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--accent)" }}>
-            {formatPercent(proposedTotal)}
-          </span>
-        </div>
       </div>
 
       {saveError ? <div className="alert alert-error">{saveError}</div> : null}
@@ -227,8 +221,12 @@ export function PortfolioRoute() {
           id="portfolio-managers-panel"
           style={{ width: "calc(50% - 8px)", minWidth: 0 }}
         >
-          <div className="panel-header">
+          <div className="panel-header" style={{ padding: "6px 16px" }}>
             <span className="panel-title">Portfolio Managers</span>
+            <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)" }}>Proposed total:</span>
+            <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--accent)" }}>
+              {formatPercent(proposedTotal)}
+            </span>
             <span style={{ marginLeft: "auto", fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)" }}>
               Edit proposed weight to model changes
             </span>
