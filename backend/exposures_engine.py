@@ -25,7 +25,21 @@ import pandas as pd
 from rapidfuzz import fuzz, process
 
 # ── Column definitions ─────────────────────────────────────────────────────
-CATEGORICAL_COLS = {'MSCI Region', 'MSCI Country', 'GICS Sector', 'GICS Industry'}
+CATEGORICAL_COLS = {'MSCI Region', 'MSCI Country', 'Region', 'Country',
+                    'GICS Sector', 'GICS Industry',
+                    # Developed/Emerging/Other split. The FactSet file has no such
+                    # column, so 'Market Development' is DERIVED per security from
+                    # its country at parse time (see parse_exposures_file), reusing
+                    # the risk table's country classification.
+                    'Market Development'}
+
+# Display order for the categorical groupings in the selector UI. CATEGORICAL_COLS
+# is a set, so iterating it directly gives an order that shuffles between server
+# restarts (string hashing is salted per process). Anything in the set but missing
+# here is appended alphabetically.
+CATEGORICAL_ORDER = ['Region', 'Country', 'Market Development',
+                     'MSCI Region', 'MSCI Country',
+                     'GICS Sector', 'GICS Industry']
 
 CONTINUOUS_COLS = [
     'Market Capitalization',
@@ -64,6 +78,9 @@ DISPLAY_LABELS = {
     'MSCI Country':                              'MSCI Country',
     'GICS Sector':                               'Sector',
     'GICS Industry':                             'Industry',
+    'Region':                                    'Region',
+    'Country':                                   'Country',
+    'Market Development':                        'Market Development',
 }
 
 # Groups for the selector UI (matches FactSet's row 6)
@@ -129,6 +146,7 @@ def parse_exposures_file(path):
     added above the grid, pushing the header from row 7 to row 8).
     """
     import openpyxl
+    from security_risk_engine import classify_market_development as _classify_market_development
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     ws = wb['Contribution']
     all_rows = list(ws.iter_rows(values_only=True))
@@ -177,6 +195,12 @@ def parse_exposures_file(path):
                 if col is None or col in ('Port. Ending Weight',):
                     continue
                 record[col] = row[i] if col in CATEGORICAL_COLS else _safe_float(row[i])
+            # 'Market Development' isn't a column in the FactSet file — derive it
+            # from the security's country using the risk table's classification
+            # (Developed/Emerging/Other) so it can be grouped on like any other
+            # categorical column.
+            record['Market Development'] = _classify_market_development(
+                record.get('Country') or record.get('MSCI Country'))
             securities[sedol] = record
         return securities
 
@@ -886,8 +910,12 @@ def get_grouping_menu():
     """Return structured menu for the UI: list of {group, cols:[{col, label}]}."""
     from collections import OrderedDict
     menu = OrderedDict()
-    for col in list(CATEGORICAL_COLS) + CONTINUOUS_COLS:
-        grp = COL_GROUPS.get(col, 'Other')
+    ordered_cat = ([c for c in CATEGORICAL_ORDER if c in CATEGORICAL_COLS]
+                   + sorted(CATEGORICAL_COLS - set(CATEGORICAL_ORDER)))
+    for col in ordered_cat + CONTINUOUS_COLS:
+        # Categorical columns (per the backend set) always belong in the UI's
+        # 'Categorical' row; continuous columns keep their factor-group label.
+        grp = 'Categorical' if col in CATEGORICAL_COLS else COL_GROUPS.get(col, 'Other')
         if grp not in menu:
             menu[grp] = []
         menu[grp].append({'col': col, 'label': DISPLAY_LABELS.get(col, col)})

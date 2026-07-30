@@ -15,6 +15,10 @@ Maximizes weighted normalized skill (Σ wᵢ · ns_zᵢ) subject to:
     band per user spec); they consume part of the weight budget AND count
     toward the cardinality. Forcing a manager also blocks any OTHER strategy
     from the same firm from being suggested.
+  - Excluded managers removed from the candidate set entirely, so the
+    optimizer never suggests them. Exclusion is strategy-specific (it does
+    NOT block sibling strategies from the same firm), the mirror image of
+    forcing.
 
 Solver: scipy.optimize.milp (HiGHS backend). Fast for the typical N≈30-50
 candidate count of a single buy-list peer group.
@@ -26,7 +30,7 @@ but the optimizer itself never *suggests* outside the peer group.
 
 import re
 import numpy as np
-from scipy.optimize import milp, LinearConstraint, Bounds
+from scipy.optimize import milp, LinearConstraint, Bounds, linprog
 
 
 # ── Defaults ──────────────────────────────────────────────────────────────
@@ -122,6 +126,7 @@ def optimize_portfolio(
     forced_managers,
     clone_results,
     norm_skill_by_tab,
+    excluded_managers=None,
     min_weight=DEFAULT_MIN_WEIGHT,
     max_weight=DEFAULT_MAX_WEIGHT,
     min_managers=DEFAULT_MIN_MGRS,
@@ -144,6 +149,23 @@ def optimize_portfolio(
       detail: only present on infeasible — info about why
     """
     forced_managers = forced_managers or []
+    excluded_managers = excluded_managers or []
+
+    # ── 0. Resolve excluded managers ─────────────────────────────────────
+    # Exclusion is strategy-specific: only the named strategy is removed from
+    # the candidate set, not other strategies of the same firm. Entries carry
+    # a tab, but the optimizer only ever suggests within `peer_group`, so an
+    # exclusion for a different tab is a harmless no-op.
+    pg_norm = str(peer_group or '').strip().lower()
+    excluded_names = set()
+    for em in excluded_managers:
+        nm = em.get('name') or em.get('matched_name')
+        if not nm:
+            continue
+        tb = em.get('tab')
+        if tb and str(tb).strip().lower() != pg_norm:
+            continue
+        excluded_names.add(str(nm).strip().lower())
 
     # ── 1. Resolve and validate forced managers ──────────────────────────
     # Two flavors of "forced":
@@ -176,6 +198,12 @@ def optimize_portfolio(
             return {
                 'status': 'error',
                 'error': f"Forced manager '{name}' not found in buy list tab '{tab}'.",
+            }
+        if str(canonical or '').strip().lower() in excluded_names:
+            return {
+                'status': 'error',
+                'error': f"Manager '{canonical}' is both forced and excluded. "
+                         f"Remove it from one of the two lists.",
             }
         vg3 = float(clone.get('vg_3factor', 0) or 0)
         fk = _firm_key(canonical)
@@ -242,9 +270,13 @@ def optimize_portfolio(
     candidates_excluded_no_skill = 0
     candidates_excluded_xus = 0
     candidates_excluded_forced_firm = 0
+    candidates_excluded_user = 0
     peer_clone = clone_results.get(peer_group, {}) or {}
     for name, clone in peer_clone.items():
         if (peer_group, name) in forced_keys:
+            continue
+        if str(name or '').strip().lower() in excluded_names:
+            candidates_excluded_user += 1
             continue
         fk = _firm_key(name)
         if fk in forced_firms:
@@ -509,6 +541,7 @@ def optimize_portfolio(
             'candidates_excluded_xus': candidates_excluded_xus,
             'candidates_excluded_forced_firm': candidates_excluded_forced_firm,
             'candidates_excluded_no_skill': candidates_excluded_no_skill,
+            'candidates_excluded_user': candidates_excluded_user,
             'firm_groups_constrained': firm_groups_constrained,
             'vg_band': vg_band,
             'vg_center': vg_center,
@@ -519,3 +552,281 @@ def optimize_portfolio(
             'skill_uncovered_weight': skill_uncov_weight,
         },
     }
+
+
+# ── Client redemption / rebalance ──────────────────────────────────────────
+# Defaults for the redemption tool. The V-G band is anchored to the ORIGINAL
+# portfolio's V-G (±1%) and then clamped to the absolute ±7% cap — unlike
+# optimize_portfolio, which centers on zero. See the module docstring / the
+# plan for the distinction.
+REDEMPTION_VG_TOL   = 0.01   # ±1% around the original portfolio V-G
+REDEMPTION_VG_CAP   = 0.07   # absolute ±7% cap
+
+
+def _redemption_match(entry, name_norm, tab):
+    """True if a picker entry {name/matched_name, tab?} refers to this manager.
+    Matches on whitespace-normalized, case-insensitive name; if the entry
+    carries a tab, that must match too."""
+    en = entry.get('name') or entry.get('matched_name')
+    if not en:
+        return False
+    if str(en).strip().lower() != name_norm:
+        return False
+    et = entry.get('tab')
+    if et and tab and str(et).strip().lower() != str(tab).strip().lower():
+        return False
+    return True
+
+
+def optimize_redemption(
+    managers,
+    client_aum,
+    redemption_amount,
+    include_managers=None,
+    exclude_managers=None,
+    vg_tol=REDEMPTION_VG_TOL,
+    vg_cap=REDEMPTION_VG_CAP,
+):
+    """Choose per-manager dollar reductions that fund a client redemption while
+    preserving portfolio "edge" (weighted norm-skill Z) and holding the
+    portfolio's 3-factor V-G near where it started.
+
+    This is a pure continuous LP (scipy.optimize.linprog / HiGHS). It works in
+    WEIGHT space — one unit of weight equals `client_aum` dollars — so it never
+    depends on how AUM figures were unit-parsed.
+
+    Args:
+      managers: list of dicts from the loaded portfolio, each with
+        matched_name (or name), tab, current_weight, vg_3factor, ns_z.
+      client_aum: client total AUM (same dollar scale the UI displays).
+      redemption_amount: dollars to pull, in that same scale.
+      include_managers: if non-empty, ONLY these managers may be reduced.
+      exclude_managers: managers that must NOT be reduced (ignored when an
+        include list is given).
+
+    Returns dict with keys:
+      status: 'ok' | 'infeasible' | 'warning' | 'error'
+      error: human-readable message (when not 'ok')
+      redemption_managers: list of {name, tab, current_weight, current_dollars,
+        pull_dollars, remaining_dollars, remaining_weight, vg_3factor, ns_z,
+        eligible}
+      summary: {redemption_amount, orig_vg_3factor, new_vg_3factor, orig_edge,
+        new_edge, new_total_aum, n_reduced, n_dropped, eligible_dollars,
+        total_dollars, uncovered_weight, vg_lo, vg_hi}
+    """
+    include_managers = include_managers or []
+    exclude_managers = exclude_managers or []
+
+    # ── 0. Validate inputs ───────────────────────────────────────────────
+    try:
+        caum = float(client_aum)
+    except (TypeError, ValueError):
+        caum = 0.0
+    if caum <= 0:
+        return {'status': 'error',
+                'error': 'Client total AUM is missing or zero — cannot size a '
+                         'dollar redemption. Load a weights file that includes '
+                         'the client total AUM.'}
+    try:
+        R = float(redemption_amount)
+    except (TypeError, ValueError):
+        R = 0.0
+    if R <= 0:
+        return {'status': 'error', 'error': 'Enter a redemption amount greater than zero.'}
+
+    # ── 1. Build the working manager list ────────────────────────────────
+    recs = []
+    for m in (managers or []):
+        name = m.get('matched_name') or m.get('name')
+        if not name:
+            continue
+        try:
+            w = float(m.get('current_weight') or 0)
+        except (TypeError, ValueError):
+            w = 0.0
+        if w <= 0:
+            continue  # nothing to pull from a zero-weight holding
+        try:
+            vg = float(m.get('vg_3factor') or 0)
+        except (TypeError, ValueError):
+            vg = 0.0
+        z = m.get('ns_z')
+        try:
+            z = float(z) if z is not None else None
+        except (TypeError, ValueError):
+            z = None
+        recs.append({'name': name, 'tab': m.get('tab'),
+                     'w': w, 'vg': vg, 'z': z})
+
+    if not recs:
+        return {'status': 'error',
+                'error': 'No positively-weighted managers in this portfolio to redeem from.'}
+
+    N = len(recs)
+    Wsum = sum(r['w'] for r in recs)               # ~1.0 for a fully-invested book
+    total_dollars = caum * Wsum
+
+    # Redemption fraction in weight units (1 weight unit = caum dollars).
+    f = R / caum
+
+    if R >= total_dollars - 1e-9:
+        return {'status': 'error',
+                'error': (f'Redemption (${R:,.0f}) is at or above the account value '
+                          f'(${total_dollars:,.0f}). Redeem less than the full account.')}
+
+    # ── 2. Eligibility (include wins over exclude; neither → whole book) ──
+    def _eligible(rec):
+        nm = str(rec['name']).strip().lower()
+        if include_managers:
+            return any(_redemption_match(e, nm, rec['tab']) for e in include_managers)
+        if any(_redemption_match(e, nm, rec['tab']) for e in exclude_managers):
+            return False
+        return True
+
+    for r in recs:
+        r['eligible'] = _eligible(r)
+
+    eligible_weight = sum(r['w'] for r in recs if r['eligible'])
+    eligible_dollars = caum * eligible_weight
+    if eligible_weight <= 1e-9:
+        return {'status': 'error',
+                'error': 'No managers are eligible to redeem from. Adjust the include/exclude lists.'}
+    if R > eligible_dollars + 1e-6:
+        return {'status': 'error',
+                'error': (f'Redemption (${R:,.0f}) exceeds the assets of the selected '
+                          f'managers (${eligible_dollars:,.0f}). Select more managers '
+                          f'or reduce the amount.')}
+
+    # ── 3. V-G band anchored to the original portfolio, clamped to the cap ─
+    V0 = sum(r['vg'] * r['w'] for r in recs)       # Σ vgᵢ·wᵢ (weighted, un-normalized)
+    orig_vg = V0 / Wsum if Wsum > 1e-9 else 0.0
+    lo = max(orig_vg - vg_tol, -vg_cap)
+    hi = min(orig_vg + vg_tol, vg_cap)
+    band_note = None
+    if lo > hi:
+        # The ±2% window around the original sits entirely outside the ±7% cap
+        # (only possible if the original portfolio is beyond ±9% V-G).
+        band_note = (f'Original portfolio V-G ({orig_vg*100:+.2f}%) is far outside the '
+                     f'±{vg_cap*100:.0f}% cap; the ±{vg_tol*100:.0f}% window cannot be '
+                     f'reconciled with the cap.')
+    elif not (-vg_cap - 1e-9 <= orig_vg <= vg_cap + 1e-9):
+        band_note = (f'Original portfolio V-G ({orig_vg*100:+.2f}%) already exceeds the '
+                     f'±{vg_cap*100:.0f}% cap; the redemption will pull it toward the cap '
+                     f'but may not fully satisfy it.')
+
+    new_total_weight = Wsum - f                    # > 0 (R < total_dollars checked above)
+
+    # ── 4. Solve the LP ──────────────────────────────────────────────────
+    # Variables pᵢ = weight pulled from manager i.
+    # Objective: min Σ zᵢ·pᵢ  → pull from the lowest-edge managers first.
+    c = np.array([(r['z'] if r['z'] is not None else 0.0) for r in recs], dtype=float)
+
+    # Bounds: 0 ≤ pᵢ ≤ wᵢ (eligible) or fixed at 0 (ineligible).
+    bounds = [(0.0, r['w']) if r['eligible'] else (0.0, 0.0) for r in recs]
+
+    # Equality: Σ pᵢ = f.
+    A_eq = np.ones((1, N)); b_eq = np.array([f], dtype=float)
+
+    # Inequalities for the V-G band (only when the band is well-formed):
+    #   Σ vgᵢ·pᵢ ≤ V0 − lo·(Wsum − f)   (keeps new V-G ≥ lo)
+    #  −Σ vgᵢ·pᵢ ≤ −(V0 − hi·(Wsum − f)) (keeps new V-G ≤ hi)
+    A_ub = None; b_ub = None
+    if band_note is None or lo <= hi:
+        vg_row = np.array([r['vg'] for r in recs], dtype=float)
+        A_ub = np.vstack([vg_row, -vg_row])
+        b_ub = np.array([V0 - lo * new_total_weight,
+                         -(V0 - hi * new_total_weight)], dtype=float)
+
+    res = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq,
+                  bounds=bounds, method='highs')
+
+    if not res.success or res.x is None:
+        return {'status': 'infeasible',
+                'error': ('No redemption keeps the portfolio V-G within '
+                          f'±{vg_tol*100:.0f}% of the original and inside the '
+                          f'±{vg_cap*100:.0f}% cap. '
+                          + (band_note or f'Solver: {res.message}')),
+                'detail': {'orig_vg_3factor': orig_vg, 'vg_lo': lo, 'vg_hi': hi,
+                           'redemption_fraction': f,
+                           'eligible_dollars': eligible_dollars,
+                           'total_dollars': total_dollars}}
+
+    p = np.asarray(res.x, dtype=float)
+    EPS = 1e-6
+
+    # ── 5. Build results ──────────────────────────────────────────────────
+    out = []
+    n_reduced = 0
+    n_dropped = 0
+    for i, r in enumerate(recs):
+        pull_w = max(0.0, float(p[i]))
+        if pull_w < EPS:
+            pull_w = 0.0
+        rem_w = r['w'] - pull_w
+        if rem_w < EPS:
+            rem_w = 0.0
+        if pull_w > 0:
+            n_reduced += 1
+        if rem_w <= 0 and r['w'] > 0:
+            n_dropped += 1
+        out.append({
+            'name': r['name'], 'tab': r['tab'],
+            'current_weight':    r['w'],
+            'current_dollars':   caum * r['w'],
+            'pull_dollars':      caum * pull_w,
+            'remaining_dollars': caum * rem_w,
+            # New weight renormalized to the post-redemption book (sums to 100%).
+            'remaining_weight':  (rem_w / new_total_weight) if new_total_weight > 1e-9 else 0.0,
+            'vg_3factor':        r['vg'],
+            'ns_z':              r['z'],
+            'eligible':          r['eligible'],
+        })
+    # Show the managers we pulled from first, largest pull on top.
+    out.sort(key=lambda d: (-d['pull_dollars'], -d['current_dollars']))
+
+    # Portfolio-level V-G and edge, before and after.
+    def _wavg_vg(wkey_getter):
+        num = 0.0; den = 0.0
+        for d in out:
+            w = wkey_getter(d)
+            num += w * d['vg_3factor']; den += w
+        return (num / den) if den > 1e-9 else 0.0
+
+    new_vg = _wavg_vg(lambda d: d['remaining_dollars'])
+
+    def _edge(wkey_getter):
+        wz = 0.0; cov = 0.0
+        for d in out:
+            if d['ns_z'] is None:
+                continue
+            w = wkey_getter(d)
+            wz += d['ns_z'] * w; cov += w
+        return (wz / cov) if cov > 1e-9 else None
+
+    orig_edge = _edge(lambda d: d['current_dollars'])
+    new_edge  = _edge(lambda d: d['remaining_dollars'])
+    uncovered_remaining = sum(d['remaining_weight'] for d in out if d['ns_z'] is None)
+
+    summary = {
+        'redemption_amount': R,
+        'orig_vg_3factor':   orig_vg,
+        'new_vg_3factor':    new_vg,
+        'orig_edge':         orig_edge,
+        'new_edge':          new_edge,
+        'new_total_aum':     total_dollars - R,
+        'n_reduced':         n_reduced,
+        'n_dropped':         n_dropped,
+        'eligible_dollars':  eligible_dollars,
+        'total_dollars':     total_dollars,
+        'uncovered_weight':  uncovered_remaining,
+        'vg_lo':             lo,
+        'vg_hi':             hi,
+    }
+
+    status = 'ok'
+    if band_note is not None:
+        status = 'warning'
+    return {'status': status,
+            'error': band_note,
+            'redemption_managers': out,
+            'summary': summary}

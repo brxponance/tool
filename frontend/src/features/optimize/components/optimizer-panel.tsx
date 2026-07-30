@@ -7,6 +7,7 @@ import {
   runClientOptimizer,
 } from "../api/get-optimize-data";
 import type {
+  ExcludedManagerInput,
   ForcedManagerInput,
   OptimizerCandidate,
   OptimizerResponse,
@@ -14,8 +15,8 @@ import type {
 
 // Client-scoped optimizer panel — mirrors the reference "Portfolio
 // Optimization" panel that sits to the right of the Portfolio Managers table.
-// It sends {client_name, forced_managers} only; the backend derives the peer
-// group and applies fixed constraints.
+// It sends {client_name, forced_managers, excluded_managers} only; the backend
+// derives the peer group and applies fixed constraints.
 
 type Props = {
   clientName: string | null;
@@ -64,6 +65,8 @@ const inputStyle: React.CSSProperties = {
 
 export function OptimizerPanel({ clientName }: Props) {
   const [forced, setForced] = useState<ForcedManagerInput[]>([]);
+  const [excluded, setExcluded] = useState<ExcludedManagerInput[]>([]);
+  const [excludeSearch, setExcludeSearch] = useState("");
   const [candidates, setCandidates] = useState<OptimizerCandidate[]>([]);
   const [result, setResult] = useState<OptimizerResponse | null>(null);
   const [running, setRunning] = useState(false);
@@ -146,6 +149,36 @@ export function OptimizerPanel({ clientName }: Props) {
     setForced((curr) => curr.filter((_, i) => i !== index));
   }, []);
 
+  const addExcludedManager = useCallback(() => {
+    const parsed = parseForcedSearchInput(excludeSearch, candidates);
+    if (!parsed) {
+      window.alert(
+        'Pick a manager from the suggestions, or type exactly "Manager Name [Tab]".',
+      );
+      return;
+    }
+    if (!candidates.find((c) => c.name === parsed.name && c.tab === parsed.tab)) {
+      window.alert(`"${parsed.name}" [${parsed.tab}] is not in the buy list.`);
+      return;
+    }
+    if (forced.find((f) => f.name === parsed.name && f.tab === parsed.tab)) {
+      window.alert(
+        `"${parsed.name}" is already forced. Remove it from the forced list first.`,
+      );
+      return;
+    }
+    if (excluded.find((e) => e.name === parsed.name && e.tab === parsed.tab)) {
+      window.alert("Already excluded.");
+      return;
+    }
+    setExcluded((curr) => [...curr, { name: parsed.name, tab: parsed.tab }]);
+    setExcludeSearch("");
+  }, [excludeSearch, candidates, forced, excluded]);
+
+  const removeExcludedManager = useCallback((index: number) => {
+    setExcluded((curr) => curr.filter((_, i) => i !== index));
+  }, []);
+
   const runOptimization = useCallback(async () => {
     if (!clientName) {
       setStatus({ text: "Select a portfolio first.", tone: "muted" });
@@ -158,6 +191,7 @@ export function OptimizerPanel({ clientName }: Props) {
       const res = await runClientOptimizer({
         client_name: clientName,
         forced_managers: forced,
+        excluded_managers: excluded,
       });
       peerGroupRef.current = res.peer_group || peerGroupRef.current;
       setPeerLabel(res.peer_group ? `peer: ${res.peer_group}` : "");
@@ -183,12 +217,14 @@ export function OptimizerPanel({ clientName }: Props) {
     } finally {
       setRunning(false);
     }
-  }, [clientName, forced]);
+  }, [clientName, forced, excluded]);
 
-  // Exclude any already-pinned. Show "Name [tab]" so peer-group is visible.
+  // Exclude any already-pinned or excluded. Show "Name [tab]" so peer-group is
+  // visible.
   const pinned = new Set(forced.map((f) => `${f.tab}::${f.name}`));
+  const barred = new Set(excluded.map((e) => `${e.tab}::${e.name}`));
   const datalistOptions = candidates.filter(
-    (c) => !pinned.has(`${c.tab}::${c.name}`),
+    (c) => !pinned.has(`${c.tab}::${c.name}`) && !barred.has(`${c.tab}::${c.name}`),
   );
 
   const managers = result?.optimized_managers ?? [];
@@ -392,6 +428,96 @@ export function OptimizerPanel({ clientName }: Props) {
               type="button"
               className="btn btn-outline btn-sm"
               onClick={addForcedManager}
+            >
+              Add
+            </button>
+          </div>
+        </div>
+
+        {/* Excluded managers — removed from the candidate set entirely. Mirror
+            image of forcing, but strategy-specific: siblings from the same firm
+            stay eligible. */}
+        <div style={{ marginBottom: 10 }}>
+          <div
+            style={{
+              fontFamily: "var(--mono)",
+              fontSize: 10,
+              color: "var(--text2)",
+              textTransform: "uppercase",
+              letterSpacing: ".05em",
+              marginBottom: 6,
+            }}
+          >
+            Excluded managers
+          </div>
+          <div style={{ marginBottom: 6 }}>
+            {!excluded.length ? (
+              <div
+                style={{
+                  fontFamily: "var(--mono)",
+                  fontSize: 10,
+                  color: "var(--text3)",
+                  fontStyle: "italic",
+                }}
+              >
+                None — all buy-list managers eligible
+              </div>
+            ) : (
+              excluded.map((e, i) => (
+                <div
+                  key={`${e.tab}::${e.name}`}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    padding: "3px 6px",
+                    background: "rgba(192,57,43,.07)",
+                    borderRadius: 3,
+                    marginBottom: 3,
+                    fontFamily: "var(--mono)",
+                    fontSize: 11,
+                  }}
+                >
+                  <span className="badge mono" style={{ fontSize: 9 }}>
+                    {e.tab}
+                  </span>
+                  <span
+                    style={{
+                      flex: 1,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {e.name}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn-ghost"
+                    style={{ color: "var(--text3)", padding: "0 4px" }}
+                    onClick={() => removeExcludedManager(i)}
+                    aria-label={`Stop excluding ${e.name}`}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            <input
+              type="text"
+              id="excluded-search"
+              placeholder="Search manager to exclude…"
+              list="opt-cand-list"
+              value={excludeSearch}
+              onChange={(e) => setExcludeSearch(e.target.value)}
+              style={{ ...inputStyle, flex: 1, minWidth: 140 }}
+            />
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              onClick={addExcludedManager}
             >
               Add
             </button>

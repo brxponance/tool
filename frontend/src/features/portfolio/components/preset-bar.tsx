@@ -17,8 +17,9 @@ import type {
 } from "../types";
 import { PresetSaveModal } from "./preset-save-modal";
 
-// The "Default" option represents the client's untouched base book (proposed ==
-// current). It is not a stored preset — selecting it reloads the base.
+// The "Saved portfolio (base)" option represents the client's saved base book —
+// i.e. whatever was last persisted with the SAVE button. It is NOT a stored
+// preset: selecting it reloads the saved base from the backend.
 const DEFAULT_ID = "default";
 
 type Props = {
@@ -147,13 +148,16 @@ export function PresetBar({ client, managers, onApplyPreset, onSelectDefault }: 
       <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)" }}>
         Preset:
       </span>
-      <div className="select-wrap">
+      <div
+        className="select-wrap"
+        title="The saved base book — whatever was last persisted with SAVE. Presets are separate named what-if scenarios layered on top of it."
+      >
         <select
           value={selected}
           disabled={!client || busy}
           onChange={(event) => void handleSelect(event.target.value)}
         >
-          <option value={DEFAULT_ID}>Default (base book)</option>
+          <option value={DEFAULT_ID}>Saved portfolio (base)</option>
           {presets.map((p) => (
             <option key={p.id} value={String(p.id)}>
               {p.name}

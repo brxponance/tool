@@ -528,9 +528,10 @@ def load_weights(filepath):
       Row N+3..: [manager name] [weight as fraction]
       Row N+k: blank separator before the next client block.
 
-    Returns a 2-tuple:
+    Returns a 3-tuple:
       - clients:    {client_name: {manager_name: weight}}
       - benchmarks: {client_name: benchmark_str or None}
+      - client_aum: {client_name: float or None}   # total assets managed
 
     The benchmark string is taken verbatim from the workbook and is
     intentionally NOT resolved here — downstream consumers (risk engine,
@@ -538,6 +539,10 @@ def load_weights(filepath):
     representation with their own fallbacks, so a non-standard name like
     'MSCI EAFE+CANADA' can still display as-is while risk math falls back
     to the closest peer group.
+
+    Client total AUM is read from the THIRD cell of the client-header row
+    ([client] [benchmark] [total AUM]); it is optional and may be absent in
+    older files.
     """
     wb = load_workbook(filepath, read_only=True)
     ws = wb.active
@@ -545,6 +550,7 @@ def load_weights(filepath):
     wb.close()
     clients = {}
     benchmarks = {}
+    client_aum = {}
     current_client = None
     in_data = False
     for row in rows:
@@ -575,13 +581,41 @@ def load_weights(filepath):
                 if b and b.lower() not in ('none', ''):
                     bench = b
             benchmarks[current_client] = bench
+            # Third cell, if present and numeric, is the client total AUM.
+            # Tolerate '$', commas, and a trailing B/M/K unit.
+            aum = None
+            if len(vals) >= 3:
+                aum = _parse_aum(vals[2])
+            client_aum[current_client] = aum
             in_data = False
         elif in_data and current_client and len(vals) >= 2:
             try:
                 clients[current_client][first] = float(vals[1])
             except:
                 pass
-    return clients, benchmarks
+    return clients, benchmarks, client_aum
+
+
+def _parse_aum(v):
+    """Parse a client-AUM cell into a float ($mm assumed), tolerating
+    '$', commas, and a trailing B/M/K unit. Returns None if not parseable."""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    import re as _re
+    s = str(v).strip().replace(',', '').replace('$', '')
+    if s == '' or s == '-':
+        return None
+    m = _re.match(r'^(-?\d+(?:\.\d+)?)\s*([bmk])?$', s, _re.I)
+    if m:
+        val = float(m.group(1))
+        mult = {'b': 1000.0, 'm': 1.0, 'k': 0.001}.get((m.group(2) or 'm').lower(), 1.0)
+        return val * mult
+    try:
+        return float(s)
+    except ValueError:
+        return None
 
 
 # Canonical benchmark labels offered in the client Add/Rename dropdown. These

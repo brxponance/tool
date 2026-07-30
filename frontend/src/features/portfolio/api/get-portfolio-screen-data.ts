@@ -6,6 +6,7 @@ import type {
   ContributionResponse,
   DiverseOwnershipResponse,
   IdealComplementResponse,
+  IdealFactorComplementResponse,
   MarketCycleResponse,
   PlaceholderBucketUpdateResponse,
   PortfolioExposuresMenuResponse,
@@ -15,6 +16,7 @@ import type {
   PortfolioPresetSummary,
   PortfolioResponse,
   PortfolioStats,
+  RedemptionResponse,
   RiskAnalysisResponse,
   RiskExposuresResponse,
   SleeveOptionsResponse,
@@ -255,6 +257,42 @@ export async function findIdealComplement(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ client_name: client, managers }),
+  });
+}
+
+// Best-fit FACTOR index (a style tilt, not a manager) for the proposed book.
+export async function findIdealFactorComplement(
+  client: string,
+  managers: PortfolioResponse["managers"],
+) {
+  return backendJson<IdealFactorComplementResponse>("ideal_factor_complement", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ client_name: client, managers }),
+  });
+}
+
+// Size a client redemption: per-manager dollar reductions that preserve
+// portfolio edge while holding 3-factor V-G near where it started.
+export async function optimizeRedemption(input: {
+  client: string;
+  clientAum: number | null;
+  redemptionAmount: number;
+  managers: PortfolioResponse["managers"];
+  include?: Array<{ name: string; tab?: string | null }>;
+  exclude?: Array<{ name: string; tab?: string | null }>;
+}) {
+  return backendJson<RedemptionResponse>("optimize_redemption", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      client_name: input.client,
+      client_aum: input.clientAum,
+      redemption_amount: input.redemptionAmount,
+      managers: input.managers,
+      include: input.include ?? [],
+      exclude: input.exclude ?? [],
+    }),
   });
 }
 

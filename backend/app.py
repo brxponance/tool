@@ -46,6 +46,10 @@ os.makedirs(os.path.dirname(app.config['CACHE_FILE']), exist_ok=True)
 state = {
     'clone_results': None, 'manager_dfs': None, 'weights': None,
     'client_benchmarks': {},
+    # {client_name: total AUM in raw dollars or None} — optional COLUMN C of
+    # each client-header row in the weights workbook. Drives the "Client Total
+    # AUM" banner, the per-manager AUM columns, and redemption sizing.
+    'client_aum': {},
     'risk_data': None,
     'universe_clone_results': None, 'universe_dfs': None,
     'exposures_data': None,
@@ -82,6 +86,7 @@ def save_cache():
                 'clone_results':           state['clone_results'],
                 'weights':                 state['weights'],
                 'client_benchmarks':       state['client_benchmarks'],
+                'client_aum':              state.get('client_aum') or {},
                 'risk_data':               state['risk_data'],
                 'universe_clone_results':  state['universe_clone_results'],
                 'exposures_data':          state['exposures_data'],
@@ -333,6 +338,7 @@ def load_cache():
         state['clone_results']          = data.get('clone_results')
         state['weights']                = data.get('weights')
         state['client_benchmarks']      = data.get('client_benchmarks') or {}
+        state['client_aum']             = data.get('client_aum') or {}
         state['risk_data']              = data.get('risk_data')
         state['clone_run_files']        = data.get('clone_run_files') or {}
         state['security_risk_data']     = data.get('security_risk_data')
@@ -725,7 +731,10 @@ def run():
                 print(f"Determinism diagnostic skipped: {e}")
             state['manager_dfs']   = load_manager_returns(state['files']['manager_returns'])
             if 'weights' in state['files']:
-                w, b = load_weights(state['files']['weights'])
+                w, b, caum = load_weights(state['files']['weights'])
+                # Client total AUM only ever comes from the workbook (there is
+                # no DB column for it), so set it on both branches.
+                state['client_aum'] = caum
                 # When the DB is authoritative, import the workbook into Postgres
                 # (preserving drafts) and reload state from the DB instead of
                 # letting Excel silently overwrite the DB-backed roster.
@@ -767,7 +776,8 @@ def reload_weights():
     if 'weights' not in state['files']:
         return jsonify({'status': 'error', 'message': 'No weights file uploaded yet'})
     try:
-        w, b = load_weights(state['files']['weights'])
+        w, b, caum = load_weights(state['files']['weights'])
+        state['client_aum'] = caum
         # DB authoritative → import workbook into Postgres (drafts preserved)
         # and reload from DB; otherwise fall back to the legacy in-memory set.
         if db_enabled():
@@ -776,7 +786,8 @@ def reload_weights():
             state['weights'], state['client_benchmarks'] = w, b
         save_cache()
         return jsonify({'status': 'ok', 'clients': list(state['weights'].keys()),
-                        'client_benchmarks': state['client_benchmarks']})
+                        'client_benchmarks': state['client_benchmarks'],
+                        'client_aum': state['client_aum']})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)})
 
@@ -798,7 +809,8 @@ def reload_inputs():
     # Weights
     if 'weights' in state['files'] and os.path.exists(state['files']['weights']):
         try:
-            w, b = load_weights(state['files']['weights'])
+            w, b, caum = load_weights(state['files']['weights'])
+            state['client_aum'] = caum
             if db_enabled():
                 sync_weights_to_state(w, b)   # import into DB, drafts preserved
             else:
@@ -1712,6 +1724,19 @@ def portfolio(client_name):
     # Surface the client's benchmark (as given in the weights file) so the
     # UI can label the risk/exposures tables with the right benchmark name.
     data['client_benchmark'] = (state.get('client_benchmarks') or {}).get(client_name)
+    # Client total AUM (from the weights file header row) and each sub-manager's
+    # AUM = weight × client total, for both current and proposed weights.
+    # Runs after the DB proposed-weight overlay above so aum_proposed reflects
+    # any saved draft. Absent in older weights files → stays None and the UI
+    # renders em-dashes.
+    caum = (state.get('client_aum') or {}).get(client_name)
+    data['client_aum'] = caum
+    if caum is not None:
+        for m in data.get('managers', []):
+            cw = m.get('current_weight')  or 0
+            pw = m.get('proposed_weight') or 0
+            m['aum_current']  = caum * cw
+            m['aum_proposed'] = caum * pw
     return jsonify(data)
 
 
@@ -2695,6 +2720,81 @@ def compute_risk_exposures():
 
 
 # ── Risk analysis endpoint (Scenario / Marginal Contribution / Regime) ────
+# Universe returns feed the manager-struggle scenario only. They are NOT
+# persisted in the cache pickle (only universe_clone_results are), so after a
+# restart they must be re-read from the source workbooks. That read is slow —
+# the consolidated file is ~21MB of xlsx and takes ~30s — so it happens on a
+# background thread and NEVER on the request path. Blocking /risk_analysis on it
+# would stall the Scenario / Marginal-Contribution / Regime panels too, and long
+# enough to trip the frontend proxy.
+_universe_load_started = False
+_universe_load_lock = threading.Lock()
+
+
+def _load_universe_dfs_now():
+    """Read the ACTUAL universe returns from the staged source files into
+    state['universe_dfs']. Runs on a worker thread; see _warm_universe_dfs.
+
+    Paths go through resolve_path so a fresh cloud task pulls the workbook down
+    from S3 first — without that the files never exist locally and the
+    manager-struggle scenario would silently stay empty in production.
+    """
+    uni_map = (state.get('files') or {}).get('universe_returns')
+    if not isinstance(uni_map, dict) or not uni_map:
+        return
+    from data_loader import load_universe_returns, load_universe_returns_consolidated
+
+    def _local(p):
+        if not p:
+            return None
+        try:
+            r = resolve_path(p, app.config['UPLOAD_FOLDER'], suffix='.xlsx')
+        except Exception:
+            r = p
+        return r if r and os.path.exists(r) else None
+
+    dfs = {}
+    cons = _local(uni_map.get('__all__'))
+    if cons:
+        try:
+            dfs.update(load_universe_returns_consolidated(cons) or {})
+        except Exception as e:  # noqa: BLE001
+            print(f"[universe] consolidated load failed: {e}", flush=True)
+    for peer_tab, p in uni_map.items():
+        if peer_tab == '__all__':
+            continue
+        lp = _local(p)
+        if not lp:
+            continue
+        try:
+            dfs.update(load_universe_returns(lp, peer_tab) or {})
+        except Exception as e:  # noqa: BLE001
+            print(f"[universe] {peer_tab} load failed: {e}", flush=True)
+    if dfs:
+        state['universe_dfs'] = dfs
+        print(f"[universe] returns loaded for struggle analysis: {sorted(dfs)}", flush=True)
+
+
+def _warm_universe_dfs():
+    """Kick off the universe-returns load in the background, at most once.
+
+    Returns immediately. Callers get whatever is in state['universe_dfs'] at the
+    time — None on the first request(s) after a restart, which simply renders the
+    manager-struggle panel's "load universe returns" placeholder until the read
+    finishes. The next /risk_analysis call (any weight edit refires it) picks the
+    data up.
+    """
+    global _universe_load_started
+    if state.get('universe_dfs'):
+        return
+    with _universe_load_lock:
+        if _universe_load_started:
+            return
+        _universe_load_started = True
+    threading.Thread(target=_load_universe_dfs_now, daemon=True,
+                     name='universe-returns-warm').start()
+
+
 @app.route('/risk_analysis', methods=['POST'])
 def risk_analysis():
     """
@@ -2714,6 +2814,11 @@ def risk_analysis():
         if 'factor_returns' not in state['files']:
             return jsonify({'error': 'Factor returns file missing.'})
         state['factor_df'] = load_factor_returns(state['files']['factor_returns'])
+
+    # Kick off the universe-returns load for the manager-struggle scenario. Non-
+    # blocking by design — see _warm_universe_dfs. Struggle stays null until the
+    # background read completes; every other block in this response is unaffected.
+    _warm_universe_dfs()
 
     payload = request.get_json(silent=True) or {}
     managers = payload.get('managers', [])
@@ -2746,6 +2851,7 @@ def risk_analysis():
         result = compute_risk_analysis(
             clean, state['clone_results'], state['factor_df'],
             client_name=client_name, peer_benchmark=peer_benchmark,
+            universe_dfs=state.get('universe_dfs'),
         )
     except Exception as e:
         import traceback
@@ -2924,6 +3030,185 @@ def ideal_complement():
         'eligible_tabs': sorted(eligible_tabs),
         'peer_benchmark': peer_benchmark,
         'benchmark_name': (PEER_BENCHMARKS.get(peer_benchmark) or {}).get('core'),
+    })
+
+
+@app.route('/ideal_factor_complement', methods=['POST'])
+def ideal_factor_complement():
+    """
+    Find the FACTOR INDEX (not manager) whose returns best offset the *proposed*
+    portfolio's underperformance — the style/factor tilt the portfolio is missing.
+
+    Mirrors /ideal_complement, with three differences:
+      1. Backtest floor: use the full available manager history but at least a
+         trailing 5 years (60 months). Managers with short live track records are
+         backfilled with their clone returns (betas x factor returns) so every
+         manager contributes across the whole window.
+      2. Candidates are factor-index columns of state['factor_df'], restricted to
+         the benchmark's universe (FACTOR_CATEGORIES[<tab>_full]) and to genuine
+         style/factor sleeves (excludes broad-market cores and country/regional
+         sleeves, which are bucketed 'Core' — that also drops the portfolio's own
+         benchmark).
+      3. Ranking is identical: hit_rate desc (most consistent), tiebreak avg_excess.
+    """
+    import numpy as np
+    import pandas as pd
+    from risk_engine import (
+        build_return_matrix, extend_with_beta_replication,
+        build_benchmark_series, portfolio_return_series,
+        PEER_BENCHMARKS, CLIENT_BENCHMARK_OVERRIDE,
+    )
+    from data_loader import load_factor_returns, resolve_peer_group
+    from clone_engine import FACTOR_CATEGORIES, STYLE_BUCKET_MAP
+
+    # resolve_peer_group can return EAFE_SC / ACWI_xUS, which are not keys in
+    # FACTOR_CATEGORIES — map them onto the buy-list/factor tabs (same as the
+    # optimizer endpoint's BENCH_TO_BUYLIST).
+    FACTOR_TAB_MAP = {'EAFE_SC': 'ISC', 'ACWI_xUS': 'EAFE'}
+    # Style/factor sleeves only — everything else ('Core': broad-market + country/
+    # regional sleeves, incl. the portfolio's own benchmark) is excluded.
+    FACTOR_BUCKETS = {'Growth', 'Value', 'Yield', 'Quality', 'Dynamic',
+                      'Defensive', 'Low Vol', 'Momentum', 'Small Cap'}
+    MIN_MONTHS = 60   # 5-year backtest floor
+    MIN_OVERLAP = 12
+
+    if not state['clone_results']:
+        return jsonify({'error': 'Run the clone engine first.'})
+    if state.get('factor_df') is None:
+        if 'factor_returns' not in state['files']:
+            return jsonify({'error': 'Factor returns file missing.'})
+        state['factor_df'] = load_factor_returns(state['files']['factor_returns'])
+    factor_df = state['factor_df']
+
+    payload = request.get_json(silent=True) or {}
+    managers = payload.get('managers', [])
+    client_name = payload.get('client_name')
+    if not managers:
+        return jsonify({'error': 'No managers provided.'})
+
+    # ── 1. Held managers + eligible peer groups (proposed_weight > 0) ─────
+    proposed_managers = []
+    for m in managers:
+        nm  = m.get('matched_name') or m.get('name', '')
+        tab = m.get('tab')
+        pw  = float(m.get('proposed_weight', 0) or 0)
+        if nm and pw > 0 and tab:
+            proposed_managers.append({'matched_name': nm, 'tab': tab, 'proposed_weight': pw})
+    if not proposed_managers:
+        return jsonify({'error': 'No managers with proposed weight > 0.'})
+
+    # ── 2. Resolve client benchmark peer group (same as /ideal_complement) ─
+    peer_benchmark = None
+    if client_name:
+        bench_str = (state.get('client_benchmarks') or {}).get(client_name)
+        peer_benchmark = resolve_peer_group(bench_str)
+    if not peer_benchmark and client_name in CLIENT_BENCHMARK_OVERRIDE:
+        peer_benchmark = CLIENT_BENCHMARK_OVERRIDE[client_name]
+    if not peer_benchmark:
+        tab_weights = {}
+        for pm in proposed_managers:
+            tab_weights[pm['tab']] = tab_weights.get(pm['tab'], 0) + pm['proposed_weight']
+        peer_benchmark = max(tab_weights, key=tab_weights.get)
+
+    # ── 3. Backtest with a 5-year floor + clone backfill ──────────────────
+    ret_mtx = build_return_matrix(proposed_managers, state['clone_results'])
+    if ret_mtx.empty:
+        return jsonify({'error': 'No return data for proposed managers.'})
+
+    most_recent  = ret_mtx.index.max()
+    earliest_mgr = ret_mtx.index.min()
+    fmonths = factor_df.index[factor_df.index <= most_recent].sort_values(ascending=False)
+    if len(fmonths) < MIN_MONTHS:
+        return jsonify({'error': f'Only {len(fmonths)} months of factor history available; '
+                                 f'need at least {MIN_MONTHS} (5 years).'})
+    # Window = full available manager history, extended back to at least 60 months.
+    recent_floor_start = fmonths[MIN_MONTHS - 1]
+    window_start = min(earliest_mgr, recent_floor_start)
+    target_index = factor_df.index[(factor_df.index >= window_start) &
+                                   (factor_df.index <= most_recent)]
+    if len(target_index) < MIN_MONTHS:
+        return jsonify({'error': f'Backtest window is only {len(target_index)} months; '
+                                 f'need at least {MIN_MONTHS} (5 years).'})
+    # Reindex to the window and backfill short-track managers with clone returns.
+    ret_mtx = ret_mtx.reindex(target_index)
+    ret_mtx = extend_with_beta_replication(ret_mtx, proposed_managers,
+                                           state['clone_results'], factor_df)
+
+    bench_df = build_benchmark_series(peer_benchmark, factor_df, ret_mtx.index)
+    if bench_df is None or 'core' not in bench_df.columns:
+        return jsonify({'error': f'Benchmark series unavailable for peer group {peer_benchmark}.'})
+    bench_core = bench_df['core'].dropna()
+
+    basis = str(payload.get('basis') or '').strip().lower()
+    if basis == 'actual':
+        # The 'actual' basis measures underperformance against the client's real
+        # track record (the 'Client' sheet of the returns workbook). That loader
+        # is not ported yet — fail loudly rather than silently substituting the
+        # backtested basis, which would look identical but mean something else.
+        return jsonify({'error': "The 'actual' basis needs the client track-record "
+                                 "loader, which is not available in this build. "
+                                 "Use the backtested basis."})
+    weights_dict = {pm['matched_name']: pm['proposed_weight'] for pm in proposed_managers}
+    port_rets = portfolio_return_series(ret_mtx, weights_dict)
+    excess    = (port_rets - bench_core).dropna()
+    under_idx = excess[excess < 0].index
+    if len(under_idx) < MIN_OVERLAP:
+        return jsonify({
+            'error': f'Proposed portfolio only has {len(under_idx)} underperformance month(s). '
+                     f'Need at least {MIN_OVERLAP} to compute a meaningful complement.',
+            'n_underperform_months': int(len(under_idx)),
+        })
+
+    # ── 4. Candidate factor indices (universe-restricted, factor sleeves) ──
+    factor_tab = FACTOR_TAB_MAP.get(peer_benchmark, peer_benchmark)
+    names = FACTOR_CATEGORIES.get(f'{factor_tab}_full', [])
+
+    def _norm(s):
+        return str(s or '').strip().lower().replace('�', '')
+    col_lookup = {_norm(c): c for c in factor_df.columns}
+
+    candidates = []
+    seen = set()
+    for name in names:
+        if name in seen:
+            continue
+        seen.add(name)
+        if STYLE_BUCKET_MAP.get(name) not in FACTOR_BUCKETS:
+            continue
+        col = name if name in factor_df.columns else col_lookup.get(_norm(name))
+        if col is None:
+            continue
+        series = factor_df[col].dropna()
+        fac_on = series.reindex(under_idx).dropna()
+        bench_on = bench_core.reindex(fac_on.index).dropna()
+        common = fac_on.index.intersection(bench_on.index)
+        if len(common) < MIN_OVERLAP:
+            continue
+        diff = fac_on.loc[common] - bench_on.loc[common]
+        candidates.append({
+            'name': name,
+            'category': STYLE_BUCKET_MAP.get(name),
+            'hit_rate': float((diff > 0).sum()) / float(len(diff)),
+            'avg_excess': float(diff.mean()),
+            'n_months': int(len(diff)),
+        })
+
+    if not candidates:
+        return jsonify({
+            'error': f'No factor indices in the {factor_tab} universe with at least '
+                     f'{MIN_OVERLAP} overlapping underperformance months.',
+            'n_underperform_months': int(len(under_idx)),
+            'peer_benchmark': peer_benchmark,
+        })
+
+    candidates.sort(key=lambda c: (-c['hit_rate'], -c['avg_excess']))
+    return jsonify({
+        'best': candidates[0],
+        'n_underperform_months': int(len(under_idx)),
+        'n_candidates_considered': len(candidates),
+        'peer_benchmark': peer_benchmark,
+        'benchmark_name': (PEER_BENCHMARKS.get(peer_benchmark) or {}).get('core'),
+        'window_months': int(len(target_index)),
     })
 
 
@@ -3791,6 +4076,7 @@ def optimize_portfolio_endpoint():
     client_name = payload.get('client_name')
     peer_group  = payload.get('peer_group')
     forced      = payload.get('forced_managers') or []
+    excluded    = payload.get('excluded_managers') or []
 
     # ── Resolve peer group from client benchmark if not provided ─────────
     if not peer_group and client_name:
@@ -3841,6 +4127,7 @@ def optimize_portfolio_endpoint():
         forced_managers=forced,
         clone_results=state['clone_results'],
         norm_skill_by_tab=state.get('norm_skill_by_tab') or {},
+        excluded_managers=excluded,
         min_weight=_f('min_weight', 0.05),
         max_weight=_f('max_weight', 0.20),
         min_managers=_i('min_managers', 4),
@@ -3851,6 +4138,50 @@ def optimize_portfolio_endpoint():
 
     # Surface the peer group used (in case it was resolved server-side)
     result['peer_group'] = peer_group
+    return jsonify(result)
+
+
+@app.route('/optimize_redemption', methods=['POST'])
+def optimize_redemption_endpoint():
+    """Size a client redemption by choosing per-manager dollar reductions that
+    preserve portfolio edge while holding 3-factor V-G within ±1% of the
+    original portfolio (and inside the ±7% cap).
+
+    Request JSON:
+      {
+        "client_name": "Client 1",         # informational / AUM fallback
+        "client_aum": 2500000000,          # client total AUM (UI dollar scale)
+        "redemption_amount": 50000000,     # dollars to pull
+        "managers": [                      # the loaded portfolio (enriched)
+          {"matched_name": "...", "tab": "EAFE",
+           "current_weight": 0.15, "vg_3factor": 0.03, "ns_z": 0.4},
+          ...
+        ],
+        "include": [{"name": "...", "tab": "EAFE"}, ...],   # optional scope
+        "exclude": [{"name": "...", "tab": "EAFE"}, ...]    # optional
+      }
+
+    Managers are supplied in the body (already carrying ns_z / vg_3factor from
+    the /portfolio route) — same pattern as /compute_portfolio_stats.
+    """
+    from portfolio_optimizer import optimize_redemption
+
+    payload = request.get_json(silent=True) or {}
+    managers = payload.get('managers') or []
+
+    # Fall back to the server's cached client AUM when the client didn't send one.
+    client_aum = payload.get('client_aum')
+    if client_aum in (None, '', 0):
+        client_name = payload.get('client_name')
+        client_aum = (state.get('client_aum') or {}).get(client_name)
+
+    result = optimize_redemption(
+        managers=managers,
+        client_aum=client_aum,
+        redemption_amount=payload.get('redemption_amount'),
+        include_managers=payload.get('include') or [],
+        exclude_managers=payload.get('exclude') or [],
+    )
     return jsonify(result)
 
 
@@ -4124,6 +4455,14 @@ def _auto_run_universe_on_startup():
 # Fire the auto-run at import time so it happens under both `python run.py`
 # (which does `from app import app`) and `python app.py`.
 _auto_run_universe_on_startup()
+
+# Warm the universe RETURNS in the background too. Distinct from the auto-run
+# above: that computes universe *clones* (and is skipped when results are
+# cached), whereas the raw return matrices are never cached and are what the
+# manager-struggle scenario reads. Warming here means the panel is usually
+# populated by the time anyone opens a portfolio, instead of missing on the
+# first /risk_analysis after every restart.
+_warm_universe_dfs()
 
 
 if __name__ == '__main__':

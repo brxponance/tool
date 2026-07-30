@@ -262,6 +262,17 @@ setup notes.
 ## 13. Known limitations / TODO
 
 - ✅ **Stable URL** — DONE 2026-07-20 via the ALB (see §14). No more changing IP.
+- ✅ **`portfolio_presets` table** — DONE. Model shipped without a migration →
+  `/presets` 500'd. Added migration `f2a9c7e51b30_create_portfolio_presets.py`;
+  startup `alembic upgrade head` creates it.
+- ✅ **Periodic 503 / restart loop** — DONE. Root cause was CPU (0.5 vCPU spiking
+  to 100% → health-check timeout → task killed), NOT memory (~48%). Fixed by
+  relaxing the health check + grace period + checking the backend, not just the
+  frontend. See §14 "Stability tuning."
+- ✅ **File-round-trip fix (`s3_storage.py`)** — committed + pushed (`c915e06`) +
+  deployed. Remaining is the one-time **cache re-plant + verify** (see §15).
+  Without this fix, factor-dependent views ("Factor returns file missing", Market
+  Cycle 502) re-broke after every restart.
 - **No HTTPS yet** — the ALB is HTTP:80 only. Can't issue a cert without a domain.
   Plan: put **CloudFront** in front of the ALB (free `*.cloudfront.net` cert, no
   domain needed) for `https://…`, OR register/point a domain and add a 443
@@ -271,11 +282,17 @@ setup notes.
   task SG**: replace the `3000 from 0.0.0.0/0` rule with `3000 from
   pc-tool-loadbalancer-firewall` only, so nobody can bypass the login by hitting
   the task's raw IP directly.
-- **Single task** — a redeploy causes a ~1-minute blip. Fine for internal use.
+- **Single task** — a redeploy causes a ~1-minute blip. Intentional: the app keeps
+  state in memory per task, so running 2 tasks would make them diverge (an upload
+  on one wouldn't show on the other). Keep it at 1.
+- **Small task (0.5 vCPU / 1 GiB)** — clones are slow and peg CPU. Memory is fine.
+  Bump CPU only if server-side recompute becomes routine (Fargate forces more
+  memory + cost when you raise CPU).
 - **Sandbox account** — EC2 (`ec2:RunInstances`) and IAM inline policies
   (`iam:PutRolePolicy`) are DENIED here; that's why the app uses Fargate and
   attach-managed-policy (not inline). Keep this in mind if extending.
-- **Clone cache is derived data** — safe to lose; rebuilds from uploaded files.
+- **Clone cache is derived data** — safe to lose; rebuilds from uploaded files
+  (but the rebuild — the universe clone — is slow; see §15).
 
 ---
 
@@ -292,8 +309,10 @@ account has no IaC; the deploy workflow only builds/pushes images).
   `gire-vpc`. Listener **HTTP:80** → forwards to the target group.
   DNS: `pc-tool-alb-149658130.us-east-1.elb.amazonaws.com`.
 - **Target group** `pc-tool-target-group` — **target type IP** (required for
-  Fargate), protocol **HTTP:3000**, health check path **`/api/health`**, success
-  codes **200**. No targets registered manually — ECS registers the task IP.
+  Fargate), protocol **HTTP:3000**. Health check (current, tuned — see "Stability
+  tuning" below): path **`/api/backend/status`**, success codes **200**, timeout
+  **15s**, unhealthy threshold **5**, healthy **5**, interval **30s**. No targets
+  registered manually — ECS registers the task IP.
 
 **Wiring:** updated the ECS service `pc-tool` (Update service → Load balancing) to
 attach `pc-tool-alb`, container **frontend:3000**, listener **HTTP:80**, target
@@ -304,20 +323,103 @@ running task into the target group.
 reach the task with no extra rule. (See §13 — tighten this to ALB-only when auth
 is added.)
 
-### Health check gotcha (important)
-The frontend root `/` **redirects (307) to `/setup`** (`frontend/src/app/page.tsx`),
-so a health check on `/` with a 200-only matcher **never** goes healthy → tasks
-loop unhealthy → `wait services-stable` times out in CI. Fix: added a dedicated
-liveness route **`frontend/src/app/api/health/route.ts`** returning
-`{status:"ok"}` 200, and pointed the target group health check at **`/api/health`**.
-Don't point the ALB health check at `/`.
+### Health check evolution (important — read this before touching the health check)
+The health check path changed twice; here's the full story so nobody reverts it:
+1. **`/` (original)** — WRONG. The frontend root **307-redirects to `/setup`**
+   (`frontend/src/app/page.tsx`); a 200-only check never goes healthy → tasks loop
+   → `wait services-stable` times out in CI. Never point the check at `/`.
+2. **`/api/health`** — added route `frontend/src/app/api/health/route.ts` (returns
+   `{status:"ok"}` 200). Fixed the redirect problem, BUT only proves the *frontend*
+   is up. The frontend boots in ~2s → ALB routes traffic → but the *backend* is
+   still loading the 59 MB cache (~15-30s) → **first-load 503 on `/api/backend/*`**
+   ("fetch failed", reload works).
+3. **`/api/backend/status` (current, correct)** — the check goes ALB → frontend →
+   proxy → backend `/status`, so the target only goes healthy when the WHOLE chain
+   (incl. backend) is ready. Confirmed by `GET /status … "ELB-HealthChecker/2.0"`
+   in the backend logs. This is the one to keep.
+
+### Stability tuning (fixes the periodic 503 / restart loop)
+Symptom: the single task got killed & replaced every few minutes. Cause: **CPU**
+(0.5 vCPU spikes to 100% during clones/heavy requests → can't answer the health
+ping in time → ECS kills it). NOT memory (~48% of 1 GiB). Applied on
+`pc-tool-target-group` + the service:
+- Health-check **Timeout 15s**, **Unhealthy threshold 5** (≈2.5 min of failures
+  before a kill) — EC2 → Target Groups → Health checks → Edit → Advanced.
+- ECS service **Health check grace period 180s** (Update service) — protects a
+  booting task while the backend loads the cache.
+- Health-check **path `/api/backend/status`** (per above).
 
 ### To rebuild the ALB from scratch (order)
 1. Create SG `pc-tool-loadbalancer-firewall` (inbound 80 from 0.0.0.0/0) in `gire-vpc`.
-2. Create target group `pc-tool-target-group`: type IP, HTTP:3000, health `/api/health`, codes 200, VPC `gire-vpc`, no targets.
+2. Create target group `pc-tool-target-group`: type IP, HTTP:3000, health **`/api/backend/status`**, codes 200, timeout 15, unhealthy 5, VPC `gire-vpc`, no targets.
 3. Create ALB `pc-tool-alb`: internet-facing, IPv4, 2 public subnets, SG = pc-tool-loadbalancer-firewall, listener HTTP:80 → forward to pc-tool-target-group.
-4. ECS → service `pc-tool` → Update service → Load balancing → attach ALB, container frontend:3000, listener HTTP:80, existing target group. Update (rolling redeploy).
+4. ECS → service `pc-tool` → Update service → Load balancing → attach ALB, container frontend:3000, listener HTTP:80, existing target group. Set **Health check grace period 180**. Update (rolling redeploy).
 5. Confirm the target goes **healthy** in the target group's Targets tab, then hit the ALB DNS name.
+
+---
+
+## 15. Data, files & the analytical cache (READ if data looks wrong/missing)
+
+This is the most confusing part of the deployment. Two separate things live in
+two separate places:
+
+| Thing | Where it lives | Survives restart? |
+|---|---|---|
+| **Computed results** (clone numbers, style, contribution, universe results) + **file references** | pickle at `s3://pc-tool-uploads/state/results.pkl` | ✅ (pulled from S3 on boot) |
+| **Raw input `.xlsx` files** (manager/factor returns, weights, risk, exposures, universe) | `s3://pc-tool-uploads/uploads/` | ✅ in S3; the container's local `uploads/` disk is ephemeral and re-fetched on demand |
+
+**Key facts:**
+- The pickle does **NOT** contain the `.xlsx` files — only the numbers computed
+  from them plus pointers (basenames) to where they are.
+- **S3 is the source of truth.** Uploading via the Setup tab writes the file to
+  `uploads/<realname>` in S3 and stores that key in the cache. Every restart pulls
+  the latest from S3 — new uploads always win.
+- **Cached-results views** (Portfolio Contribution, Style, Exposures) work from the
+  pickle alone. **Recompute views** (Marginal Contribution to Risk, Scenario
+  Analysis, Market Cycle) re-read the raw **factor-returns** file, so that file
+  must be resolvable from S3, or you get **"Factor returns file missing"** / a
+  Market Cycle **502**.
+
+### The 7 files the current cache references (all present in S3 `uploads/`)
+```
+manager_returns   XPO_Buy_List_Mgr_Rts_Q1_26_TOOL.xlsx
+factor_returns    Equity_factor_returns_-03-2026.xlsx     ← recompute views need this
+weights           Manager_Weights_3_31.xlsx
+risk_summary      Benchmark_Risk_Summaries.xlsx
+security_risk     Factset_Risk_3_31.xlsx
+exposures         Factset_Group_Exposures_3_31.xlsx
+universe_returns  universe_consolidated_universe_consolidated_Universe_Returns.xlsx
+```
+
+### The file-round-trip bug + fix (`s3_storage.py`)
+`resolve_path` used to download S3 files to a **random temp name** (`tmpXXXX.xlsx`).
+That temp path got stored in `state['files']` and re-pickled, so the next restart
+asked S3 for `uploads/tmpXXXX.xlsx` (doesn't exist) → "missing" — even though the
+file is in S3 under its real name. **Fix (2026-07-20):** `resolve_path` now
+downloads to `uploads/<real-basename>`, so references round-trip across restarts.
+
+### Recovery runbook — factor-dependent views broken / cache looks wrong
+Do this if you see "Factor returns file missing", Market Cycle 502, or the wrong
+Total/peer-group counts on Setup:
+1. **Deploy the `s3_storage.py` fix** (push to `main`, let it deploy ~5-8 min).
+   Without it, steps below re-break on the next restart.
+2. **Close all browser tabs open to the app** (an open tab polls the backend,
+   which keeps re-saving the cache to S3 and overwrites what you plant).
+3. **Re-plant the clean cache:** S3 → `pc-tool-uploads` → `state/` → Upload the
+   known-good `backend/cache/results.pkl` (real filenames) → overwrite.
+4. **Force a restart:** ECS → `pc-tool` → Update service → Force new deployment.
+5. **Verify** in the newest `backend/…` log stream:
+   - `Cache loaded — N managers.` with an **empty** `dropped unresolved paths` list.
+   - `[s3] downloaded s3://…/uploads/Equity_factor_returns_-03-2026.xlsx → …/uploads/…`
+6. Alternative to steps 3–4: re-upload the specific file(s) via the **Setup tab**
+   (writes real S3 keys into the cache). May trigger a universe reclone (slow but
+   stable now).
+
+### Why the universe clone is slow (and why we cache it)
+The universe clone runs the clone math for **1,634 managers** (ACWI) — minutes of
+CPU. Results are cached in the pickle; a fresh task pulls the cache and skips the
+clone. If the cache lacks universe results, `_auto_run_universe_on_startup` re-runs
+it. To avoid that on the server, keep a computed `results.pkl` in `state/`.
 
 
 #tool-url

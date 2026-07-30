@@ -166,10 +166,86 @@ matcher hack): added a dedicated liveness route
 at **`/api/health`** (success codes 200). Rule of thumb: never point an ALB health
 check at a route that redirects.
 
+### 5. Missing DB table — `portfolio_presets` (500s on /presets)
+`GET /clients/<name>/presets` 500'd: `UndefinedTable: relation "portfolio_presets"
+does not exist`. The `PortfolioPreset` model (db/models.py) shipped without a
+migration, so `alembic upgrade head` never created the table. Fix: added
+migration **`migrations/versions/f2a9c7e51b30_create_portfolio_presets.py`**
+(chained onto head `0a25e34ff6b9`). Committed + pushed; the deploy's startup
+`alembic upgrade head` created the table. Presets 500s resolved.
+
+### 6. Periodic 503 / task restart loop — root cause = CPU, not memory
+The single task kept getting killed and replaced every few minutes → users saw
+"fetch failed" / 503, especially on first load after a restart. Diagnosed via ECS
+metrics: **memory fine (~48% of 1 GiB — NOT OOM); CPU is 0.5 vCPU and spikes to
+100%** during heavy work. When CPU is pegged the app can't answer the ALB health
+ping within 5s → target marked unhealthy → ECS kills the task. Fixes (all console,
+on `pc-tool-target-group` + the service):
+  - Health-check **Timeout 5→15s**, **Unhealthy threshold 2→5** (≈2.5 min of
+    failures before a kill).
+  - ECS service **Health check grace period 0→180s** (don't kill a booting task
+    while the backend loads the 59 MB cache).
+  - Health-check **path `/api/health` → `/api/backend/status`** (supersedes §4).
+    `/api/health` only proved the *frontend* was up; the frontend boots in ~2s and
+    the ALB then routed traffic while the *backend* was still loading the cache →
+    first-load 503 on `/api/backend/*`. Pointing the check at `/api/backend/status`
+    (ALB → frontend → proxy → backend `/status`) makes the target go healthy only
+    when the whole chain is ready. Confirmed in backend logs: `GET /status …
+    "ELB-HealthChecker/2.0"` now appears. Task is stable (no more restart loop).
+  - Not memory: left task size at 0.5 vCPU / 1 GiB. Optional future: bump CPU for
+    faster clones (Fargate forces more memory + cost).
+
+### 7. Universe-clone restart loop → planted a precomputed cache in S3
+On a fresh task with no cached universe results, the startup auto-run
+(`_auto_run_universe_on_startup`) re-cloned the ACWI universe (**1,634 managers**)
+— minutes of CPU that pegged the box and (pre-§6) got the task killed before it
+finished → never saved → next task re-cloned → loop. Broke the loop by uploading
+the already-computed **local `backend/cache/results.pkl` to
+`s3://pc-tool-uploads/state/results.pkl`**, so a fresh task pulls it, sees
+`universe_clone_results` populated, and skips the clone. Loads in seconds.
+
+### 8. "Factor returns file missing" / Market Cycle 502 — the file-round-trip bug
+After planting the cache, factor-dependent views (Marginal Contribution to Risk,
+Scenario Analysis, Market Cycle) errored with **"Factor returns file missing."**
+Root cause (real code bug): the pickle stores computed *results* + file
+*references*, NOT the raw `.xlsx` files — those live in S3 `uploads/`. On boot the
+cache-load resolves each reference from S3… but `s3_storage.resolve_path`
+downloaded to a **random temp name** (`tmpXXXX.xlsx`), and that temp path got
+written into `state['files']` and **re-pickled**. On the next restart the cache
+asked S3 for `uploads/tmpXXXX.xlsx` — which doesn't exist (the file is in S3 under
+its *real* name) → "missing." So it re-broke after every restart even though all
+7 input files ARE in S3. **Fix:** `resolve_path` now downloads to
+`uploads/<real-basename>` (stable name), so the reference round-trips across
+restarts. Verified all 7 files the cache references exist in S3 under their real
+names (factor returns = `Equity_factor_returns_-03-2026.xlsx`).
+  - **Deploy procedure for this fix** (order matters — see DEPLOYMENT.md §15):
+    (A) push the `s3_storage.py` fix and let it deploy; (B) with the app closed in
+    the browser, re-upload the clean local `results.pkl` to `state/`; (C) force a
+    restart; (D) confirm the startup log shows `Cache loaded — N managers.` with an
+    EMPTY `dropped unresolved paths` and `[s3] downloaded …/uploads/Equity_factor_
+    returns_-03-2026.xlsx → …/uploads/…`.
+  - Status: fix **committed + pushed** (`c915e06` → origin/main) and deployed.
+    Remaining: re-plant the clean `results.pkl` in `state/` + verify (§15 runbook).
+
+### Key mental model (so the next person isn't confused)
+- **The pickle (`state/results.pkl`) = computed results + pointers to files.** It
+  does NOT contain the `.xlsx` files themselves.
+- **The `.xlsx` input files live in `s3://pc-tool-uploads/uploads/`.** The container
+  disk is ephemeral; files are pulled from S3 on demand by basename.
+- **S3 is the source of truth.** Uploading via the Setup tab writes to S3 under the
+  real filename; every restart pulls the latest from S3. New uploads always win.
+- Cached-results views (contribution, style, exposures) work from the pickle alone;
+  recompute views (marginal contribution, scenario, market cycle) re-read the raw
+  factor-returns file, so that file must be resolvable from S3.
+
 ### Still open (follow-ups, see DEPLOYMENT.md §13)
+- **s3_storage real-basename fix** — pushed (`c915e06`) + deployed; remaining is the
+  one-time cache re-plant + verify (§8 / §15).
 - **HTTPS** — ALB is HTTP-only (no domain → no cert). Plan: CloudFront in front
   (free `*.cloudfront.net` cert) or a real domain + ACM cert on a 443 listener.
 - **Auth** — app is wide open. Plan: Cognito auth action on the ALB listener, and
   then tighten the task SG (`3000 from 0.0.0.0/0` → `3000 from
   pc-tool-loadbalancer-firewall` only) so the login can't be bypassed via the raw
   task IP.
+- **Optional CPU bump** — 0.5 vCPU makes clones slow; raise if server-side recompute
+  becomes routine.

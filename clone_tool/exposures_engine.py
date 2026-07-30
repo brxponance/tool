@@ -25,7 +25,13 @@ import pandas as pd
 from rapidfuzz import fuzz, process
 
 # ── Column definitions ─────────────────────────────────────────────────────
-CATEGORICAL_COLS = {'MSCI Region', 'MSCI Country', 'GICS Sector', 'GICS Industry'}
+CATEGORICAL_COLS = {'MSCI Region', 'MSCI Country', 'Region', 'Country',
+                    'GICS Sector', 'GICS Industry',
+                    # Developed/Emerging/Other split. The FactSet file has no such
+                    # column, so 'Market Development' is DERIVED per security from
+                    # its country at parse time (see parse_exposures_file), reusing
+                    # the risk table's country classification.
+                    'Market Development'}
 
 CONTINUOUS_COLS = [
     'Market Capitalization',
@@ -64,6 +70,9 @@ DISPLAY_LABELS = {
     'MSCI Country':                              'MSCI Country',
     'GICS Sector':                               'Sector',
     'GICS Industry':                             'Industry',
+    'Region':                                    'Region',
+    'Country':                                   'Country',
+    'Market Development':                        'Market Development',
 }
 
 # Groups for the selector UI (matches FactSet's row 6)
@@ -129,6 +138,7 @@ def parse_exposures_file(path):
     added above the grid, pushing the header from row 7 to row 8).
     """
     import openpyxl
+    from security_risk_engine import classify_market_development as _classify_market_development
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     ws = wb['Contribution']
     all_rows = list(ws.iter_rows(values_only=True))
@@ -177,6 +187,12 @@ def parse_exposures_file(path):
                 if col is None or col in ('Port. Ending Weight',):
                     continue
                 record[col] = row[i] if col in CATEGORICAL_COLS else _safe_float(row[i])
+            # 'Market Development' isn't a column in the FactSet file — derive it
+            # from the security's country using the risk table's classification
+            # (Developed/Emerging/Other) so it can be grouped on like any other
+            # categorical column.
+            record['Market Development'] = _classify_market_development(
+                record.get('Country') or record.get('MSCI Country'))
             securities[sedol] = record
         return securities
 
@@ -487,7 +503,9 @@ def _fuzzy_match_manager(name, candidates, threshold=80, benchmark_hint=None):
 
 
 def compute_portfolio_exposures(managers_with_weights, exposures_data, grouping,
-                                 benchmark_name=None, sub_grouping=None):
+                                 benchmark_name=None, sub_grouping=None,
+                                 factset_aliases=None, clone_results=None,
+                                 universe_clone_results=None):
     """
     Compute exposure for a client portfolio to a given grouping.
 
@@ -578,12 +596,29 @@ def compute_portfolio_exposures(managers_with_weights, exposures_data, grouping,
     # 'Mac Alpha') because the weights label carries sleeve-specific
     # info needed to disambiguate LC vs SC and EAFE vs EAFE+Canada
     # variants in the FactSet exposures file.
+    # Map-based narrowing: when the buy-list Map crosswalk is available, restrict
+    # each held manager to the FactSet rows that belong to it (the Map connects
+    # FactSet naming to the return manager authoritatively). The existing
+    # benchmark-aware tiebreak then picks the client-appropriate row among that
+    # manager's rows. Falls back to matching against all candidates when the Map
+    # has no entry for the manager, so behaviour is unchanged without a Map.
+    by_mgr = {}
+    if factset_aliases:
+        from data_loader import factset_candidates_by_manager, _norm_name
+        by_mgr = factset_candidates_by_manager(
+            candidate_names, factset_aliases, clone_results, universe_clone_results)
+
     matched     = {}   # matched_name -> exposure_file_name
     unmatched   = []
     for m in managers_with_weights:
         nm = m['matched_name']
         match_input = m.get('weight_file_name') or nm
-        hit = _fuzzy_match_manager(match_input, candidate_names,
+        pool = candidate_names
+        if by_mgr:
+            subset = by_mgr.get(_norm_name(nm)) or by_mgr.get(_norm_name(match_input))
+            if subset:
+                pool = subset
+        hit = _fuzzy_match_manager(match_input, pool,
                                     benchmark_hint=resolved_bmk_name)
         if hit:
             matched[nm] = hit
@@ -887,8 +922,297 @@ def get_grouping_menu():
     from collections import OrderedDict
     menu = OrderedDict()
     for col in list(CATEGORICAL_COLS) + CONTINUOUS_COLS:
-        grp = COL_GROUPS.get(col, 'Other')
+        # Categorical columns (per the backend set) always belong in the UI's
+        # 'Categorical' row; continuous columns keep their factor-group label.
+        grp = 'Categorical' if col in CATEGORICAL_COLS else COL_GROUPS.get(col, 'Other')
         if grp not in menu:
             menu[grp] = []
         menu[grp].append({'col': col, 'label': DISPLAY_LABELS.get(col, col)})
     return [{'group': g, 'cols': cols} for g, cols in menu.items()]
+
+
+# ── Word-memo portfolio aggregation ─────────────────────────────────────────
+# Builds the "Proposed Portfolio Exposures" section of the rebalance memo:
+# weighted-average characteristics, region & sector weight tables (optionally
+# split Developed/Emerging/Frontier), and active share — all from the FactSet
+# Exposures holdings, scaled by each manager's portfolio allocation.
+
+# (label, exposures-file column header, python format spec). Sentinel headers
+# __nsec__/__active__/__te__ are computed, not read from a column. Price to
+# Sales / LT Debt/Capital are read if present, else render blank ('--').
+_MEMO_METRICS = [
+    ('Market Capitalization ($mm)',     'Market Capitalization',                       '{:,.1f}'),
+    ('# of Securities',                 '__nsec__',                                    '{:,.0f}'),
+    ('Dividend Yield (%)',              'Dividend Yield',                              '{:.2f}'),
+    ('Price to Sales (x)',              'Price to Sales',                              '{:.2f}'),
+    ('Price / Earnings (x)',            'New Price to Earnings LTM',                   '{:.1f}'),
+    ('Price / Earnings FY1 Est (x)',    'Price to Earnings - Next Twelve Months NEW',  '{:.1f}'),
+    ('Price / Book (x)',                'Price to Book',                               '{:.1f}'),
+    ('Est 3-5 Yr EPS Growth (%)',       'Earnings Growth - 3-5 Year Projected NEW',    '{:.1f}'),
+    ('ROE (%)',                         'New Custom ROE',                              '{:.1f}'),
+    ('Net Margin (%)',                  'Net Margin',                                  '{:.1f}'),
+    ('LT Debt / Capital (%)',           'LT Debt/Capital',                             '{:.1f}'),
+    ('Active Share (%)',                '__active__',                                  '{:.2f}'),
+    ('ex-ante Tracking Error (%)',      '__te__',                                      '{:.2f}'),
+]
+_MARKET_COL_CANDIDATES = ('Market Development',)
+_MARKET_ORDER = ['Developed', 'Emerging', 'Other']
+
+
+def _memo_fmt(v, spec):
+    if v is None:
+        return '--'
+    try:
+        return spec.format(v)
+    except (ValueError, TypeError):
+        return '--'
+
+
+def _match_benchmark_section(bmk_str, benchmark_names):
+    """Fuzzy-match a client benchmark string to a benchmark section name."""
+    if not bmk_str or not benchmark_names:
+        return None
+    names = list(benchmark_names)
+    low = str(bmk_str).strip().lower()
+    for n in names:                       # exact-ish first
+        if str(n).strip().lower() == low:
+            return n
+    try:
+        from rapidfuzz import process, fuzz
+        m = process.extractOne(str(bmk_str), names, scorer=fuzz.WRatio, score_cutoff=55)
+        return m[0] if m else None
+    except Exception:
+        return None
+
+
+def _aggregate_holdings(managers, exp_managers, weight_key, benchmark_hint=None,
+                        by_mgr=None):
+    """Portfolio holdings by SEDOL for one weight state. Each manager's own
+    position weights are renormalised to sum 1, scaled by that manager's
+    portfolio allocation (current/proposed), and summed across managers.
+    Returns (agg{sedol:{'w','rec'}}, unmatched[list]).
+
+    by_mgr, when supplied, is the Map crosswalk index {manager_identity:
+    [factset_row, ...]} used to narrow candidates to the held manager's own
+    FactSet rows before the benchmark tiebreak (see compute_portfolio_exposures)."""
+    candidates = list(exp_managers.keys())
+    _nn = None
+    if by_mgr:
+        from data_loader import _norm_name as _nn
+    agg, unmatched, used = {}, [], set()
+    for m in managers:
+        alloc = float(m.get(weight_key) or 0)
+        if alloc <= 0:
+            continue
+        match_input = m.get('weight_file_name') or m.get('matched_name')
+        pool = candidates
+        if by_mgr:
+            subset = by_mgr.get(_nn(m.get('matched_name'))) or by_mgr.get(_nn(match_input))
+            if subset:
+                pool = subset
+        sec = _fuzzy_match_manager(match_input, pool, benchmark_hint=benchmark_hint)
+        if not sec or sec in used:
+            if not sec:
+                unmatched.append(m.get('matched_name') or match_input or '?')
+            continue
+        used.add(sec)
+        holds = exp_managers.get(sec) or {}
+        tot = sum((r.get('weight') or 0) for r in holds.values())
+        if tot <= 0:
+            continue
+        for sedol, r in holds.items():
+            pw = (r.get('weight') or 0) / tot
+            if pw <= 0:
+                continue
+            node = agg.get(sedol)
+            if node is None:
+                node = agg[sedol] = {'w': 0.0, 'rec': r}
+            node['w'] += alloc * pw
+    return agg, unmatched
+
+
+def _bench_holdings(bench_secs):
+    """Benchmark securities → {sedol:{'w','rec'}} with weights normalised to 1."""
+    tot = sum((r.get('weight') or 0) for r in (bench_secs or {}).values())
+    if tot <= 0:
+        return {}
+    return {s: {'w': (r.get('weight') or 0) / tot, 'rec': r}
+            for s, r in bench_secs.items()}
+
+
+def _memo_wavg(agg, col):
+    num = den = 0.0
+    for n in agg.values():
+        v = n['rec'].get(col)
+        if v is None:
+            continue
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            continue
+        num += n['w'] * v
+        den += n['w']
+    return (num / den) if den > 0 else None
+
+
+def _memo_active_share(port_agg, bench_hold):
+    if not bench_hold:
+        return None
+    tot = sum(n['w'] for n in port_agg.values()) or 1.0
+    s = 0.0
+    for k in set(port_agg) | set(bench_hold):
+        wp = port_agg.get(k, {}).get('w', 0.0) / tot
+        wb = bench_hold.get(k, {}).get('w', 0.0)
+        s += abs(wp - wb)
+    return 0.5 * s * 100.0
+
+
+def _group_weights(agg, group_col, market_col):
+    """Return (flat{group:pct}, nested{market:{group:pct}}) as % of the
+    portfolio's invested weight."""
+    tot = sum(n['w'] for n in agg.values()) or 1.0
+    flat, nested = {}, {}
+    for n in agg.values():
+        g = str(n['rec'].get(group_col) or '--').strip() or '--'
+        w = 100.0 * n['w'] / tot
+        flat[g] = flat.get(g, 0.0) + w
+        if market_col:
+            mk = str(n['rec'].get(market_col) or '--').strip() or '--'
+            nested.setdefault(mk, {})
+            nested[mk][g] = nested[mk].get(g, 0.0) + w
+    return flat, nested
+
+
+def _memo_row_vals(cw, pw, bw):
+    """Formatted (pre, pre_diff, post, post_diff, bench) weight strings."""
+    f = lambda v: ('{:.2f}'.format(v) if v is not None else '--')
+    pre, post, bench = f(cw), f(pw), f(bw)
+    pre_d = f(cw - bw) if (cw is not None and bw is not None) else '--'
+    post_d = f(pw - bw) if (pw is not None and bw is not None) else '--'
+    return pre, pre_d, post, post_d, bench
+
+
+def _assemble_flat(cflat, pflat, bflat):
+    groups = sorted(set(cflat) | set(pflat) | set(bflat),
+                    key=lambda g: (g == '--', g))
+    rows = []
+    for g in groups:
+        if g == '--':
+            continue
+        pre, pd, post, ppd, bench = _memo_row_vals(
+            cflat.get(g, 0.0), pflat.get(g, 0.0), bflat.get(g, 0.0))
+        rows.append({'label': g, 'indent': False, 'header': False,
+                     'pre': pre, 'pre_diff': pd, 'post': post,
+                     'post_diff': ppd, 'bench': bench})
+    return rows
+
+
+def _assemble_nested(cnest, pnest, bnest):
+    markets = [m for m in _MARKET_ORDER if m in (set(cnest) | set(pnest) | set(bnest))]
+    for m in sorted(set(cnest) | set(pnest) | set(bnest)):
+        if m not in markets and m != '--':
+            markets.append(m)
+    rows = []
+    for mk in markets:
+        cg, pg, bg = cnest.get(mk, {}), pnest.get(mk, {}), bnest.get(mk, {})
+        pre, pd, post, ppd, bench = _memo_row_vals(
+            sum(cg.values()) or None, sum(pg.values()) or None, sum(bg.values()) or None)
+        label = (mk + ' Markets') if mk in ('Developed', 'Emerging') else mk
+        rows.append({'label': label, 'indent': False, 'header': True,
+                     'pre': pre, 'pre_diff': pd, 'post': post,
+                     'post_diff': ppd, 'bench': bench})
+        for g in sorted(set(cg) | set(pg) | set(bg), key=lambda g: (g == '--', g)):
+            if g == '--':
+                continue
+            pre, pd, post, ppd, bench = _memo_row_vals(
+                cg.get(g, 0.0), pg.get(g, 0.0), bg.get(g, 0.0))
+            rows.append({'label': g, 'indent': True, 'header': False,
+                         'pre': pre, 'pre_diff': pd, 'post': post,
+                         'post_diff': ppd, 'bench': bench})
+    return rows
+
+
+def build_memo_exposures(managers, exposures_data, client_benchmark=None,
+                         want_split=False, factset_aliases=None,
+                         clone_results=None, universe_clone_results=None):
+    """Compute the memo's 'Proposed Portfolio Exposures' section.
+
+    Returns None if no exposures data. Otherwise a dict:
+      benchmark_matched, split(bool), market_col, unmatched[list],
+      characteristics[{label,pre,post,bench}],
+      regions[rows], sectors[rows]   (rows have label/indent/header + pre/
+      pre_diff/post/post_diff/bench formatted strings).
+    """
+    if not exposures_data:
+        return None
+    exp_managers = exposures_data.get('managers') or {}
+    if not exp_managers:
+        return None
+
+    bmk_names = exposures_data.get('benchmark_names') or []
+    bench_name = _match_benchmark_section(client_benchmark, bmk_names)
+    bench_secs = (exposures_data.get('benchmarks') or {}).get(bench_name, {}) if bench_name else {}
+    bench_hold = _bench_holdings(bench_secs)
+
+    # Map crosswalk narrowing (see compute_portfolio_exposures); empty without a Map.
+    by_mgr = {}
+    if factset_aliases:
+        from data_loader import factset_candidates_by_manager
+        by_mgr = factset_candidates_by_manager(
+            list(exp_managers.keys()), factset_aliases, clone_results, universe_clone_results)
+
+    cur_agg, unmatched = _aggregate_holdings(managers, exp_managers, 'current_weight',
+                                             client_benchmark, by_mgr=by_mgr)
+    prop_agg, _        = _aggregate_holdings(managers, exp_managers, 'proposed_weight',
+                                             client_benchmark, by_mgr=by_mgr)
+
+    # Detect a Developed/Emerging/Frontier column if present anywhere.
+    market_col = None
+    scan = list(cur_agg.values()) + list(prop_agg.values()) + list(bench_hold.values())
+    for c in _MARKET_COL_CANDIDATES:
+        if any(n['rec'].get(c) not in (None, '', '--') for n in scan):
+            market_col = c
+            break
+    split = bool(want_split and market_col)
+
+    # ── Characteristics table ────────────────────────────────────────────
+    chars = []
+    for label, hdr, spec in _MEMO_METRICS:
+        if hdr == '__nsec__':
+            pre = float(sum(1 for n in cur_agg.values() if n['w'] > 0))
+            post = float(sum(1 for n in prop_agg.values() if n['w'] > 0))
+            bench = float(len(bench_hold)) if bench_hold else None
+        elif hdr == '__active__':
+            pre = _memo_active_share(cur_agg, bench_hold)
+            post = _memo_active_share(prop_agg, bench_hold)
+            bench = None
+        elif hdr == '__te__':
+            pre = post = bench = None
+        else:
+            pre = _memo_wavg(cur_agg, hdr)
+            post = _memo_wavg(prop_agg, hdr)
+            bench = _memo_wavg(bench_hold, hdr) if bench_hold else None
+        chars.append({'label': label,
+                      'pre': _memo_fmt(pre, spec),
+                      'post': _memo_fmt(post, spec),
+                      'bench': _memo_fmt(bench, spec)})
+
+    def group_table(group_col):
+        mc = market_col if split else None
+        cflat, cnest = _group_weights(cur_agg, group_col, mc)
+        pflat, pnest = _group_weights(prop_agg, group_col, mc)
+        if bench_hold:
+            bflat, bnest = _group_weights(bench_hold, group_col, mc)
+        else:
+            bflat, bnest = {}, {}
+        return _assemble_nested(cnest, pnest, bnest) if split else _assemble_flat(cflat, pflat, bflat)
+
+    return {
+        'benchmark_matched': bench_name,
+        'split':             split,
+        'market_col':        market_col,
+        'unmatched':         unmatched,
+        'characteristics':   chars,
+        'regions':           group_table('Region'),
+        'sectors':           group_table('GICS Sector'),
+    }

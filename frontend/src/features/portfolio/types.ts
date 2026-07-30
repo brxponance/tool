@@ -31,6 +31,11 @@ export type PortfolioManager = {
   // data (newly-funded manager with <3 years of returns). Style buckets
   // are editable via /placeholder_buckets.
   is_placeholder?: boolean;
+  // Dollar AUM = weight × client total AUM. Only present when the weights
+  // workbook carries the client total in column C of the client-header row;
+  // undefined on older files (the UI renders em-dashes).
+  aum_current?: number | null;
+  aum_proposed?: number | null;
 };
 
 export type PortfolioManagerCatalogItem = {
@@ -69,6 +74,9 @@ export type PortfolioManagerDetailResponse = {
 export type PortfolioResponse = {
   client: string;
   client_benchmark?: string;
+  // Client total AUM in raw dollars, from column C of the client-header row in
+  // the weights workbook. null/undefined when the file doesn't carry it.
+  client_aum?: number | null;
   managers: PortfolioManager[];
   unmatched: string[];
 };
@@ -155,6 +163,45 @@ export type MarginalContributionSide = {
   managers: MarginalContributionRow[];
 };
 
+// One side (current/proposed) of a manager-struggle environment block.
+export type ManagerStruggleStats = {
+  n_months: number;
+  avg_return: number | null;
+  avg_excess: number | null;
+  hit_rate: number | null;
+};
+
+export type ManagerStruggleBlock = {
+  n_months: number;
+  current: ManagerStruggleStats | null;
+  proposed: ManagerStruggleStats | null;
+};
+
+export type ManagerStrugglePeriod = {
+  start: string;
+  end: string;
+  n_months: number;
+  avg_breadth: number | null;
+  cur_excess: number | null;
+  prop_excess: number | null;
+};
+
+// SPIVA-style breadth analysis: portfolio behaviour during sustained periods
+// when active managers as a group lagged the benchmark. null when no universe
+// returns are loaded for the client's peer group.
+export type ManagerStruggleResponse = {
+  threshold: number;
+  smooth_months: number;
+  min_len: number;
+  bridge: number;
+  n_periods: number;
+  avg_universe_count: number | null;
+  avg_breadth: number | null;
+  struggle: ManagerStruggleBlock;
+  normal: ManagerStruggleBlock;
+  periods: ManagerStrugglePeriod[];
+};
+
 export type RegimeBlock = {
   n_months: number;
   current: {
@@ -192,6 +239,7 @@ export type RiskAnalysisResponse = {
     value_outperform: RegimeBlock | null;
     growth_outperform: RegimeBlock | null;
   };
+  manager_struggle?: ManagerStruggleResponse | null;
   error?: string;
 };
 
@@ -331,6 +379,66 @@ export type IdealComplementResponse = {
   peer_benchmark?: string;
   benchmark_name?: string;
   error?: string;
+};
+
+// ── Ideal FACTOR complement (/ideal_factor_complement) ─────────────────────
+// Same ranking as the manager-level complement, but candidates are factor
+// indices rather than buy-list managers — i.e. the style tilt the portfolio
+// is missing rather than a manager to hire.
+export type IdealFactorComplementCandidate = {
+  name: string;
+  category: string | null;
+  hit_rate: number;
+  avg_excess: number;
+  n_months: number;
+};
+
+export type IdealFactorComplementResponse = {
+  best?: IdealFactorComplementCandidate;
+  n_underperform_months?: number;
+  n_candidates_considered?: number;
+  peer_benchmark?: string;
+  benchmark_name?: string;
+  window_months?: number;
+  error?: string;
+};
+
+// ── Client redemption (/optimize_redemption) ────────────────────────────────
+export type RedemptionManagerRow = {
+  name: string;
+  tab: string | null;
+  current_weight: number;
+  current_dollars: number;
+  pull_dollars: number;
+  remaining_dollars: number;
+  remaining_weight: number;
+  vg_3factor: number;
+  ns_z: number | null;
+  eligible: boolean;
+};
+
+export type RedemptionSummary = {
+  redemption_amount: number;
+  orig_vg_3factor: number;
+  new_vg_3factor: number;
+  orig_edge: number | null;
+  new_edge: number | null;
+  new_total_aum: number;
+  n_reduced: number;
+  n_dropped: number;
+  eligible_dollars: number;
+  total_dollars: number;
+  uncovered_weight: number;
+  vg_lo: number;
+  vg_hi: number;
+};
+
+export type RedemptionResponse = {
+  status: "ok" | "warning" | "infeasible" | "error";
+  error?: string | null;
+  redemption_managers?: RedemptionManagerRow[];
+  summary?: RedemptionSummary;
+  detail?: Record<string, number>;
 };
 
 export type PlaceholderBucketUpdateResponse = {

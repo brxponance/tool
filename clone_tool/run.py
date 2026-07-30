@@ -26,18 +26,23 @@ if __name__ == '__main__':
     print("\n" + "="*50)
     print("  Aapryl Clone Tool")
     print("="*50)
-    print("  Starting server at http://localhost:3001")
+    print("  Starting server at http://127.0.0.1:3001")
+    print("  (use 127.0.0.1, NOT localhost — localhost adds a ~2s")
+    print("   IPv6-fallback delay to every request on this machine)")
     print("  Press Ctrl+C to stop")
     print("="*50 + "\n")
 
-    # Open browser after short delay
+    # Open browser after short delay. Use 127.0.0.1 (not localhost) to avoid
+    # the ~2s-per-request IPv6 (::1) connection-fallback delay on this host.
     def open_browser():
         time.sleep(2)
-        webbrowser.open('http://localhost:3001')
+        webbrowser.open('http://127.0.0.1:3001')
 
     import threading
     threading.Thread(target=open_browser, daemon=True).start()
 
-    # Start Flask
+    # Start Flask. host='127.0.0.1' = loopback only, so the tool is reachable
+    # from THIS machine only and never from the local network. (The app has no
+    # authentication; use '0.0.0.0' only if you deliberately want to share it.)
     from app import app
-    app.run(host='0.0.0.0', port=3001, debug=False)
+    app.run(host='127.0.0.1', port=3001, debug=False)

@@ -4,6 +4,7 @@ import type {
   ContributionManager,
   ContributionResponse,
   ExposureMenuGroup,
+  ManagerStruggleResponse,
   MarketCycleResponse,
   PortfolioExposuresResponse,
   PortfolioStats,
@@ -151,6 +152,166 @@ function totalContribution(groups: ReturnType<typeof buildContributionGroups>) {
 function fieldLabel(groups: ExposureMenuGroup[]) {
   const flat = groups.flatMap((group) => group.cols);
   return (value: string | null) => flat.find((item) => item.col === value)?.label ?? value ?? "Group";
+}
+
+const STRUGGLE_COLS = 8;
+
+// SPIVA-style breadth: how the book behaved during sustained stretches when
+// active managers as a group lagged the benchmark. Renders a placeholder when
+// no universe returns are loaded for the client's peer group (the analysis
+// needs the actual peer universe, not just the buy list).
+function ManagerStruggleSection({
+  struggle,
+}: {
+  struggle: ManagerStruggleResponse | null;
+}) {
+  const pctBeat = struggle ? Math.round((1 - struggle.threshold) * 100) : 0;
+  const universeCount =
+    struggle?.avg_universe_count != null ? Math.round(struggle.avg_universe_count) : null;
+  const nPeriods = struggle?.n_periods ?? 0;
+
+  const rows = struggle
+    ? ([
+        { key: "struggle", label: "In Active-Struggle Periods" },
+        { key: "normal", label: "Rest of Period" },
+      ] as const)
+    : [];
+
+  return (
+    <div className="contrib-section mb-16">
+      <div className="panel">
+        <div className="panel-header">
+          <span className="panel-title">Active-Manager-Struggle Scenario</span>
+          {struggle ? (
+            <span
+              style={{
+                marginLeft: "auto",
+                fontFamily: "var(--mono)",
+                fontSize: 10,
+                color: "var(--text3)",
+              }}
+            >
+              {nPeriods} period{nPeriods === 1 ? "" : "s"} · rolling{" "}
+              {struggle.smooth_months}m breadth (bmk beat ≥{pctBeat}%) · ~
+              {universeCount ?? "--"} mgrs/mo
+            </span>
+          ) : null}
+        </div>
+        <div style={{ overflowX: "auto" }}>
+          <table className="data-table w-full">
+            <thead>
+              <tr>
+                <th rowSpan={2} style={{ textAlign: "left" }}>Environment</th>
+                <th rowSpan={2}>Months</th>
+                <th colSpan={2} className="period-group sep-col">Avg Monthly Return</th>
+                <th colSpan={2} className="period-group sep-col">Excess vs Benchmark</th>
+                <th colSpan={2} className="period-group sep-col">Hit Rate</th>
+              </tr>
+              <tr>
+                <th className="sub sep-col">Current</th><th className="sub">Proposed</th>
+                <th className="sub sep-col">Current</th><th className="sub">Proposed</th>
+                <th className="sub sep-col">Current</th><th className="sub">Proposed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {!struggle ? (
+                <tr>
+                  <td
+                    colSpan={STRUGGLE_COLS}
+                    style={{ textAlign: "center", color: "var(--text3)", padding: 16 }}
+                  >
+                    Load universe returns for this peer group to see this scenario.
+                  </td>
+                </tr>
+              ) : (
+                <>
+                  {rows.map(({ key, label }) => {
+                    const block = struggle[key];
+                    const current = block?.current;
+                    const proposed = block?.proposed;
+                    if (!block || !current || current.n_months === 0) {
+                      return (
+                        <tr key={key}>
+                          <td style={{ fontWeight: 500 }}>{label}</td>
+                          <td className="mono">{block?.n_months ?? 0}</td>
+                          <td
+                            colSpan={STRUGGLE_COLS - 2}
+                            className="mono"
+                            style={{ textAlign: "center", color: "var(--text3)" }}
+                          >
+                            No qualifying months
+                          </td>
+                        </tr>
+                      );
+                    }
+                    return (
+                      <tr key={key}>
+                        <td style={{ fontWeight: 500 }}>{label}</td>
+                        <td className="mono">{block.n_months}</td>
+                        <td className="mono sep-col">{formatPercent(current.avg_return, 2)}</td>
+                        <td className="mono">{formatPercent(proposed?.avg_return, 2)}</td>
+                        <td className="mono sep-col">{formatSignedPercent(current.avg_excess, 2)}</td>
+                        <td className="mono">{formatSignedPercent(proposed?.avg_excess, 2)}</td>
+                        <td className="mono sep-col">{formatPercent(current.hit_rate, 0)}</td>
+                        <td className="mono">{formatPercent(proposed?.hit_rate, 0)}</td>
+                      </tr>
+                    );
+                  })}
+                  {struggle.periods.length ? (
+                    <>
+                      <tr>
+                        <td
+                          colSpan={STRUGGLE_COLS}
+                          style={{
+                            paddingTop: 12,
+                            color: "var(--text3)",
+                            fontSize: 9,
+                            textTransform: "uppercase",
+                            letterSpacing: "0.06em",
+                          }}
+                        >
+                          Struggle periods (benchmark beat ≥{pctBeat}% of universe, rolling{" "}
+                          {struggle.smooth_months}m)
+                        </td>
+                      </tr>
+                      {struggle.periods.map((period) => (
+                        <tr key={`${period.start}-${period.end}`}>
+                          <td style={{ color: "var(--text2)" }}>
+                            {period.start} → {period.end}
+                          </td>
+                          <td className="mono">{period.n_months}</td>
+                          <td className="mono sep-col" style={{ color: "var(--text3)" }}>--</td>
+                          <td className="mono" style={{ color: "var(--text3)" }}>--</td>
+                          <td className="mono sep-col">{formatSignedPercent(period.cur_excess, 2)}</td>
+                          <td className="mono">{formatSignedPercent(period.prop_excess, 2)}</td>
+                          <td className="mono sep-col" style={{ color: "var(--text3)" }}>--</td>
+                          <td className="mono" style={{ color: "var(--text3)" }}>--</td>
+                        </tr>
+                      ))}
+                    </>
+                  ) : (
+                    <tr>
+                      <td
+                        colSpan={STRUGGLE_COLS}
+                        style={{
+                          paddingTop: 10,
+                          color: "var(--text3)",
+                          fontSize: 10,
+                          fontStyle: "italic",
+                        }}
+                      >
+                        No sustained struggle periods at this threshold.
+                      </td>
+                    </tr>
+                  )}
+                </>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 type PortfolioAnalyticsSectionsProps = {
@@ -484,6 +645,8 @@ export function PortfolioAnalyticsSections({
           </div>
         </div>
       </div>
+
+      <ManagerStruggleSection struggle={riskAnalysis?.manager_struggle ?? null} />
 
       <div className="contrib-section">
         <div className="panel mb-16">

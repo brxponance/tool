@@ -29,6 +29,11 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
 .panel-header{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;}
 .panel-title{font-family:var(--mono);font-size:12px;font-weight:600;color:var(--text);text-transform:uppercase;letter-spacing:.08em;}
 .panel-body{padding:16px;}
+/* Portfolio Managers row: 50/50 with the V-G/Edge/Diverse stack on wide
+   monitors, but stacked full-width on laptop widths so the (column-heavy)
+   managers table isn't crunched or pushed off-screen. */
+.pf-mgr-row{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:stretch;}
+@media (max-width:1600px){ .pf-mgr-row{grid-template-columns:1fr;} }
 .upload-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:16px;}
 .upload-zone{border:1px dashed var(--border2);border-radius:4px;padding:20px;text-align:center;cursor:pointer;transition:all .15s;position:relative;}
 .upload-zone:hover,.upload-zone.drag{border-color:var(--accent);background:rgba(0,119,204,.05);}
@@ -161,6 +166,15 @@ td.skill-neg{color:var(--red)!important;}
 #risk-section .data-table td { padding:3px 6px; font-size:11px; }
 #risk-section .data-table th { padding:4px 6px; font-size:10px; }
 #risk-section .factor-bar-track { height:12px; }
+/* The risk panel sits in a grid cell that stretches to match the (now
+   taller) left column. Make the panel a flex column so its content area
+   grows, and let the exposures table distribute its rows over the full
+   height — no trailing white space below the last factor. */
+#risk-section { display:flex; flex-direction:column; }
+#risk-section > #risk-content { flex:1 1 auto; display:flex; flex-direction:column; min-height:0; }
+#risk-section > #risk-content > div[style*="overflow-x"] { flex:1 1 auto; display:flex; }
+#risk-section > #risk-content > div[style*="overflow-x"] > table { flex:1 1 auto; height:100%; }
+#risk-section > #risk-content > div[style*="overflow-x"] > table > tbody > tr { height:1%; }
 /* Style-bucket override cells — inline input with gold highlight when overridden */
 .bucket-edit { padding:0 !important; }
 .bucket-override { padding:0 !important; background:rgba(217,140,31,0.12); border-left:2px solid var(--amber); }
@@ -214,6 +228,78 @@ td.skill-neg{color:var(--red)!important;}
 #exp-table tr.exp-child-row td, #mgr-exp-table tr.exp-child-row td{background:rgba(0,119,204,.025);border-bottom:1px solid var(--border);font-size:11px;}
 #exp-table tr.exp-child-row td.exp-label-cell, #mgr-exp-table tr.exp-child-row td.exp-label-cell{padding-left:34px;color:var(--text2);font-style:italic;}
 #exp-table .exp-q-range, #mgr-exp-table .exp-q-range{font-family:var(--mono);font-style:normal;font-size:10px;color:var(--text3);margin-left:6px;letter-spacing:.02em;font-weight:400;}
+
+/* Holdings Overlap matrix */
+#overlap-section .ovl-controls{padding:8px 16px;display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;border-bottom:1px solid var(--border);}
+#overlap-section .ovl-seg{display:inline-flex;border:1px solid var(--border);border-radius:4px;overflow:hidden;}
+#overlap-section .ovl-seg button{font-family:var(--mono);font-size:10px;padding:4px 10px;background:var(--surface);color:var(--text2);border:none;cursor:pointer;letter-spacing:.03em;transition:background .12s,color .12s;}
+#overlap-section .ovl-seg button+button{border-left:1px solid var(--border);}
+#overlap-section .ovl-seg button.active{background:var(--accent);color:#fff;}
+#overlap-section .ovl-seg-label{font-family:var(--mono);font-size:9px;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;font-weight:600;margin-right:-8px;}
+#overlap-section .ovl-legend{display:flex;align-items:center;gap:6px;margin-left:auto;font-family:var(--mono);font-size:9px;color:var(--text3);}
+#overlap-section .ovl-legend .ovl-ramp{width:80px;height:8px;border-radius:2px;background:linear-gradient(90deg,var(--surface2),var(--accent));}
+.overlap-matrix-wrap{overflow-x:auto;padding:8px 4px 4px;}
+.ovl-matrix{border-collapse:separate;border-spacing:0;font-family:var(--mono);}
+.ovl-matrix th,.ovl-matrix td{padding:0;text-align:center;}
+.ovl-matrix .ovl-corner{background:transparent;}
+.ovl-matrix .ovl-col-head{font-size:9px;color:var(--text2);font-weight:600;height:78px;vertical-align:bottom;padding-bottom:6px;white-space:nowrap;}
+.ovl-matrix .ovl-col-head span{display:inline-block;transform:rotate(-55deg);transform-origin:left bottom;width:16px;text-align:left;}
+.ovl-matrix .ovl-row-head{font-size:10px;color:var(--text);font-weight:600;text-align:right;padding:0 10px 0 4px;white-space:nowrap;max-width:190px;overflow:hidden;text-overflow:ellipsis;}
+.ovl-matrix .ovl-row-head small{color:var(--text3);font-weight:400;font-size:9px;}
+.ovl-cell{width:62px;height:44px;border:1px solid var(--surface);cursor:pointer;position:relative;transition:outline .1s;line-height:1.15;}
+.ovl-cell:hover{outline:2px solid var(--accent);outline-offset:-2px;z-index:2;}
+.ovl-cell .ovl-cnt{font-size:11px;font-weight:600;}
+.ovl-cell .ovl-wt{font-size:9px;opacity:.82;}
+.ovl-cell.ovl-diag{background:var(--surface2);cursor:default;color:var(--text3);}
+.ovl-cell.ovl-diag:hover{outline:none;}
+.ovl-cell.ovl-empty{color:var(--text3);}
+.overlap-top-pairs{padding:6px 12px 4px;display:flex;flex-wrap:wrap;gap:8px;}
+.ovl-chip{font-family:var(--mono);font-size:10px;padding:5px 9px;border:1px solid var(--border);border-radius:14px;background:var(--surface);color:var(--text2);cursor:pointer;transition:border-color .12s,color .12s;}
+.ovl-chip:hover{border-color:var(--accent);color:var(--accent);}
+.ovl-chip b{color:var(--text);font-weight:600;}
+#overlap-detail{margin:0 16px 16px;border:1px solid var(--border);border-radius:4px;background:var(--surface);display:none;}
+#overlap-detail .ovl-det-head{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border);background:var(--surface2);}
+#overlap-detail .ovl-det-title{font-family:var(--mono);font-size:11px;color:var(--text);font-weight:600;}
+#overlap-detail .ovl-det-close{margin-left:auto;cursor:pointer;color:var(--text3);font-size:14px;line-height:1;padding:2px 6px;border-radius:3px;}
+#overlap-detail .ovl-det-close:hover{color:var(--accent);background:rgba(0,119,204,.08);}
+#overlap-detail table{width:100%;border-collapse:collapse;}
+#overlap-detail th{font-family:var(--mono);font-size:9px;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;text-align:right;padding:6px 10px;border-bottom:1px solid var(--border);}
+#overlap-detail th.l{text-align:left;}
+#overlap-detail td{font-family:var(--mono);font-size:10px;color:var(--text);padding:4px 10px;border-bottom:1px solid var(--border);text-align:right;font-variant-numeric:tabular-nums;}
+#overlap-detail td.l{text-align:left;color:var(--text2);}
+#overlap-detail tr:last-child td{border-bottom:none;}
+#overlap-note{font-family:var(--mono);font-size:10px;color:var(--amber);padding:0 16px 12px;}
+/* Compact the overlap matrices so both stack and fit the narrower right column
+   without horizontal scrolling. */
+#overlap-section .overlap-matrix-wrap{padding:4px 2px 2px;}
+/* Rows stretch so Current and Proposed each occupy 50% of the section. The
+   whole [names + grid] table is centered as one unit (margin:0 auto), so the
+   space to the left of the names equals the space to the right of the grid.
+   The name column shrinks to fit, sitting right next to the grid. */
+#overlap-section .ovl-matrix{width:90%;height:100%;margin:0 auto;}
+#overlap-section .ovl-cell{width:auto;min-width:44px;height:28px;}
+#overlap-section .ovl-cell .ovl-cnt{font-size:10px;}
+#overlap-section .ovl-cell .ovl-wt{font-size:8px;}
+/* Name column shrinks to its content (width:1% + nowrap) so the names sit at
+   the block's left edge and the grid columns absorb the extra table width.
+   The table is centered, so left-of-names == right-of-grid. */
+#overlap-section .ovl-matrix .ovl-corner{width:1%;white-space:nowrap;}
+/* Bold manager names down the left side, right-aligned next to the grid */
+#overlap-section .ovl-matrix .ovl-row-head{width:1%;font-size:9px;padding:0 6px 0 2px;font-weight:700;text-align:right;white-space:nowrap;}
+#overlap-section .ovl-matrix .ovl-row-head small{font-size:8px;}
+/* Horizontal column headers (no rotation), centered over each column */
+#overlap-section .ovl-matrix .ovl-col-head{font-size:8px;height:auto;padding:2px 3px 4px;text-align:center;vertical-align:bottom;white-space:nowrap;}
+#overlap-section .ovl-matrix .ovl-col-head span{transform:none;transform-origin:center;width:auto;text-align:center;}
+#overlap-section .overlap-top-pairs{padding:5px 12px 3px;gap:6px;}
+#overlap-section .ovl-chip{padding:3px 7px;font-size:9px;}
+/* Compact the market-cycle placement table so all 8 columns fit under the
+   wider chart with no horizontal scroll. */
+#mc-placement-table th,#mc-placement-table td{padding:2px 5px;font-size:10px;}
+#mc-placement-table th{white-space:normal;line-height:1.15;}
+#mc-placement-table .mono{font-size:10px;}
+#mc-placement-table select{font-size:10px;padding:1px 3px;max-width:150px;}
+#mc-placement-table td:first-child{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+#mc-placement-table td:nth-child(2){max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 #exp-table tr.exp-child-row.insufficient td.exp-label-cell, #mgr-exp-table tr.exp-child-row.insufficient td.exp-label-cell{color:var(--text3);}
 #exp-table tr.exp-child-row.hidden, #mgr-exp-table tr.exp-child-row.hidden{display:none;}
 
@@ -234,6 +320,22 @@ td.skill-neg{color:var(--red)!important;}
 }
 #portfolio-tbody tr.ic-header .ic-stat strong{color:var(--text);font-weight:600;}
 #portfolio-tbody tr.ic-candidate td{background:rgba(0,119,204,.025);}
+/* Ideal Factor Complement — same look as ic-*, tighter top gap (sits right
+   under the manager complement rather than starting a fresh block). */
+#portfolio-tbody tr.ifc-spacer td{padding:0;height:18px;border:none;background:transparent;}
+#portfolio-tbody tr.ifc-header td{
+  background:rgba(0,119,204,.06);
+  border-top:2px solid var(--accent);
+  border-bottom:1px solid var(--border);
+  padding:8px 12px;
+}
+#portfolio-tbody tr.ifc-header .ic-title{
+  font-family:var(--mono);font-size:11px;font-weight:600;color:var(--accent);
+  letter-spacing:.06em;text-transform:uppercase;margin-right:14px;
+}
+#portfolio-tbody tr.ifc-header .ic-stat{font-family:var(--mono);font-size:11px;color:var(--text2);}
+#portfolio-tbody tr.ifc-header .ic-stat strong{color:var(--text);font-weight:600;}
+#portfolio-tbody tr.ifc-candidate td{background:rgba(0,119,204,.025);}
 
 /* ── Default Portfolio Report ─────────────────────────────────────────── */
 #page-reports .rpt-controls{display:flex;align-items:center;margin-bottom:16px;}
@@ -241,6 +343,22 @@ td.skill-neg{color:var(--red)!important;}
 #page-reports .rpt-title{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--text);letter-spacing:.02em;text-transform:uppercase;}
 #page-reports .rpt-subtitle{font-family:var(--mono);font-size:10px;color:var(--text3);margin-top:4px;max-width:560px;}
 #page-reports .rpt-actions{display:flex;gap:8px;flex-shrink:0;}
+/* Report launcher cards (the on-screen Reports tab) */
+#page-reports .rpt-launcher{display:flex;gap:16px;flex-wrap:wrap;}
+#page-reports .rpt-card{flex:1 1 320px;min-width:280px;border:1px solid var(--border);border-radius:6px;padding:16px 18px;background:var(--surface);}
+#page-reports .rpt-card-title{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--text);text-transform:uppercase;letter-spacing:.03em;margin-bottom:6px;}
+#page-reports .rpt-card-desc{font-family:var(--mono);font-size:10px;color:var(--text3);line-height:1.55;margin-bottom:12px;}
+/* Report sheet is rendered off-screen (still laid out, so html2canvas/Chart.js
+   can capture it) but never shown inline. */
+#rpt-offscreen{position:absolute;left:-100000px;top:0;width:920px;pointer-events:none;}
+/* Dev preview (?rptpreview=CLIENT): show ONLY the rendered report sheet, for
+   headless screenshot iteration on the PDF layout. */
+body.rpt-preview .nav,
+body.rpt-preview .rpt-controls,
+body.rpt-preview .rpt-launcher{display:none !important;}
+body.rpt-preview .page{display:none !important;}
+body.rpt-preview #page-reports{display:block !important;}
+body.rpt-preview #rpt-offscreen{position:static;left:auto;width:920px;margin:0 auto;pointer-events:auto;}
 
 #page-reports .rpt-sheet{background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:32px 36px;max-width:920px;margin:0 auto;}
 #page-reports .rpt-cover{border-bottom:1px solid var(--border);padding-bottom:18px;margin-bottom:24px;}
@@ -498,7 +616,7 @@ td.skill-neg{color:var(--red)!important;}
   <div class="nav-tab" onclick="showPage('portfolio')" id="tab-portfolio">Portfolio</div>
   <div class="nav-tab" onclick="showPage('peer')" id="tab-peer">Peer Groups</div>
   <div class="nav-tab" onclick="showPage('detail')" id="tab-detail">Manager Detail</div>
-  <div class="nav-tab" onclick="showPage('reports')" id="tab-reports">Report</div>
+  <div class="nav-tab" onclick="showPage('reports')" id="tab-reports">Reports</div>
   <div class="nav-spacer"></div>
   <div class="status-dot" id="status-dot"></div>
   <span id="status-text">Checking...</span>
@@ -552,6 +670,12 @@ td.skill-neg{color:var(--red)!important;}
           <div class="upload-hint">Optional — portfolio characteristic exposures</div>
           <div class="upload-fname" id="fname-exp"></div>
         </div>
+        <div class="upload-zone" id="zone-qual" ondragover="dragOver(event,'zone-qual')" ondragleave="dragLeave('zone-qual')" ondrop="dropFileQualitative(event,'zone-qual')">
+          <input type="file" accept=".xlsx" onchange="uploadQualitativeFile(this,'zone-qual')">
+          <div class="upload-icon">🏢</div><div class="upload-label">Firm / Strategy Qualitative</div>
+          <div class="upload-hint">Optional — firm AUM, ownership, diverse/woman %, strategy AUM</div>
+          <div class="upload-fname" id="fname-qual"></div>
+        </div>
         <div class="upload-zone" id="zone-uni" ondragover="dragOver(event,'zone-uni')" ondragleave="dragLeave('zone-uni')" ondrop="dropFileUniverse(event,'zone-uni')">
           <input type="file" accept=".xlsx" onchange="uploadUniverseFileConsolidated(this,'zone-uni')">
           <div class="upload-icon">🌐</div><div class="upload-label">Universe Returns</div>
@@ -589,86 +713,42 @@ td.skill-neg{color:var(--red)!important;}
   <div class="flex gap-16 mb-16 items-center">
     <div class="select-wrap"><select id="client-select" onchange="refreshSleeveDropdown().then(()=>loadPortfolio())"><option value="">-- Select Portfolio --</option></select></div>
     <button class="btn btn-outline btn-sm" onclick="showAddManagerModal()">+ Add Manager</button>
-    <div class="ml-auto flex gap-8 items-center">
-      <span style="font-family:var(--mono);font-size:10px;color:var(--text3)">Proposed total:</span>
-      <span id="proposed-total" style="font-family:var(--mono);font-size:12px;color:var(--accent)">0.0%</span>
-    </div>
+    <button class="btn btn-outline btn-sm" id="btn-print-memo" onclick="exportMemoReport()" title="Generate an editable Word (.docx) rebalance memo for this portfolio">Print Memo Report</button>
   </div>
   <div id="unmatched-alert" style="display:none;"></div>
-  <div class="mb-16" style="position:relative;">
-  <div class="panel" id="portfolio-managers-panel" style="width:calc(50% - 8px);min-width:0;">
+  <!-- PORTFOLIO MANAGERS | VALUE-GROWTH BARS + EDGE + DIVERSE (stacked) -->
+  <div class="mb-16 pf-mgr-row">
+  <div class="panel" id="portfolio-managers-panel" style="min-width:0;display:flex;flex-direction:column;">
     <div class="panel-header"><span class="panel-title">Portfolio Managers</span>
+      <span style="margin-left:auto;display:inline-flex;align-items:center;gap:5px;font-family:var(--mono);font-size:10px;color:var(--text3)">Proposed total: <span id="proposed-total" style="font-size:12px;color:var(--accent);">0.0%</span></span>
       <span style="margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--text3)">Edit proposed weight to model changes</span></div>
-    <div class="panel-body" style="padding:0;">
-      <table class="data-table w-full">
-        <thead><tr>
-          <th style="text-align:left;width:60px">Tab</th><th style="text-align:left">Manager</th>
-          <th>Current Wt</th><th>Proposed Wt</th><th>3F V-G</th><th>Full V-G</th>
-          <th title="Normalized Skill Z-score: annualized since-inception skill, z-scored against same-window peers">Norm Skill (Z)</th>
-          <th style="width:36px"></th>
-        </tr></thead>
+    <div class="panel-body" style="padding:0;flex:1 1 auto;">
+      <table class="data-table w-full" id="portfolio-mgr-table">
+        <thead>
+        <tr>
+          <th rowspan="2" style="text-align:left;width:52px">Tab</th>
+          <th rowspan="2" style="text-align:left">Manager</th>
+          <th rowspan="2" title="Current portfolio weight">Cur Wt</th>
+          <th rowspan="2" title="Proposed portfolio weight">Prop Wt</th>
+          <th colspan="2" style="text-align:center;border-left:1px solid var(--border2)" id="aum-group-head">AUM ($)</th>
+          <th rowspan="2" title="3-Factor Value–Growth positioning">3F&nbsp;V-G</th>
+          <th rowspan="2" title="Full-model Value–Growth positioning">Full&nbsp;V-G</th>
+          <th rowspan="2" title="Normalized Skill Z-score: annualized since-inception skill, z-scored against same-window peers">Norm&nbsp;Z</th>
+          <th rowspan="2" style="width:30px"></th>
+        </tr>
+        <tr>
+          <th class="sub" style="border-left:1px solid var(--border2)" title="Current weight × client total AUM">Cur</th>
+          <th class="sub" title="Proposed weight × client total AUM">Prop</th>
+        </tr>
+        </thead>
         <tbody id="portfolio-tbody"></tbody>
       </table>
     </div>
   </div>
 
-  <!-- ── Portfolio Optimizer panel (right side) ─────────────────────────── -->
-  <!-- Absolutely positioned so its height is bounded by the wrapper, which
-       is sized by the (in-flow) left panel. top:0/bottom:0 forces exact
-       height match without any JS. -->
-  <div class="panel" id="optimizer-panel"
-       style="position:absolute;right:0;top:0;bottom:0;width:calc(50% - 8px);
-              display:flex;flex-direction:column;min-height:0;overflow:hidden;">
-    <div class="panel-header" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;flex-shrink:0;">
-      <span class="panel-title">Portfolio Optimization</span>
-      <span id="opt-peer-label" style="font-family:var(--mono);font-size:10px;color:var(--text3);"></span>
-      <button class="btn btn-primary btn-sm" style="margin-left:auto;" onclick="runOptimization()">Run</button>
-    </div>
-    <div class="panel-body" style="padding:10px 12px;flex:1 1 auto;min-height:0;overflow-y:auto;">
-      <!-- Constraint summary -->
-      <div style="font-family:var(--mono);font-size:9px;color:var(--text3);line-height:1.5;margin-bottom:8px;">
-        Max norm skill · 4–8 managers · 5–20% per mgr · V-G within ±7% of 0
-      </div>
-
-      <!-- Forced manager section -->
-      <div style="border:1px solid var(--border);border-radius:3px;padding:8px;margin-bottom:8px;">
-        <div style="font-family:var(--mono);font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Forced managers</div>
-        <div id="forced-list" style="margin-bottom:6px;"></div>
-        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-          <input type="text" id="forced-search" placeholder="Search manager…" list="opt-cand-list"
-                 style="flex:1;min-width:140px;padding:3px 6px;font-family:var(--mono);font-size:11px;border:1px solid var(--border);border-radius:3px;background:var(--surface);color:var(--text);"
-                 oninput="onForcedSearchInput()">
-          <datalist id="opt-cand-list"></datalist>
-          <input type="number" id="forced-weight" placeholder="% (opt.)" step="0.1" min="0" max="100"
-                 style="width:78px;padding:3px 6px;font-family:var(--mono);font-size:11px;border:1px solid var(--border);border-radius:3px;background:var(--surface);color:var(--text);"
-                 title="Optional. Leave blank to let the optimizer choose the weight (within 5–20%).">
-          <button class="btn btn-outline btn-sm" onclick="addForcedManager()">Add</button>
-        </div>
-      </div>
-
-      <!-- Results table (scrolls with body if too tall) -->
-      <div id="opt-status" style="font-family:var(--mono);font-size:10px;color:var(--text3);margin-bottom:6px;">Click Run to optimize.</div>
-      <table class="data-table w-full" id="opt-table" style="display:none;">
-        <thead><tr>
-          <th style="text-align:left;width:50px">Tab</th>
-          <th style="text-align:left">Manager</th>
-          <th>Wt</th><th>3F V-G</th><th>Norm Skill (Z)</th>
-        </tr></thead>
-        <tbody id="opt-tbody"></tbody>
-      </table>
-    </div>
-    <!-- Sticky summary footer — stays visible regardless of body scroll -->
-    <div id="opt-summary-footer" style="flex-shrink:0;border-top:1px solid var(--border);padding:8px 12px;background:var(--surface);display:none;">
-      <div id="opt-summary" style="font-family:var(--mono);font-size:10px;color:var(--text2);line-height:1.6;"></div>
-    </div>
-  </div>
-  </div>
-
-  <!-- V-G POSITIONING (+ PORTFOLIO EDGE stacked below it) | FACTSET RISK EXPOSURES -->
-  <div class="mb-16" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:stretch;">
-    <!-- Left column: V-G positioning on top, Portfolio Edge beneath it -->
-    <div style="display:flex;flex-direction:column;gap:16px;">
-      <div class="summary-box plain">
+  <!-- Right column of row A: Value-Growth bars on top, Portfolio Edge + Diverse/Woman Owned beneath -->
+    <div style="display:flex;flex-direction:column;gap:16px;min-width:0;">
+      <div class="summary-box plain" id="vg-positioning-section">
         <div class="summary-box-title">Value — Growth Positioning</div>
         <div id="vg-summary"></div>
       </div>
@@ -691,9 +771,92 @@ td.skill-neg{color:var(--red)!important;}
           </div>
         </div>
       </div>
+      <div class="panel" id="diverse-section" style="display:none;">
+        <div class="panel-header" style="padding:8px 12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <span class="panel-title">Diverse / Woman Owned</span>
+          <span style="font-family:var(--mono);font-size:9px;color:var(--text3);">Majority-owned (≥50%)</span>
+          <span id="diverse-coverage-note" style="margin-left:auto;font-family:var(--mono);font-size:9px;color:var(--amber);"></span>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;">
+          <div style="padding:10px 14px;border-right:1px solid var(--border);">
+            <div style="font-family:var(--mono);font-size:9px;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;">Current</div>
+            <div id="diverse-current-value" style="font-family:var(--mono);font-size:22px;font-weight:600;margin-top:2px;color:var(--text);">--</div>
+            <div id="diverse-current-meta" style="font-family:var(--mono);font-size:10px;color:var(--text2);margin-top:5px;"></div>
+          </div>
+          <div style="padding:10px 14px;">
+            <div style="font-family:var(--mono);font-size:9px;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;">Proposed</div>
+            <div id="diverse-proposed-value" style="font-family:var(--mono);font-size:22px;font-weight:600;margin-top:2px;color:var(--text);">--</div>
+            <div id="diverse-proposed-meta" style="font-family:var(--mono);font-size:10px;color:var(--text2);margin-top:5px;"></div>
+          </div>
+        </div>
+      </div>
     </div>
-    <!-- Right column: FactSet Risk Exposures (stretches full height of left stack) -->
-    <div class="panel" id="risk-section">
+  </div>
+
+  <!-- PORTFOLIO OPTIMIZATION | FACTSET RISK EXPOSURES (own row, matched height) -->
+  <div class="mb-16" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:stretch;min-height:520px;">
+    <!-- Left: Portfolio Optimization — now on its own row so it gets full height.
+         The forced/excluded inputs stay fixed-size; the results area flexes. -->
+    <div class="panel" id="optimizer-panel"
+         style="min-width:0;display:flex;flex-direction:column;min-height:0;overflow:hidden;">
+      <div class="panel-header" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;flex-shrink:0;">
+        <span class="panel-title">Portfolio Optimization</span>
+        <span id="opt-peer-label" style="font-family:var(--mono);font-size:10px;color:var(--text3);"></span>
+        <button class="btn btn-primary btn-sm" style="margin-left:auto;" onclick="runOptimization()">Run</button>
+      </div>
+      <div class="panel-body" style="padding:10px 12px;flex:1 1 auto;min-height:0;overflow-y:auto;">
+        <!-- Constraint summary -->
+        <div style="font-family:var(--mono);font-size:9px;color:var(--text3);line-height:1.5;margin-bottom:8px;">
+          Max norm skill · 4–8 managers · 5–20% per mgr · V-G within ±7% of 0
+        </div>
+
+        <!-- Forced manager section -->
+        <div style="border:1px solid var(--border);border-radius:3px;padding:8px;margin-bottom:8px;">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Forced managers</div>
+          <div id="forced-list" style="margin-bottom:6px;"></div>
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+            <input type="text" id="forced-search" placeholder="Search manager…" list="opt-cand-list"
+                   style="flex:1;min-width:140px;padding:3px 6px;font-family:var(--mono);font-size:11px;border:1px solid var(--border);border-radius:3px;background:var(--surface);color:var(--text);"
+                   oninput="onForcedSearchInput()">
+            <datalist id="opt-cand-list"></datalist>
+            <input type="number" id="forced-weight" placeholder="% (opt.)" step="0.1" min="0" max="100"
+                   style="width:78px;padding:3px 6px;font-family:var(--mono);font-size:11px;border:1px solid var(--border);border-radius:3px;background:var(--surface);color:var(--text);"
+                   title="Optional. Leave blank to let the optimizer choose the weight (within 5–20%).">
+            <button class="btn btn-outline btn-sm" onclick="addForcedManager()">Add</button>
+          </div>
+        </div>
+
+        <!-- Excluded manager section -->
+        <div style="border:1px solid var(--border);border-radius:3px;padding:8px;margin-bottom:8px;">
+          <div style="font-family:var(--mono);font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Excluded managers</div>
+          <div id="excluded-list" style="margin-bottom:6px;"></div>
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+            <input type="text" id="excluded-search" placeholder="Search manager…" list="opt-excl-list"
+                   style="flex:1;min-width:140px;padding:3px 6px;font-family:var(--mono);font-size:11px;border:1px solid var(--border);border-radius:3px;background:var(--surface);color:var(--text);">
+            <datalist id="opt-excl-list"></datalist>
+            <button class="btn btn-outline btn-sm" onclick="addExcludedManager()">Add</button>
+          </div>
+        </div>
+
+        <!-- Results table (scrolls with body if too tall) -->
+        <div id="opt-status" style="font-family:var(--mono);font-size:10px;color:var(--text3);margin-bottom:6px;">Click Run to optimize.</div>
+        <table class="data-table w-full" id="opt-table" style="display:none;">
+          <thead><tr>
+            <th style="text-align:left;width:50px">Tab</th>
+            <th style="text-align:left">Manager</th>
+            <th>Wt</th><th>3F V-G</th><th>Norm Skill (Z)</th>
+          </tr></thead>
+          <tbody id="opt-tbody"></tbody>
+        </table>
+      </div>
+      <!-- Sticky summary footer — stays visible regardless of body scroll -->
+      <div id="opt-summary-footer" style="flex-shrink:0;border-top:1px solid var(--border);padding:8px 12px;background:var(--surface);display:none;">
+        <div id="opt-summary" style="font-family:var(--mono);font-size:10px;color:var(--text2);line-height:1.6;"></div>
+      </div>
+    </div>
+
+    <!-- Right: FactSet Risk Exposures -->
+    <div class="panel" id="risk-section" style="min-width:0;">
       <div class="panel-header" style="padding:8px 12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
         <span class="panel-title">FactSet Risk Exposures — Active Style</span>
         <select id="risk-sleeve-select" style="display:none;margin-left:auto;font-family:var(--mono);font-size:10px;padding:3px 6px;border:1px solid var(--border);border-radius:3px;background:var(--surface);color:var(--text);cursor:pointer;" onchange="onSleeveChange()">
@@ -706,9 +869,83 @@ td.skill-neg{color:var(--red)!important;}
     </div>
   </div>
 
-  <!-- MARKET CYCLE CHART (side-by-side: current vs proposed, SVG) -->
-  <div class="contrib-section mb-16" id="market-cycle-section">
-    <div class="panel">
+  <!-- CLIENT REDEMPTION / REBALANCE (own row) -->
+  <div class="mb-16">
+    <div class="panel" id="redemption-panel" style="min-width:0;display:flex;flex-direction:column;">
+      <div class="panel-header" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;flex-shrink:0;">
+        <span class="panel-title">Client Redemption</span>
+        <span id="red-aum-label" style="font-family:var(--mono);font-size:10px;color:var(--text3);"></span>
+        <button class="btn btn-primary btn-sm" style="margin-left:auto;" onclick="runRedemption()">Run</button>
+      </div>
+      <div class="panel-body" style="padding:10px 12px;">
+        <!-- Constraint summary -->
+        <div style="font-family:var(--mono);font-size:9px;color:var(--text3);line-height:1.5;margin-bottom:8px;">
+          Max edge retained · pulls from lowest-edge managers · V-G within ±2% of current & ±7% cap
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+          <!-- Left column: amount + include/exclude -->
+          <div style="min-width:0;">
+            <!-- Redemption amount -->
+            <div style="border:1px solid var(--border);border-radius:3px;padding:8px;margin-bottom:8px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+              <span style="font-family:var(--mono);font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;">Redeem&nbsp;$</span>
+              <input type="number" id="red-amount" placeholder="e.g. 50000000" step="1000000" min="0"
+                     style="flex:1;min-width:120px;padding:3px 6px;font-family:var(--mono);font-size:11px;border:1px solid var(--border);border-radius:3px;background:var(--surface);color:var(--text);">
+            </div>
+
+            <!-- Pull-from (include) section -->
+            <div style="border:1px solid var(--border);border-radius:3px;padding:8px;margin-bottom:8px;">
+              <div style="font-family:var(--mono);font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Pull only from</div>
+              <div id="red-include-list" style="margin-bottom:6px;"></div>
+              <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+                <input type="text" id="red-include-search" placeholder="Search manager…" list="red-cand-list"
+                       style="flex:1;min-width:140px;padding:3px 6px;font-family:var(--mono);font-size:11px;border:1px solid var(--border);border-radius:3px;background:var(--surface);color:var(--text);">
+                <datalist id="red-cand-list"></datalist>
+                <button class="btn btn-outline btn-sm" onclick="addRedInclude()">Add</button>
+              </div>
+            </div>
+
+            <!-- Exclude section -->
+            <div style="border:1px solid var(--border);border-radius:3px;padding:8px;">
+              <div style="font-family:var(--mono);font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Exclude from redemption</div>
+              <div id="red-exclude-list" style="margin-bottom:6px;"></div>
+              <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+                <input type="text" id="red-exclude-search" placeholder="Search manager…" list="red-excl-list"
+                       style="flex:1;min-width:140px;padding:3px 6px;font-family:var(--mono);font-size:11px;border:1px solid var(--border);border-radius:3px;background:var(--surface);color:var(--text);">
+                <datalist id="red-excl-list"></datalist>
+                <button class="btn btn-outline btn-sm" onclick="addRedExclude()">Add</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right column: results -->
+          <div style="min-width:0;">
+            <div id="red-status" style="font-family:var(--mono);font-size:10px;color:var(--text3);margin-bottom:6px;">Enter an amount and click Run.</div>
+            <div style="overflow-x:auto;">
+              <table class="data-table w-full" id="red-table" style="display:none;">
+                <thead><tr>
+                  <th style="text-align:left">Manager</th>
+                  <th>Cur Wt</th><th>Cur $</th><th>Pull $</th><th>Rem $</th>
+                  <th>New Wt</th><th>3F V-G</th><th>Norm Z</th>
+                </tr></thead>
+                <tbody id="red-tbody"></tbody>
+              </table>
+            </div>
+            <div id="red-summary-footer" style="border-top:1px solid var(--border);padding:8px 0 0;margin-top:8px;display:none;">
+              <div id="red-summary" style="font-family:var(--mono);font-size:10px;color:var(--text2);line-height:1.6;"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MARKET CYCLE (left, ~2/3 width) | HOLDINGS OVERLAP (right, fills the rest; equal height) -->
+  <div class="mb-16" style="display:flex;gap:16px;align-items:stretch;flex-wrap:wrap;">
+
+  <!-- MARKET CYCLE CHART (single combined chart, SVG) -->
+  <div class="contrib-section" id="market-cycle-section" style="flex:1.15 1 0;min-width:520px;">
+    <div class="panel" style="height:100%;">
       <div class="panel-header">
         <span class="panel-title">Market Cycle Chart</span>
         <span id="mc-meta" style="margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--text3)"></span>
@@ -716,18 +953,53 @@ td.skill-neg{color:var(--red)!important;}
       <div id="mc-missing-universe" style="display:none;padding:16px;text-align:center;color:var(--amber);font-family:var(--mono);font-size:11px;">
         No universe data loaded for this peer group — upload a universe file on the Setup tab.
       </div>
-      <div id="mc-charts-wrap" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px;background:var(--surface);">
-        <div>
-          <div style="font-family:var(--mono);font-size:10px;color:var(--text2);text-align:center;margin-bottom:8px;text-transform:uppercase;letter-spacing:.06em;">Current Portfolio</div>
-          <div id="mc-current-svg-wrap" style="position:relative;"></div>
+      <div id="mc-charts-wrap" style="display:block;padding:10px 16px;background:var(--surface);">
+        <div id="mc-combined-svg-wrap" style="position:relative;"></div>
+      </div>
+      <div id="mc-placement-table" style="padding:0 16px 16px;overflow-x:auto;"></div>
+    </div>
+  </div>
+
+  <!-- HOLDINGS OVERLAP MATRIX (right of market cycle; current over proposed) -->
+  <div class="contrib-section" id="overlap-section" style="display:none;flex:1 1 0;min-width:300px;">
+    <div class="panel" style="height:100%;display:flex;flex-direction:column;">
+      <div class="panel-header" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+        <span class="panel-title">Holdings Overlap</span>
+        <span id="overlap-subtitle" style="font-family:var(--mono);font-size:10px;color:var(--text3);"></span>
+      </div>
+      <div class="ovl-controls">
+        <span class="ovl-seg-label">Weight basis</span>
+        <div class="ovl-seg" id="ovl-basis-seg">
+          <button data-basis="internal" class="active" onclick="setOverlapBasis('internal')" title="Each manager's own position weights (sum to 100% per manager) — measures strategy similarity">Strategy</button>
+          <button data-basis="scaled" onclick="setOverlapBasis('scaled')" title="Position weights scaled by each manager's allocation in the client portfolio — measures actual doubling-up">Client-scaled</button>
         </div>
-        <div>
-          <div style="font-family:var(--mono);font-size:10px;color:var(--text2);text-align:center;margin-bottom:8px;text-transform:uppercase;letter-spacing:.06em;">Proposed Portfolio</div>
-          <div id="mc-proposed-svg-wrap" style="position:relative;"></div>
+        <span class="ovl-legend">
+          low <span class="ovl-ramp"></span> high&nbsp;common wt
+        </span>
+      </div>
+      <div id="overlap-pair" style="display:flex;flex-direction:column;gap:12px;padding:0 4px;flex:1 1 auto;min-height:0;">
+        <div style="min-width:0;flex:1 1 0;min-height:0;display:flex;flex-direction:column;">
+          <div class="ovl-matrix-caption" style="font-family:var(--mono);font-size:10px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;padding:6px 12px 2px;">Current</div>
+          <div class="overlap-matrix-wrap" style="flex:1 1 0;min-height:0;overflow:auto;"><table class="ovl-matrix" id="overlap-matrix-current"></table></div>
+        </div>
+        <div style="min-width:0;flex:1 1 0;min-height:0;display:flex;flex-direction:column;">
+          <div class="ovl-matrix-caption" style="font-family:var(--mono);font-size:10px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;padding:6px 12px 2px;">Proposed</div>
+          <div class="overlap-matrix-wrap" style="flex:1 1 0;min-height:0;overflow:auto;"><table class="ovl-matrix" id="overlap-matrix-proposed"></table></div>
         </div>
       </div>
-      <div id="mc-placement-table" style="padding:0 16px 16px;"></div>
+      <div id="overlap-note"></div>
+      <div id="overlap-detail">
+        <div class="ovl-det-head">
+          <span class="ovl-det-title" id="ovl-det-title"></span>
+          <span class="ovl-det-close" onclick="closeOverlapDetail()">✕</span>
+        </div>
+        <div style="overflow-x:auto;max-height:340px;">
+          <table id="overlap-detail-table"></table>
+        </div>
+      </div>
     </div>
+  </div>
+
   </div>
 
   <!-- PORTFOLIO EXPOSURES (right below market cycle) -->
@@ -763,7 +1035,7 @@ td.skill-neg{color:var(--red)!important;}
   </div>
 
   <!-- MARGINAL CONTRIBUTION TO RISK (bar chart) -->
-  <div class="contrib-section mb-16">
+  <div class="contrib-section mb-16" id="mcr-section">
     <div class="panel">
       <div class="panel-header">
         <span class="panel-title">Marginal Contribution to Risk</span>
@@ -835,6 +1107,37 @@ td.skill-neg{color:var(--red)!important;}
           </thead>
           <tbody id="regime-tbody">
             <tr><td colspan="6" style="text-align:center;color:var(--text3);padding:20px;">Select a portfolio to load data.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ACTIVE-MANAGER-STRUGGLE SCENARIO (SPIVA-style breadth on peer universe) -->
+  <div class="contrib-section mb-16" id="struggle-section">
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Active-Manager-Struggle Scenario</span>
+        <span id="struggle-meta" style="margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--text3)"></span>
+      </div>
+      <div style="overflow-x:auto;">
+        <table class="data-table w-full" id="struggle-table">
+          <thead>
+            <tr>
+              <th rowspan="2" style="text-align:left">Environment</th>
+              <th rowspan="2">Months</th>
+              <th colspan="2" class="period-group sep-col">Avg Monthly Return</th>
+              <th colspan="2" class="period-group sep-col">Excess vs Benchmark</th>
+              <th colspan="2" class="period-group sep-col">Hit Rate</th>
+            </tr>
+            <tr>
+              <th class="sub sep-col">Current</th><th class="sub">Proposed</th>
+              <th class="sub sep-col">Current</th><th class="sub">Proposed</th>
+              <th class="sub sep-col">Current</th><th class="sub">Proposed</th>
+            </tr>
+          </thead>
+          <tbody id="struggle-tbody">
+            <tr><td colspan="8" style="text-align:center;color:var(--text3);padding:20px;">Select a portfolio to load data.</td></tr>
           </tbody>
         </table>
       </div>
@@ -986,19 +1289,51 @@ td.skill-neg{color:var(--red)!important;}
   <div class="rpt-controls">
     <div class="rpt-title-row">
       <div>
-        <div class="rpt-title">Default Portfolio Report</div>
-        <div class="rpt-subtitle">Demo layout — wired to mock data for a theoretical client. We'll connect to live portfolios once the UI is locked.</div>
-      </div>
-      <div class="rpt-actions">
-        <button class="btn btn-outline btn-sm" onclick="window.print()">Print / Export PDF</button>
+        <div class="rpt-title">Reports</div>
+        <div class="rpt-subtitle">Generate a downloadable report for the current data.</div>
       </div>
     </div>
   </div>
 
+  <div class="rpt-launcher">
+    <div class="rpt-card">
+      <div class="rpt-card-title">Quarterly Portfolio Report</div>
+      <div class="rpt-card-desc">Full portfolio report — holdings, value-growth positioning, FactSet risk, exposures, market cycle, and performance — exported as a PDF. Sections without loaded data are flagged inside the PDF.</div>
+      <div style="display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap;">
+        <div>
+          <div id="rpt-client-list"
+               style="border:1px solid var(--border);border-radius:3px;background:var(--surface);min-width:200px;"></div>
+          <div style="font-family:var(--mono);font-size:9px;color:var(--text3);margin-top:3px;">Click to select · one report per client in the PDF</div>
+        </div>
+        <button class="btn btn-outline btn-sm" id="btn-quarterly-report" onclick="exportQuarterlyReportPDF()">Download PDF</button>
+      </div>
+    </div>
+    <div class="rpt-card">
+      <div class="rpt-card-title">Dispersion Report</div>
+      <div class="rpt-card-desc">Backtested monthly return streams for every client portfolio (current weights, monthly rebalance, 5-year minimum with clone backfill), plus per-month cross-client dispersion stats — as an Excel workbook.</div>
+      <button class="btn btn-outline btn-sm" id="btn-dispersion-report" onclick="exportDispersionReport()">Download Excel</button>
+    </div>
+    <div class="rpt-card">
+      <div class="rpt-card-title">Returns Download</div>
+      <div class="rpt-card-desc">Buy-list manager monthly returns and their full-factor clone returns, grouped by sub-asset class — two matching tabs (Manager Returns, Clone Returns) in an Excel workbook. Pick which sections to include.</div>
+      <div style="display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap;">
+        <div>
+          <div id="rtn-section-list"
+               style="border:1px solid var(--border);border-radius:3px;background:var(--surface);min-width:160px;"></div>
+          <div style="font-family:var(--mono);font-size:9px;color:var(--text3);margin-top:3px;">Click to select sub-asset classes</div>
+        </div>
+        <button class="btn btn-outline btn-sm" id="btn-returns-download" onclick="exportReturnsDownload()">Download Excel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Report sheet rendered OFF-SCREEN: never shown inline, only captured to PDF. -->
+  <div id="rpt-offscreen" aria-hidden="true">
   <div class="rpt-sheet" id="rpt-sheet">
+    <div class="rpt-page" id="rpt-page-1">
     <!-- Cover header -->
     <div class="rpt-cover">
-      <div class="rpt-cover-eyebrow">Default Portfolio Report</div>
+      <div class="rpt-cover-eyebrow">Quarterly Portfolio Report</div>
       <div class="rpt-cover-client" id="rpt-cover-client">Sample Pension Fund</div>
       <div class="rpt-cover-meta">
         <span>Benchmark: <strong id="rpt-cover-bmk">MSCI ACWI</strong></span>
@@ -1026,12 +1361,23 @@ td.skill-neg{color:var(--red)!important;}
       </table>
     </section>
 
-    <!-- 2-col: V-G + FactSet Risk -->
-    <div class="rpt-row-2col">
-      <section class="rpt-section">
-        <h3 class="rpt-section-title">Value–Growth Positioning</h3>
-        <div id="rpt-vg-positioning"></div>
-      </section>
+    <!-- 2-col: left column stacks V-G Positioning, Portfolio Edge, and
+         Diverse/Woman Owned; right column is FactSet Risk (full height). -->
+    <div class="rpt-row-2col" style="align-items:start;">
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        <section class="rpt-section">
+          <h3 class="rpt-section-title">Value–Growth Positioning</h3>
+          <div id="rpt-vg-positioning"></div>
+        </section>
+        <section class="rpt-section">
+          <h3 class="rpt-section-title">Portfolio Edge — Current</h3>
+          <div id="rpt-edge"></div>
+        </section>
+        <section class="rpt-section">
+          <h3 class="rpt-section-title">Diverse / Woman Owned — Current</h3>
+          <div id="rpt-diverse"></div>
+        </section>
+      </div>
       <section class="rpt-section">
         <h3 class="rpt-section-title">FactSet Risk — Current</h3>
         <div id="rpt-factset-risk"></div>
@@ -1049,15 +1395,24 @@ td.skill-neg{color:var(--red)!important;}
       </div>
     </section>
 
-    <!-- Market Cycle (forces print page break to start page 2; gets full width) -->
+    </div><!-- #rpt-page-1 -->
+    <div class="rpt-page" id="rpt-page-2">
+    <!-- Market Cycle (page 2) — width-constrained so the aspect-preserving
+         SVG renders shorter, leaving room for the overlap matrix below. -->
     <section class="rpt-section rpt-section-mc">
       <h3 class="rpt-section-title">Market Cycle Positioning — Current</h3>
       <div class="rpt-mc-panel">
         <div class="rpt-mc-col">
           <div class="rpt-mc-col-label">Current Portfolio</div>
-          <div id="rpt-mc-wrap" style="position:relative;"></div>
+          <div id="rpt-mc-wrap" style="position:relative;max-width:72%;margin:0 auto;"></div>
         </div>
       </div>
+    </section>
+
+    <!-- Holdings Overlap (current weights) -->
+    <section class="rpt-section">
+      <h3 class="rpt-section-title">Holdings Overlap — Current</h3>
+      <div id="rpt-overlap"></div>
     </section>
 
     <!-- MCR -->
@@ -1067,11 +1422,12 @@ td.skill-neg{color:var(--red)!important;}
       <div class="rpt-caption" id="rpt-mcr-caption"></div>
     </section>
 
+    </div><!-- #rpt-page-2 -->
+    <div class="rpt-page" id="rpt-page-3">
     <!-- ── PAGE 3: Performance & Complements ─────────────────────────────
-         Forces page break before this section (matches the Market Cycle
-         pattern). Two mirrored halves: actual (top) and backtested (bottom),
-         each with: trailing-period perf, calendar-year perf, quarterly
-         excess matrix, ideal complements. -->
+         Two mirrored halves: actual (top) and backtested (bottom), each with:
+         trailing-period perf, calendar-year perf, quarterly excess matrix,
+         ideal complements. -->
     <section class="rpt-section rpt-section-p3 rpt-section-perf">
       <h3 class="rpt-section-title">Performance — Actual Client Track Record</h3>
       <table class="data-table rpt-perf-table" id="rpt-perf-actual-trailing"></table>
@@ -1111,7 +1467,9 @@ td.skill-neg{color:var(--red)!important;}
       <h3 class="rpt-section-title">Ideal Complements — Backtested Portfolio</h3>
       <table class="data-table rpt-cmp-table" id="rpt-cmp-backtested"></table>
     </section>
-  </div>
+    </div><!-- #rpt-page-3 -->
+  </div><!-- #rpt-sheet -->
+  </div><!-- #rpt-offscreen -->
 </div>
 
 </div><!-- end main -->
@@ -1131,16 +1489,27 @@ td.skill-neg{color:var(--red)!important;}
   </div>
 </div>
 
+<!-- html2canvas: used by the "Print Memo Report" button to capture
+     screenshots of each panel and embed them in the PowerPoint export. -->
+<script src="/static/vendor/html2canvas.min.js"></script>
 <script>
 const S = {
   uploadedFiles:{}, isReady:false, portfolioData:null,
   allManagers:[], selectedMgrForAdd:null,
-  currentPeer:'EAFE', currentPeerStyle:'Growth', peerCache:{}, portfolioManagers:[],
+  // Peer Groups tab: supports multi-select. selectedPeers is a Set of
+  // "tab|style" keys (e.g. "EAFE|Growth"). Clicking a peer button toggles
+  // its key in the set. The tables on the page merge managers from every
+  // key in the set into a single combined view. Initialized to match the
+  // "active" class on the first button in the HTML.
+  selectedPeers: new Set(['EAFE|Growth']),
+  peerCache:{}, portfolioManagers:[],
   detailChartPie:null, detailChartLine:null,
   hasSecurityRisk: false,   // true when Security-Level Risk DNA file is loaded
   sleeveOptions:   [],      // sleeve options for current client
   idealComplement: null,    // {best, n_underperform_months, ...} from /ideal_complement
   idealComplementError: null,
+  idealFactorComplement: null,   // {best, ...} from /ideal_factor_complement
+  idealFactorComplementError: null,
 };
 
 // Sort state for peer table
@@ -1591,6 +1960,7 @@ async function loadPortfolio() {
   if(!client||!S.isReady) return;
   const data=await fetch(`/portfolio/${encodeURIComponent(client)}`).then(r=>r.json());
   S.portfolioManagers=data.managers.map(m=>({...m}));
+  S.clientAUM = (data.client_aum != null) ? data.client_aum : null;
   // Overrides are resolved on-demand via effectiveBuckets() / effectiveVG()
   // at every render/payload point — no mutation needed here.
   // Clear any market-cycle overrides from the previous portfolio  for (const k of Object.keys(mcOverrides)) delete mcOverrides[k];
@@ -1601,11 +1971,13 @@ async function loadPortfolio() {
   loadRiskAnalysis();
   loadMarketCycle();
   loadIdealComplement();
+  loadIdealFactorComplement();
   onClientChangeRefreshOpt();
   // Auto-load exposures if file is already uploaded
   if (S.hasExposures) {
     await buildExposuresSelector();
     loadExposures(expCurrentGrouping || null);
+    loadOverlap();
   }
   const al=document.getElementById('unmatched-alert');
   if(data.unmatched&&data.unmatched.length){al.style.display='block';al.className='alert alert-warn';al.innerHTML=`<strong>Unmatched:</strong> ${data.unmatched.join(', ')}`;}
@@ -1629,18 +2001,82 @@ function renderPortfolioTable() {
     const nsC = nsZ==null?'':nsZ>0?'skill-pos':'skill-neg';
     const nsTxt = nsZ==null?'--':(nsZ>=0?'+':'')+nsZ.toFixed(2);
     const nsTooltip = nsZ!=null ? `${m.ns_n_obs||'?'} mo · ${m.ns_n_peers||'?'} peers (${m.ns_adj_method||''})` : 'Insufficient history or not computed';
-    return `<tr>
+    // Qualitative chevron — only shown when a firm/strategy record matched.
+    const hasQ = m.q_firm != null;
+    const isOpen = S.qualOpenRows && S.qualOpenRows.has(i);
+    const chev = hasQ
+      ? `<span onclick="toggleQualRow(${i})" style="cursor:pointer;color:var(--text3);margin-right:6px;user-select:none;display:inline-block;width:10px;" title="Firm & strategy detail">${isOpen?'▾':'▸'}</span>`
+      : `<span style="display:inline-block;width:10px;margin-right:6px;"></span>`;
+    const caum = S.clientAUM;  // client total AUM ($) or null
+    const aumCur  = caum!=null ? fmtDollars(caum * (m.current_weight  || 0)) : '<span style="color:var(--text3)">—</span>';
+    const aumProp = caum!=null ? fmtDollars(caum * (m.proposed_weight || 0)) : '<span style="color:var(--text3)">—</span>';
+    const mainRow = `<tr>
       <td><span class="badge badge-blue mono">${m.tab}</span></td>
-      <td style="font-weight:500">${overDot}${m.matched_name}</td>
+      <td style="font-weight:500">${chev}${overDot}${m.matched_name}</td>
       <td class="mono">${fmtPct(m.current_weight)}</td>
       <td><input type="number" step="0.1" min="0" max="100" value="${(m.proposed_weight*100).toFixed(1)}" onchange="updateWeight(${i},this.value)" oninput="updateWeight(${i},this.value)"><span style="font-family:var(--mono);font-size:10px;color:var(--text3);margin-left:2px">%</span></td>
+      <td class="mono" style="border-left:1px solid var(--border2)">${aumCur}</td>
+      <td class="mono" id="aum-prop-${i}">${aumProp}</td>
       <td class="mono ${vg3C}">${fmtPct(vg3F)}</td>
       <td class="mono ${vgFC}">${fmtPct(vgFull)}</td>
       <td class="mono ${nsC}" title="${nsTooltip}">${nsTxt}</td>
       <td><button class="btn-ghost" onclick="removeManager(${i})" style="color:var(--text3)">✕</button></td>
     </tr>`;
+    return mainRow + (hasQ && isOpen ? renderQualDetailRow(m) : '');
   }).join('');
-  tbody.innerHTML = mgrRows + renderIdealComplementRows();
+  // Client-total AUM banner row (only when the weights file carries it).
+  let clientAumRow = '';
+  if (S.clientAUM != null) {
+    const caum = S.clientAUM;
+    clientAumRow = `<tr style="background:var(--surface3);border-bottom:2px solid var(--border2);">
+      <td></td>
+      <td style="font-weight:600;font-family:var(--mono);font-size:11px;">Client Total AUM</td>
+      <td></td><td></td>
+      <td class="mono" colspan="2" style="border-left:1px solid var(--border2);font-weight:600;">${fmtDollars(caum)}</td>
+      <td></td><td></td><td></td><td></td>
+    </tr>`;
+  }
+  tbody.innerHTML = clientAumRow + mgrRows + renderIdealComplementRows() + renderIdealFactorComplementRows();
+}
+
+// Expandable firm/strategy detail strip beneath a portfolio manager row.
+function renderQualDetailRow(m) {
+  const money = v => v==null ? '<span style="color:var(--text3)">—</span>'
+    : (v>=1000 ? '$'+(v/1000).toFixed(1)+'B' : '$'+Math.round(v)+'M');
+  const divCell = v => {
+    if (v==null) return '<span style="color:var(--text3)">—</span>';
+    if (v===0)   return '<span style="color:var(--text3)">0%</span>';
+    const c = v>=50 ? 'var(--green)' : 'var(--amber)';
+    return `<span style="color:${c};font-weight:600;">${Math.round(v)}%</span>`;
+  };
+  const fld = (label, val) =>
+    `<div><div style="color:var(--text3);font-size:9px;text-transform:uppercase;letter-spacing:.05em;">${label}</div>`
+    + `<div style="margin-top:2px;">${val}</div></div>`;
+  // Sibling strategies at the same firm, and total weight the client holds
+  // with this firm across all its held strategies.
+  const sibs = S.portfolioManagers.filter(x => x.q_firm && x.q_firm === m.q_firm);
+  const others = sibs.map(x => x.matched_name).filter(n => n !== m.matched_name);
+  const firmTotCur = sibs.reduce((s,x)=>s+(x.current_weight||0),0);
+  const firmTotProp = sibs.reduce((s,x)=>s+(x.proposed_weight||0),0);
+  const firmRoll = sibs.length>1
+    ? fld('Total held w/ firm', `<span style="color:var(--amber);font-weight:600;">${fmtPct(firmTotCur)} cur · ${fmtPct(firmTotProp)} prop</span>`)
+    : '';
+  return `<tr style="background:var(--surface2);"><td></td><td colspan="9" style="padding:10px 14px;">
+    <div style="display:flex;gap:22px;flex-wrap:wrap;align-items:flex-start;font-family:var(--mono);font-size:11px;">
+      ${fld('Firm', `<span style="font-weight:600;">${m.q_firm}</span>`)}
+      ${fld('Firm AUM', money(m.q_firm_aum))}
+      ${fld('Diverse/Woman %', divCell(m.q_diverse_pct))}
+      ${fld('Ownership', m.q_ownership ? escapeHtml(m.q_ownership) : '<span style="color:var(--text3)">—</span>')}
+      ${firmRoll}
+      ${others.length ? `<div style="flex:1;min-width:160px;"><div style="color:var(--text3);font-size:9px;text-transform:uppercase;letter-spacing:.05em;">Other strategies at firm</div><div style="margin-top:2px;color:var(--text2);">${others.map(escapeHtml).join(' · ')}</div></div>` : ''}
+    </div></td></tr>`;
+}
+
+function toggleQualRow(i) {
+  if (!S.qualOpenRows) S.qualOpenRows = new Set();
+  if (S.qualOpenRows.has(i)) S.qualOpenRows.delete(i);
+  else S.qualOpenRows.add(i);
+  renderPortfolioTable();
 }
 
 // ── Ideal Complement (backtested hit-rate complement) ─────────────────────
@@ -1649,12 +2085,12 @@ function renderIdealComplementRows() {
   // even while loading or when no candidate qualifies.
   const ic    = S.idealComplement;
   const err   = S.idealComplementError;
-  const spacer = `<tr class="ic-spacer"><td colspan="8"></td></tr>`;
+  const spacer = `<tr class="ic-spacer"><td colspan="10"></td></tr>`;
 
   // Loading state — quietly indicate while the fetch is in flight
   if (ic === undefined) {
-    return spacer + `<tr class="ic-header"><td colspan="8">
-      <span class="ic-title">Ideal Complement</span>
+    return spacer + `<tr class="ic-header"><td colspan="10">
+      <span class="ic-title">Ideal Manager Complement</span>
       <span class="ic-stat" style="color:var(--text3)">Computing…</span>
     </td></tr>`;
   }
@@ -1663,8 +2099,8 @@ function renderIdealComplementRows() {
   // reason, no candidate row.
   if (!ic || !ic.best) {
     const msg = err || (ic && ic.error) || 'Select a portfolio to see the best-fit complement.';
-    return spacer + `<tr class="ic-header"><td colspan="8">
-      <span class="ic-title">Ideal Complement</span>
+    return spacer + `<tr class="ic-header"><td colspan="10">
+      <span class="ic-title">Ideal Manager Complement</span>
       <span class="ic-stat" style="color:var(--text3)">${escapeHtml(msg)}</span>
     </td></tr>`;
   }
@@ -1684,14 +2120,16 @@ function renderIdealComplementRows() {
              + `<span style="color:var(--text3)">vs ${escapeHtml(ic.benchmark_name || ic.peer_benchmark || 'benchmark')}</span>`;
 
   return spacer + `
-    <tr class="ic-header"><td colspan="8">
-      <span class="ic-title">Ideal Complement</span>
+    <tr class="ic-header"><td colspan="10">
+      <span class="ic-title">Ideal Manager Complement</span>
       <span class="ic-stat">${stat}</span>
     </td></tr>
     <tr class="ic-candidate">
       <td><span class="badge badge-blue mono">${b.tab}</span></td>
       <td style="font-weight:500">${escapeHtml(b.name)}</td>
       <td class="mono" style="color:var(--text3)">—</td>
+      <td class="mono" style="color:var(--text3)">—</td>
+      <td class="mono" style="color:var(--text3);border-left:1px solid var(--border2)">—</td>
       <td class="mono" style="color:var(--text3)">—</td>
       <td class="mono ${vg3C}">${fmtPct(vg3)}</td>
       <td class="mono ${vgFC}">${fmtPct(vgF)}</td>
@@ -1744,10 +2182,105 @@ async function loadIdealComplement() {
   renderPortfolioTable();
 }
 
+// ── Ideal Factor Complement (backtested factor-index complement) ──────────
+// Sibling of the manager complement above: the factor INDEX that most
+// consistently beat the benchmark during the proposed portfolio's
+// underperformance months. Factor rows have no V-G / norm-skill, so those
+// cells are dashed out.
+function renderIdealFactorComplementRows() {
+  const ic  = S.idealFactorComplement;
+  const err = S.idealFactorComplementError;
+  const spacer = `<tr class="ifc-spacer"><td colspan="10"></td></tr>`;
+
+  if (ic === undefined) {
+    return spacer + `<tr class="ifc-header"><td colspan="10">
+      <span class="ic-title">Ideal Factor Complement</span>
+      <span class="ic-stat" style="color:var(--text3)">Computing…</span>
+    </td></tr>`;
+  }
+  if (!ic || !ic.best) {
+    const msg = err || (ic && ic.error) || 'Select a portfolio to see the best-fit factor.';
+    return spacer + `<tr class="ifc-header"><td colspan="10">
+      <span class="ic-title">Ideal Factor Complement</span>
+      <span class="ic-stat" style="color:var(--text3)">${escapeHtml(msg)}</span>
+    </td></tr>`;
+  }
+
+  const b   = ic.best;
+  const hr  = (b.hit_rate*100).toFixed(1) + '%';
+  const ae  = ((b.avg_excess||0)*100).toFixed(2) + '%';
+  const stat = `Hit rate <strong>${hr}</strong> · Avg excess <strong>${ae}</strong> · `
+             + `${b.n_months} mo (of ${ic.n_underperform_months} underperformance mo) · `
+             + `<span style="color:var(--text3)">vs ${escapeHtml(ic.benchmark_name || ic.peer_benchmark || 'benchmark')}</span>`;
+
+  return spacer + `
+    <tr class="ifc-header"><td colspan="10">
+      <span class="ic-title">Ideal Factor Complement</span>
+      <span class="ic-stat">${stat}</span>
+    </td></tr>
+    <tr class="ifc-candidate">
+      <td><span class="badge badge-blue mono">${escapeHtml(b.category || 'Factor')}</span></td>
+      <td style="font-weight:500">${escapeHtml(b.name)}</td>
+      <td class="mono" style="color:var(--text3)">—</td>
+      <td class="mono" style="color:var(--text3)">—</td>
+      <td class="mono" style="color:var(--text3);border-left:1px solid var(--border2)">—</td>
+      <td class="mono" style="color:var(--text3)">—</td>
+      <td class="mono" style="color:var(--text3)">—</td>
+      <td class="mono" style="color:var(--text3)">—</td>
+      <td class="mono" style="color:var(--text3)">—</td>
+      <td></td>
+    </tr>`;
+}
+
+let ifcTimer = null;
+function scheduleIdealFactorComplement() {
+  if (ifcTimer) clearTimeout(ifcTimer);
+  ifcTimer = setTimeout(loadIdealFactorComplement, 500);
+}
+
+async function loadIdealFactorComplement() {
+  if (!S.portfolioManagers || !S.portfolioManagers.length) {
+    S.idealFactorComplement = null;
+    S.idealFactorComplementError = null;
+    renderPortfolioTable();
+    return;
+  }
+  S.idealFactorComplement = undefined;  // signals "loading"
+  renderPortfolioTable();
+  try {
+    const res = await fetch('/ideal_factor_complement', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        client_name: document.getElementById('client-select').value || null,
+        managers: S.portfolioManagers.map(m => ({
+          matched_name:    m.matched_name,
+          tab:             m.tab,
+          current_weight:  m.current_weight || 0,
+          proposed_weight: m.proposed_weight || 0,
+        })),
+      }),
+    });
+    const data = await res.json();
+    if (data.error) {
+      S.idealFactorComplement = null;
+      S.idealFactorComplementError = data.error;
+    } else {
+      S.idealFactorComplement = data;
+      S.idealFactorComplementError = null;
+    }
+  } catch (e) {
+    S.idealFactorComplement = null;
+    S.idealFactorComplementError = 'Request failed: ' + e;
+  }
+  renderPortfolioTable();
+}
+
 // ── Portfolio Optimizer ──────────────────────────────────────────────────
 // State for the optimizer panel. forced is an array of {name, tab, weight}.
 const OPT = {
   forced:     [],   // user-pinned managers, weights in decimal
+  excluded:   [],   // managers the optimizer must never suggest: {name, tab}
   candidates: [],   // list returned by /optimize_candidates (all buy-list managers)
   peerGroup:  null, // peer group used in the last run (resolved from client)
   result:     null, // last result blob
@@ -1772,14 +2305,28 @@ async function loadOptCandidates() {
 
 function refreshForcedDatalist() {
   const dl = document.getElementById('opt-cand-list');
+  if (dl) {
+    // Suggest neither already-forced nor already-excluded managers.
+    const forced = new Set(OPT.forced.map(f => `${f.tab}::${f.name}`));
+    const excl   = new Set(OPT.excluded.map(f => `${f.tab}::${f.name}`));
+    dl.innerHTML = OPT.candidates
+      .filter(c => !forced.has(`${c.tab}::${c.name}`) && !excl.has(`${c.tab}::${c.name}`))
+      .map(c => `<option value="${escapeHtml(c.name)} [${c.tab}]"></option>`)
+      .join('');
+  }
+  refreshExcludedDatalist();
+}
+
+function refreshExcludedDatalist() {
+  const dl = document.getElementById('opt-excl-list');
   if (!dl) return;
-  // Exclude any already-pinned. Show "Name [tab]" so peer-group is visible.
-  const pinned = new Set(OPT.forced.map(f => `${f.tab}::${f.name}`));
-  const html = OPT.candidates
-    .filter(c => !pinned.has(`${c.tab}::${c.name}`))
+  // Suggest neither already-excluded nor already-forced managers.
+  const excl   = new Set(OPT.excluded.map(f => `${f.tab}::${f.name}`));
+  const forced = new Set(OPT.forced.map(f => `${f.tab}::${f.name}`));
+  dl.innerHTML = OPT.candidates
+    .filter(c => !excl.has(`${c.tab}::${c.name}`) && !forced.has(`${c.tab}::${c.name}`))
     .map(c => `<option value="${escapeHtml(c.name)} [${c.tab}]"></option>`)
     .join('');
-  dl.innerHTML = html;
 }
 
 function renderForcedList() {
@@ -1861,6 +2408,57 @@ function removeForcedManager(i) {
   refreshForcedDatalist();
 }
 
+function renderExcludedList() {
+  const el = document.getElementById('excluded-list');
+  if (!el) return;
+  if (!OPT.excluded.length) {
+    el.innerHTML = '<div style="font-family:var(--mono);font-size:10px;color:var(--text3);font-style:italic;">None — all buy-list managers eligible</div>';
+    return;
+  }
+  el.innerHTML = OPT.excluded.map((f, i) => `
+    <div style="display:flex;align-items:center;gap:6px;padding:3px 6px;background:rgba(204,68,68,.06);border-radius:3px;margin-bottom:3px;font-family:var(--mono);font-size:11px;">
+      <span class="badge badge-blue mono" style="font-size:9px;">${f.tab}</span>
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(f.name)}</span>
+      <span style="color:var(--text3);font-style:italic;" title="Never suggested by the optimizer">excluded</span>
+      <button class="btn-ghost" onclick="removeExcludedManager(${i})" style="color:var(--text3);padding:0 4px;">✕</button>
+    </div>`).join('');
+}
+
+function addExcludedManager() {
+  const sInput = document.getElementById('excluded-search');
+  const parsed = _parseForcedSearchInput(sInput.value);
+  if (!parsed) {
+    alert('Pick a manager from the suggestions, or type exactly "Manager Name [Tab]".');
+    return;
+  }
+  // Verify it's a known buy-list candidate
+  const exists = OPT.candidates.find(c => c.name === parsed.name && c.tab === parsed.tab);
+  if (!exists) {
+    alert(`"${parsed.name}" [${parsed.tab}] is not in the buy list.`);
+    return;
+  }
+  // Can't exclude a manager that's forced
+  if (OPT.forced.find(f => f.name === parsed.name && f.tab === parsed.tab)) {
+    alert('That manager is in the Forced list. Remove it there first.');
+    return;
+  }
+  // Reject duplicates
+  if (OPT.excluded.find(f => f.name === parsed.name && f.tab === parsed.tab)) {
+    alert('Already excluded.');
+    return;
+  }
+  OPT.excluded.push({ name: parsed.name, tab: parsed.tab });
+  sInput.value = '';
+  renderExcludedList();
+  refreshForcedDatalist();
+}
+
+function removeExcludedManager(i) {
+  OPT.excluded.splice(i, 1);
+  renderExcludedList();
+  refreshForcedDatalist();
+}
+
 async function runOptimization() {
   const client = document.getElementById('client-select').value;
   if (!client) {
@@ -1882,6 +2480,7 @@ async function runOptimization() {
       body: JSON.stringify({
         client_name: client,
         forced_managers: OPT.forced,
+        excluded_managers: OPT.excluded,
       }),
     });
     const res = await r.json();
@@ -1940,6 +2539,10 @@ function renderOptResult(res) {
   const uncovNote = uncov > 0
     ? `<div style="color:var(--amber);">⚠ ${(uncov*100).toFixed(1)}% of weight lacks norm skill (forced)</div>`
     : '';
+  const nExcl = s.candidates_excluded_user || 0;
+  const exclNote = nExcl > 0
+    ? `<div style="color:var(--text3);">${nExcl} manager${nExcl===1?'':'s'} excluded from the candidate set.</div>`
+    : '';
   sumEl.innerHTML = `
     <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px;">
       <span style="color:var(--text3);">Portfolio V-G (3F):</span>
@@ -1952,6 +2555,7 @@ function renderOptResult(res) {
       <span>${fmtOptPct(s.total_weight, 1)}</span>
     </div>
     ${uncovNote}
+    ${exclNote}
   `;
   document.getElementById('opt-summary-footer').style.display = '';
 }
@@ -1971,25 +2575,259 @@ function onClientChangeRefreshOpt(peerGroupGuess) {
   if (sumFooter) sumFooter.style.display = 'none';
   if (statusEl){ statusEl.textContent = 'Click Run to optimize.'; statusEl.style.color = 'var(--text3)'; }
   document.getElementById('opt-peer-label').textContent = '';
-  // Populate forced/candidate list now so autocomplete is ready
+  // Populate forced/excluded/candidate lists now so autocomplete is ready
   renderForcedList();
+  renderExcludedList();
   loadOptCandidates();
+  redResetForClient();
 }
 
-// Height matching is handled by CSS — the optimizer panel is positioned
-// absolutely within a relative wrapper sized by the left panel.
+// ── Client Redemption ──────────────────────────────────────────────────────
+// State for the redemption panel. include/exclude are arrays of {name, tab}
+// referencing the client's CURRENT holdings (S.portfolioManagers).
+const RED = {
+  include: [],   // pull ONLY from these managers (empty → whole portfolio)
+  exclude: [],   // never pull from these (ignored when include is non-empty)
+  result:  null,
+};
+
+// The manager universe for the pickers is the loaded portfolio, not the buy list.
+function redManagerOptions() {
+  return (S.portfolioManagers || [])
+    .filter(m => (m.current_weight || 0) > 0)
+    .map(m => ({ name: m.matched_name, tab: m.tab }));
+}
+
+function refreshRedDatalists() {
+  const opts = redManagerOptions();
+  const inc = new Set(RED.include.map(f => `${f.tab}::${f.name}`));
+  const exc = new Set(RED.exclude.map(f => `${f.tab}::${f.name}`));
+  const dlInc = document.getElementById('red-cand-list');
+  if (dlInc) {
+    dlInc.innerHTML = opts
+      .filter(c => !inc.has(`${c.tab}::${c.name}`))
+      .map(c => `<option value="${escapeHtml(c.name)} [${c.tab}]"></option>`).join('');
+  }
+  const dlExc = document.getElementById('red-excl-list');
+  if (dlExc) {
+    dlExc.innerHTML = opts
+      .filter(c => !exc.has(`${c.tab}::${c.name}`))
+      .map(c => `<option value="${escapeHtml(c.name)} [${c.tab}]"></option>`).join('');
+  }
+}
+
+function _parseRedSearch(s) {
+  if (!s) return null;
+  const opts = redManagerOptions();
+  const m = s.match(/^(.+?)\s*\[([A-Za-z_]+)\]\s*$/);
+  if (m) {
+    const name = m[1].trim(), tab = m[2].trim();
+    return opts.find(c => c.name === name && c.tab === tab) || null;
+  }
+  const matches = opts.filter(c => c.name.toLowerCase() === s.trim().toLowerCase());
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function _redChipHtml(f, i, kind) {
+  const bg = kind === 'include' ? 'rgba(0,119,204,.06)' : 'rgba(204,68,68,.06)';
+  const note = kind === 'include' ? 'pull from' : 'excluded';
+  const remove = kind === 'include' ? `removeRedInclude(${i})` : `removeRedExclude(${i})`;
+  return `<div style="display:flex;align-items:center;gap:6px;padding:3px 6px;background:${bg};border-radius:3px;margin-bottom:3px;font-family:var(--mono);font-size:11px;">
+    <span class="badge badge-blue mono" style="font-size:9px;">${f.tab}</span>
+    <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(f.name)}</span>
+    <span style="color:var(--text3);font-style:italic;">${note}</span>
+    <button class="btn-ghost" onclick="${remove}" style="color:var(--text3);padding:0 4px;">✕</button>
+  </div>`;
+}
+
+function renderRedIncludeList() {
+  const el = document.getElementById('red-include-list');
+  if (!el) return;
+  el.innerHTML = RED.include.length
+    ? RED.include.map((f, i) => _redChipHtml(f, i, 'include')).join('')
+    : '<div style="font-family:var(--mono);font-size:10px;color:var(--text3);font-style:italic;">None — pull from the whole portfolio</div>';
+}
+
+function renderRedExcludeList() {
+  const el = document.getElementById('red-exclude-list');
+  if (!el) return;
+  el.innerHTML = RED.exclude.length
+    ? RED.exclude.map((f, i) => _redChipHtml(f, i, 'exclude')).join('')
+    : '<div style="font-family:var(--mono);font-size:10px;color:var(--text3);font-style:italic;">None</div>';
+}
+
+function addRedInclude() {
+  const sInput = document.getElementById('red-include-search');
+  const parsed = _parseRedSearch(sInput.value);
+  if (!parsed) { alert('Pick a manager from the suggestions, or type exactly "Manager Name [Tab]".'); return; }
+  if (RED.include.find(f => f.name === parsed.name && f.tab === parsed.tab)) { alert('Already listed.'); return; }
+  RED.include.push({ name: parsed.name, tab: parsed.tab });
+  sInput.value = '';
+  renderRedIncludeList();
+  refreshRedDatalists();
+}
+function removeRedInclude(i) { RED.include.splice(i, 1); renderRedIncludeList(); refreshRedDatalists(); }
+
+function addRedExclude() {
+  const sInput = document.getElementById('red-exclude-search');
+  const parsed = _parseRedSearch(sInput.value);
+  if (!parsed) { alert('Pick a manager from the suggestions, or type exactly "Manager Name [Tab]".'); return; }
+  if (RED.exclude.find(f => f.name === parsed.name && f.tab === parsed.tab)) { alert('Already excluded.'); return; }
+  RED.exclude.push({ name: parsed.name, tab: parsed.tab });
+  sInput.value = '';
+  renderRedExcludeList();
+  refreshRedDatalists();
+}
+function removeRedExclude(i) { RED.exclude.splice(i, 1); renderRedExcludeList(); refreshRedDatalists(); }
+
+function redResetForClient() {
+  RED.result = null;
+  // Include/exclude reference this client's holdings — clear on client change.
+  RED.include = [];
+  RED.exclude = [];
+  const label = document.getElementById('red-aum-label');
+  if (label) label.textContent = (S.clientAUM != null)
+    ? `Total AUM: ${fmtDollars(S.clientAUM)}` : 'No client AUM loaded';
+  const tableEl = document.getElementById('red-table');
+  const sumFooter = document.getElementById('red-summary-footer');
+  const statusEl = document.getElementById('red-status');
+  if (tableEl) tableEl.style.display = 'none';
+  if (sumFooter) sumFooter.style.display = 'none';
+  if (statusEl) {
+    statusEl.textContent = (S.clientAUM != null)
+      ? 'Enter an amount and click Run.'
+      : 'Load a weights file with a client total AUM to enable redemptions.';
+    statusEl.style.color = 'var(--text3)';
+  }
+  renderRedIncludeList();
+  renderRedExcludeList();
+  refreshRedDatalists();
+}
+
+async function runRedemption() {
+  const client = document.getElementById('client-select').value;
+  const statusEl = document.getElementById('red-status');
+  const tableEl = document.getElementById('red-table');
+  const sumFooter = document.getElementById('red-summary-footer');
+  if (!client) { statusEl.textContent = 'Select a portfolio first.'; statusEl.style.color = 'var(--amber)'; return; }
+  if (S.clientAUM == null) { statusEl.textContent = 'This portfolio has no client total AUM.'; statusEl.style.color = 'var(--amber)'; return; }
+  const amount = parseFloat(document.getElementById('red-amount').value);
+  if (isNaN(amount) || amount <= 0) { statusEl.textContent = 'Enter a redemption amount greater than zero.'; statusEl.style.color = 'var(--amber)'; return; }
+
+  statusEl.textContent = 'Computing…'; statusEl.style.color = 'var(--text3)';
+  tableEl.style.display = 'none'; sumFooter.style.display = 'none';
+
+  // Send the current holdings with override-resolved 3F V-G (so peer-tab edits flow through).
+  const managers = (S.portfolioManagers || []).map(m => ({
+    matched_name:   m.matched_name,
+    tab:            m.tab,
+    current_weight: m.current_weight,
+    vg_3factor:     (typeof effectiveVG3F === 'function') ? effectiveVG3F(m) : m.vg_3factor,
+    ns_z:           m.ns_z,
+  }));
+
+  try {
+    const r = await fetch('/optimize_redemption', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_name: client,
+        client_aum: S.clientAUM,
+        redemption_amount: amount,
+        managers,
+        include: RED.include,
+        exclude: RED.exclude,
+      }),
+    });
+    const res = await r.json();
+    RED.result = res;
+    if (res.status === 'error' || res.status === 'infeasible') {
+      statusEl.textContent = res.error || 'Redemption failed.';
+      statusEl.style.color = 'var(--amber)';
+      return;
+    }
+    statusEl.textContent = (res.status === 'warning') ? (res.error || '') : '';
+    statusEl.style.color = (res.status === 'warning') ? 'var(--amber)' : 'var(--text3)';
+    renderRedemptionResult(res);
+  } catch (e) {
+    statusEl.textContent = 'Request failed: ' + e;
+    statusEl.style.color = 'var(--amber)';
+  }
+}
+
+function renderRedemptionResult(res) {
+  const tbody = document.getElementById('red-tbody');
+  const tableEl = document.getElementById('red-table');
+  const sumEl = document.getElementById('red-summary');
+  const mgrs = res.redemption_managers || [];
+
+  tbody.innerHTML = mgrs.map(m => {
+    const vg3 = m.vg_3factor || 0;
+    const vg3C = vg3 > 0.05 ? 'val-pos' : vg3 < -0.05 ? 'val-neg' : 'val-neu';
+    const nsZ = m.ns_z;
+    const nsC = nsZ == null ? '' : nsZ > 0 ? 'skill-pos' : 'skill-neg';
+    const nsTxt = nsZ == null ? '<span style="color:var(--text3)">--</span>' : (nsZ >= 0 ? '+' : '') + nsZ.toFixed(2);
+    const pull = m.pull_dollars || 0;
+    const dropped = (m.remaining_dollars || 0) <= 0 && (m.current_dollars || 0) > 0;
+    // Highlight rows the redemption actually touched.
+    const pullCell = pull > 0
+      ? `<span style="color:var(--amber);font-weight:600;">${fmtDollars(pull)}</span>`
+      : '<span style="color:var(--text3)">—</span>';
+    const nameMark = m.eligible ? '' : '<span style="color:var(--text3);margin-right:3px;" title="Not eligible — excluded from this redemption">·</span>';
+    const remTxt = dropped
+      ? '<span style="color:var(--red,#c44)">dropped</span>'
+      : fmtDollars(m.remaining_dollars || 0);
+    return `<tr>
+      <td style="font-weight:500">${nameMark}${escapeHtml(m.name)} <span class="badge badge-blue mono" style="font-size:9px;">${m.tab}</span></td>
+      <td class="mono">${fmtOptPct(m.current_weight, 1)}</td>
+      <td class="mono">${fmtDollars(m.current_dollars || 0)}</td>
+      <td class="mono">${pullCell}</td>
+      <td class="mono">${remTxt}</td>
+      <td class="mono">${fmtOptPct(m.remaining_weight, 1)}</td>
+      <td class="mono ${vg3C}">${fmtOptPct(vg3, 1)}</td>
+      <td class="mono ${nsC}">${nsTxt}</td>
+    </tr>`;
+  }).join('');
+  tableEl.style.display = '';
+
+  const s = res.summary || {};
+  const vgDeltaAbs = Math.abs((s.new_vg_3factor || 0) - (s.orig_vg_3factor || 0));
+  const fmtEdge = v => v == null ? '--' : (v >= 0 ? '+' : '') + v.toFixed(2);
+  const dropNote = (s.n_dropped || 0) > 0
+    ? `<div style="color:var(--amber);">⚠ ${s.n_dropped} manager${s.n_dropped === 1 ? '' : 's'} fully redeemed (dropped to $0).</div>`
+    : '';
+  sumEl.innerHTML = `
+    <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px;">
+      <span style="color:var(--text3);">Redeemed:</span>
+      <span>${fmtDollars(s.redemption_amount || 0)} → new total ${fmtDollars(s.new_total_aum || 0)}</span>
+      <span style="color:var(--text3);">Portfolio V-G (3F):</span>
+      <span>${fmtOptPct(s.orig_vg_3factor, 2)} → ${fmtOptPct(s.new_vg_3factor, 2)} (Δ ${fmtOptPct(vgDeltaAbs, 2)})</span>
+      <span style="color:var(--text3);">Portfolio Edge:</span>
+      <span>${fmtEdge(s.orig_edge)} → ${fmtEdge(s.new_edge)}</span>
+      <span style="color:var(--text3);">Managers reduced:</span>
+      <span>${s.n_reduced || 0}${(s.n_dropped ? `, ${s.n_dropped} dropped` : '')}</span>
+    </div>
+    ${dropNote}
+  `;
+  document.getElementById('red-summary-footer').style.display = '';
+}
+
+// Height matching is handled by CSS — each row is a two-column grid with
+// align-items:stretch, so the paired panels are always equal height.
 document.addEventListener('DOMContentLoaded', () => {
   renderForcedList();
+  renderExcludedList();
   loadOptCandidates();
+  redResetForClient();
 });
-function updateWeight(i,v){const w=parseFloat(v)/100;if(!isNaN(w)){S.portfolioManagers[i].proposed_weight=w;updateProposedTotal();updatePortfolioSummary();scheduleRiskAnalysis();scheduleMarketCycle();scheduleIdealComplement();}}
+function updateWeight(i,v){const w=parseFloat(v)/100;if(!isNaN(w)){S.portfolioManagers[i].proposed_weight=w;updateProposedTotal();updatePortfolioSummary();scheduleRiskAnalysis();scheduleMarketCycle();scheduleIdealComplement();scheduleIdealFactorComplement();scheduleOverlap();if(S.clientAUM!=null){const cell=document.getElementById('aum-prop-'+i);if(cell){cell.innerHTML=fmtDollars(S.clientAUM*w);}}}}
 function updateProposedTotal(){
   const t=S.portfolioManagers.reduce((s,m)=>s+(m.proposed_weight||0),0);
   const el=document.getElementById('proposed-total');
   el.textContent=(t*100).toFixed(1)+'%';
   el.style.color=Math.abs(t-1)>0.005?'var(--amber)':'var(--green)';
 }
-function removeManager(i){S.portfolioManagers.splice(i,1);renderPortfolioTable();updatePortfolioSummary();updateProposedTotal();scheduleRiskAnalysis();scheduleMarketCycle();scheduleIdealComplement();if(S.hasExposures&&expCurrentGrouping)loadExposures(expCurrentGrouping);}
+function removeManager(i){S.portfolioManagers.splice(i,1);renderPortfolioTable();updatePortfolioSummary();updateProposedTotal();scheduleRiskAnalysis();scheduleMarketCycle();scheduleIdealComplement();scheduleIdealFactorComplement();if(S.hasExposures&&expCurrentGrouping)loadExposures(expCurrentGrouping);scheduleOverlap();}
 async function updatePortfolioSummary() {
   if(!S.portfolioManagers.length) return;
   // Send effective (override-resolved) buckets and vg so the server-side
@@ -2021,6 +2859,49 @@ async function updatePortfolioSummary() {
   document.getElementById('style-summary-rows').innerHTML=html;
   renderVGPositioning(data);
   renderPortfolioEdge(data);
+  loadDiverseOwnership();
+}
+
+async function loadDiverseOwnership() {
+  const section = document.getElementById('diverse-section');
+  if (!section) return;
+  if (!S.portfolioManagers || !S.portfolioManagers.length) { section.style.display='none'; return; }
+  const payload = {
+    threshold: 50,
+    managers: S.portfolioManagers.map(m => ({
+      matched_name:     m.matched_name,
+      weight_file_name: m.weight_file_name || m.matched_name,
+      current_weight:   m.current_weight  || 0,
+      proposed_weight:  m.proposed_weight || 0,
+    })),
+  };
+  let d;
+  try {
+    d = await fetch('/diverse_ownership', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(r=>r.json());
+  } catch(e) { section.style.display='none'; return; }
+  if (!d || !d.has_data) { section.style.display='none'; return; }
+  section.style.display='';
+
+  const c = d.current, p = d.proposed;
+  const col = 'var(--green)';
+  const cEl = document.getElementById('diverse-current-value');
+  const pEl = document.getElementById('diverse-proposed-value');
+  const cM  = document.getElementById('diverse-current-meta');
+  const pM  = document.getElementById('diverse-proposed-meta');
+  cEl.textContent = c.weight_pct.toFixed(1)+'%'; cEl.style.color = col;
+  const dlt = p.weight_pct - c.weight_pct;
+  const arrow = dlt>=0?'▲':'▼', dcol = dlt>=0?'var(--green)':'var(--accent)';
+  pEl.innerHTML = p.weight_pct.toFixed(1)+'%'
+    + (Math.abs(dlt)>=0.05 ? ` <span style="font-size:11px;color:${dcol};">${arrow} ${dlt>=0?'+':''}${dlt.toFixed(1)}</span>` : '');
+  pEl.style.color = col;
+  cM.textContent = `${c.n_diverse} of ${c.n_firms} firms · ${Math.round(c.ratio_pct)}%`;
+  pM.textContent = `${p.n_diverse} of ${p.n_firms} firms · ${Math.round(p.ratio_pct)}%`;
+
+  // Coverage honesty: if a meaningful chunk of the portfolio has no
+  // qualitative record, the diverse figure understates — flag it.
+  const noteEl = document.getElementById('diverse-coverage-note');
+  const unk = Math.max(c.unknown_weight_pct||0, p.unknown_weight_pct||0);
+  noteEl.textContent = unk > 0.5 ? `${unk.toFixed(0)}% of portfolio lacks a firm record` : '';
 }
 
 function renderPortfolioEdge(data) {
@@ -2149,42 +3030,132 @@ async function addSelectedManager(){
     ns_n_obs: mgr.ns_n_obs, ns_n_peers: mgr.ns_n_peers,
     ns_adj_method: mgr.ns_adj_method, ns_last_month: mgr.ns_last_month,
   });
-  renderPortfolioTable();updatePortfolioSummary();updateProposedTotal();scheduleRiskAnalysis();scheduleMarketCycle();if(S.hasExposures&&expCurrentGrouping)loadExposures(expCurrentGrouping);closeModal();
+  renderPortfolioTable();updatePortfolioSummary();updateProposedTotal();scheduleRiskAnalysis();scheduleMarketCycle();if(S.hasExposures&&expCurrentGrouping)loadExposures(expCurrentGrouping);scheduleOverlap();closeModal();
 }
 
 // ── Peer Groups ───────────────────────────────────────────────────────────
+// ── Peer Groups tab — multi-select selection model ──────────────────────
+// Each peer button represents a (tab, style) pair. Clicking a button
+// toggles its key in S.selectedPeers; the page then merges managers from
+// every selected key into one combined view. Clicking an already-selected
+// button removes it from the selection (and from the tables).
 async function selectPeer(tab, style, btn){
-  S.currentPeer = tab;
-  S.currentPeerStyle = style;
-  document.querySelectorAll('.peer-btn').forEach(b=>b.classList.remove('active'));
-  btn.classList.add('active');
-  await loadPeerView(tab, style);
-}
-async function loadPeerView(tab, style){
-  style = style || S.currentPeerStyle || 'Core';
-  if(!S.isReady) return;
-  if(!S.peerCache[tab]){
-    document.getElementById('peer-view-content').innerHTML=`<div style="color:var(--text3);font-family:var(--mono);font-size:11px;padding:40px 0;text-align:center;">Loading ${tab}...</div>`;
-    const data=await fetch(`/peer_skill_summary/${tab}`).then(r=>r.json());
-    S.peerCache[tab]=data;
-  }
-  const allMgrs = S.peerCache[tab].managers || [];
-  // Placeholder tab has no Value/Growth/Core split — show all managers.
-  // Real peer tabs filter by the original cached vg_full so a manager
-  // doesn't jump out of view after the user edits their style buckets.
-  let filtered;
-  if (tab === 'Placeholder') {
-    filtered = allMgrs;
+  const key = `${tab}|${style}`;
+  if (S.selectedPeers.has(key)) {
+    // Toggle OFF
+    S.selectedPeers.delete(key);
+    btn.classList.remove('active');
   } else {
-    filtered = allMgrs.filter(m => {
-      const vg = m.vg_full || 0;
-      if (style === 'Value')  return vg >  0.25;
-      if (style === 'Growth') return vg < -0.25;
-      return vg >= -0.25 && vg <= 0.25;  // Core
-    });
+    // Toggle ON
+    S.selectedPeers.add(key);
+    btn.classList.add('active');
   }
-  const label = tab === 'Placeholder' ? 'Placeholder managers (no clone)' : tab + ' — ' + style;
-  renderPeerView({ raw_tab: tab, display_label: label, managers: filtered });
+  await loadPeerView();
+}
+
+// Re-render the Peer Groups tab from whatever is currently in
+// S.selectedPeers. Loads any uncached tab data on demand, then merges
+// the filtered managers from every selected (tab, style) pair into a
+// single combined dataset for rendering.
+async function loadPeerView(){
+  if (!S.isReady) return;
+  const peerContent = document.getElementById('peer-view-content');
+
+  // Empty-state: nothing selected
+  if (S.selectedPeers.size === 0) {
+    peerContent.innerHTML =
+      '<div style="color:var(--text3);font-family:var(--mono);font-size:11px;padding:40px 0;text-align:center;">'
+      + 'Select one or more peer groups above to view managers.</div>';
+    return;
+  }
+
+  // Fetch any tab data we don't have cached yet, in parallel
+  const tabsNeeded = new Set();
+  for (const key of S.selectedPeers) {
+    const tab = key.split('|')[0];
+    if (!S.peerCache[tab]) tabsNeeded.add(tab);
+  }
+  if (tabsNeeded.size > 0) {
+    peerContent.innerHTML =
+      `<div style="color:var(--text3);font-family:var(--mono);font-size:11px;padding:40px 0;text-align:center;">`
+      + `Loading ${[...tabsNeeded].join(', ')}…</div>`;
+    await Promise.all([...tabsNeeded].map(async tab => {
+      const data = await fetch(`/peer_skill_summary/${tab}`).then(r => r.json());
+      S.peerCache[tab] = data;
+    }));
+  }
+
+  // Build the merged managers list. For each selected (tab, style), filter
+  // the cached managers by the style threshold and tag each manager with
+  // its source group so the renderer can show a badge when multiple groups
+  // are visible at once. Iteration order matches insertion order in the
+  // Set, which means peer groups appear in the order the user clicked them.
+  const merged = [];
+  const labels = [];
+  for (const key of S.selectedPeers) {
+    const [tab, style] = key.split('|');
+    const allMgrs = (S.peerCache[tab] && S.peerCache[tab].managers) || [];
+    let filtered;
+    if (tab === 'Placeholder') {
+      // Placeholder tab has no Value/Growth/Core split — include all.
+      filtered = allMgrs;
+      labels.push('Placeholder');
+    } else {
+      // Same thresholds as the single-select view used: filter on cached
+      // vg_full so a manager doesn't disappear after the user edits buckets.
+      filtered = allMgrs.filter(m => {
+        const vg = m.vg_full || 0;
+        if (style === 'Value')  return vg >  0.25;
+        if (style === 'Growth') return vg < -0.25;
+        return vg >= -0.25 && vg <= 0.25;  // Core
+      });
+      labels.push(`${tab} ${style}`);
+    }
+    // Tag each manager with its source so the renderer can show the
+    // group badge in multi-select mode.
+    for (const m of filtered) {
+      merged.push({
+        ...m,
+        _source_tab:   tab,
+        _source_style: style,
+        _source_label: tab === 'Placeholder' ? 'PH' : `${tab} ${style[0]}`,
+      });
+    }
+  }
+
+  // Friendly section header. Single selection keeps the old format
+  // ("EAFE — Growth"); multi shows the list ("EAFE Growth · ISC Core · …").
+  let displayLabel;
+  if (labels.length === 1 && S.selectedPeers.size === 1) {
+    const onlyKey = [...S.selectedPeers][0];
+    const [t, s] = onlyKey.split('|');
+    displayLabel = t === 'Placeholder' ? 'Placeholder managers (no clone)'
+                                       : `${t} — ${s}`;
+  } else if (labels.length <= 3) {
+    displayLabel = labels.join(' · ');
+  } else {
+    displayLabel = `${labels.length} peer groups selected`;
+  }
+
+  // For the renderer's "tab" context (used by override keys and the
+  // openManagerDetail link), pick the first selected tab. The renderer
+  // also reads each row's _source_tab when present, so per-manager
+  // overrides still route to the right tab even with mixed groups.
+  const primaryTab = [...S.selectedPeers][0].split('|')[0];
+
+  renderPeerView({
+    raw_tab:        primaryTab,
+    display_label:  displayLabel,
+    managers:       merged,
+    multi:          S.selectedPeers.size > 1,
+  });
+}
+
+// Re-render the current peer view in place. Used by various hooks
+// (override edits, resets, weights reload) that need the tables to
+// refresh without changing which peer groups are selected.
+function refreshPeerView() {
+  if (S.selectedPeers.size > 0) loadPeerView();
 }
 
 let peerSortState={col:null,dir:1};
@@ -2276,7 +3247,7 @@ function setStyleBucketOverride(tab, name, bucketKey, valueStr) {
   // what-if analysis on real cloned managers.
   if (tab === 'Placeholder') savePlaceholderBuckets(name);
   // Re-render the peer view and, if a portfolio is loaded, the portfolio tab
-  if (S.currentPeer) loadPeerView(S.currentPeer, S.currentPeerStyle || 'Core');
+  refreshPeerView();
   refreshPortfolioViewsFromOverrides();
 }
 
@@ -2317,7 +3288,7 @@ function setStyleBucketExclusive(tab, name, bucketKey) {
   STYLE_BUCKET_KEYS.forEach(k => { newOv[k] = (k === bucketKey) ? 1.0 : 0.0; });
   styleBucketOverrides[key] = newOv;
   if (tab === 'Placeholder') savePlaceholderBuckets(name);
-  if (S.currentPeer) loadPeerView(S.currentPeer, S.currentPeerStyle || 'Core');
+  refreshPeerView();
   refreshPortfolioViewsFromOverrides();
 }
 
@@ -2325,7 +3296,7 @@ function resetStyleBucketOverrides() {
   if (Object.keys(styleBucketOverrides).length === 0) return;
   if (!confirm('Reset all style bucket overrides for every manager?')) return;
   Object.keys(styleBucketOverrides).forEach(k => delete styleBucketOverrides[k]);
-  if (S.currentPeer) loadPeerView(S.currentPeer, S.currentPeerStyle || 'Core');
+  refreshPeerView();
   refreshPortfolioViewsFromOverrides();
 }
 
@@ -2334,7 +3305,7 @@ function resetManagerOverride(tab, name) {
   const key = getOverrideKey(tab, name);
   if (!styleBucketOverrides[key]) return;
   delete styleBucketOverrides[key];
-  if (S.currentPeer) loadPeerView(S.currentPeer, S.currentPeerStyle || 'Core');
+  refreshPeerView();
   refreshPortfolioViewsFromOverrides();
 }
 
@@ -2394,12 +3365,17 @@ function renderPeerView(data){
 
   const rawTab = data.raw_tab || data.tab || '';
   const safeTab = rawTab.replace(/'/g, "\\'");
+  // When multi-peer view is active, override keys need to be per-row (each
+  // manager's overrides live under its own source tab). When single-peer,
+  // every manager naturally has _source_tab == rawTab, so this falls through
+  // to the same behavior as before.
+  const tabFor = m => m._source_tab || rawTab;
 
   // Apply any active overrides: mutate m.style_buckets and recompute v-g full
   // before we compute the cached sort keys. The _override_* flags let the
   // cell renderer apply visual highlighting.
   managers.forEach(m => {
-    const eff = getEffectiveBuckets(rawTab, m.name, m.style_buckets);
+    const eff = getEffectiveBuckets(tabFor(m), m.name, m.style_buckets);
     m.style_buckets = eff.buckets;
     m._override_keys = eff.overriddenKeys;
     m._overridden    = eff.isOverridden;
@@ -2427,16 +3403,20 @@ function renderPeerView(data){
     const isOver = m._override_keys && m._override_keys.has(bucketKey);
     const cls = isOver ? 'mono bucket-override' : 'mono bucket-edit';
     const safeName = m.name.replace(/'/g, "\\'");
+    // In multi-peer view, route edits to the manager's own source tab.
+    // In single-peer view, every row's _source_tab equals safeTab, so this
+    // is a no-op.
+    const tabForRow = (m._source_tab || rawTab).replace(/'/g, "\\'");
     // Display as percentage, store as decimal. Round to 1 decimal place on display.
     const displayVal = ((value || 0) * 100).toFixed(1);
     return `<td class="${cls}">
       <div class="bucket-cell-wrap">
         <input type="text" value="${displayVal}" class="bucket-input"
-          onchange="setStyleBucketOverride('${safeTab}','${safeName}','${bucketKey}',this.value)"
+          onchange="setStyleBucketOverride('${tabForRow}','${safeName}','${bucketKey}',this.value)"
           onkeydown="if(event.key==='Enter')this.blur();"
           title="Edit to override; clear to revert" />
         <button class="bucket-100-btn"
-          onclick="setStyleBucketExclusive('${safeTab}','${safeName}','${bucketKey}')"
+          onclick="setStyleBucketExclusive('${tabForRow}','${safeName}','${bucketKey}')"
           title="Set ${bucketKey} to 100% and zero all other buckets for this manager">→100</button>
       </div>
     </td>`;
@@ -2455,8 +3435,16 @@ function renderPeerView(data){
     : '';
 
   // ── Style exposures table ────────────────────────────────────────────
+  // Optional "Peer Group" column appears only when more than one peer group
+  // is selected. The column shows a short badge (e.g. "EAFE G") so the user
+  // can see at a glance which group each row came from.
+  const isMulti = !!data.multi;
+  const peerColHdr = isMulti
+    ? `<th style="text-align:left;min-width:70px;">Peer</th>` : '';
+
   let expHtml = `<div class="panel mb-16"><div class="panel-header"><span class="panel-title">${data.display_label || data.tab} — Style Exposures</span><span style="margin-left:8px;font-family:var(--mono);font-size:10px;color:var(--text3)">Click column header to sort · Edit a cell directly, or hover to show <span class="mono" style="color:var(--accent)">→100</span> to isolate one bucket</span>${resetBtn}</div>
     <div class="panel-body" style="padding:0;overflow-x:auto;"><table class="data-table w-full"><thead><tr>
+    ${peerColHdr}
     <th class="${sortCls('name')}" onclick="sortPeerTable('name')" style="text-align:left;cursor:pointer">Manager${sortIcon('name')}</th>
     <th class="${sortCls('r2_full')}" onclick="sortPeerTable('r2_full')" style="cursor:pointer">R² Full${sortIcon('r2_full')}</th>
     <th class="${sortCls('vg_full')}" onclick="sortPeerTable('vg_full')" style="cursor:pointer">V-G Full${sortIcon('vg_full')}</th>
@@ -2475,18 +3463,24 @@ function renderPeerView(data){
   managers.forEach(m=>{
     const vg=m.vg_full||0;
     const safeName = m.name.replace(/'/g,"\\'");
+    const tabForRow = (m._source_tab || rawTab).replace(/'/g,"\\'");
     const sum = bucketSum(m);
     const sumOff = Math.abs(sum - 1.0) > 0.02;
     const sumCell = sumOff
       ? `<td class="mono" style="color:var(--amber);font-weight:500;" title="Sum deviates from 100%">${(sum*100).toFixed(1)}%</td>`
       : `<td class="mono" style="color:var(--text3);">${(sum*100).toFixed(1)}%</td>`;
     const dot = m._overridden
-      ? `<span onclick="event.stopPropagation();resetManagerOverride('${safeTab}','${safeName}')"
+      ? `<span onclick="event.stopPropagation();resetManagerOverride('${tabForRow}','${safeName}')"
              title="Click to reset this manager's overrides"
              style="color:var(--amber);margin-right:4px;cursor:pointer;">●</span>`
       : '';
+    // Peer badge cell (multi-select mode only)
+    const peerCell = isMulti
+      ? `<td class="mono" style="color:var(--text2);font-size:10px;letter-spacing:.04em;">${m._source_label || ''}</td>`
+      : '';
     expHtml+=`<tr>
-      <td style="font-weight:500;cursor:pointer;color:var(--accent)" onclick="openManagerDetail('${safeName}','${safeTab}')">${dot}${m.name}</td>
+      ${peerCell}
+      <td style="font-weight:500;cursor:pointer;color:var(--accent)" onclick="openManagerDetail('${safeName}','${tabForRow}')">${dot}${m.name}</td>
       <td class="mono">${m.r2_full?(m.r2_full*100).toFixed(1)+'%':'--'}</td>
       <td class="mono ${vg>0.05?'val-pos':vg<-0.05?'val-neg':'val-neu'}">${fmtPct(vg)}</td>
       ${inputCell(m,'Core',m._core)}
@@ -2506,25 +3500,43 @@ function renderPeerView(data){
   // ── Skill table with sortable columns (single-click) ─────────────────
   let skillHtml=`<div class="panel"><div class="panel-header"><span class="panel-title">Manager Skill vs Static Clone</span><span style="margin-left:8px;font-family:var(--mono);font-size:10px;color:var(--text3)">Click column header to sort</span></div>
     <div class="panel-body" style="padding:0;overflow-x:auto;"><table class="data-table w-full" id="skill-table-${rawTab}"><thead><tr>
+    ${peerColHdr}
     <th class="${sortCls('name')}" onclick="sortPeerTable('name')" style="text-align:left;cursor:pointer">Manager${sortIcon('name')}</th>
-    <th class="${sortCls('t1_skill')}" onclick="sortPeerTable('t1_skill')" style="cursor:pointer">Trailing 1yr Skill${sortIcon('t1_skill')}</th>
-    <th class="${sortCls('t3_skill')}" onclick="sortPeerTable('t3_skill')" style="cursor:pointer">Trailing 3yr Skill${sortIcon('t3_skill')}</th>
-    <th class="${sortCls('t5_skill')}" onclick="sortPeerTable('t5_skill')" style="cursor:pointer">Trailing 5yr Skill${sortIcon('t5_skill')}</th>
-    <th class="${sortCls('si_skill')}" onclick="sortPeerTable('si_skill')" style="cursor:pointer">Since Inception Skill${sortIcon('si_skill')}</th>
+    <th class="${sortCls('t1_skill')}" onclick="sortPeerTable('t1_skill')" style="cursor:pointer">1yr Skill${sortIcon('t1_skill')}</th>
+    <th class="${sortCls('t3_skill')}" onclick="sortPeerTable('t3_skill')" style="cursor:pointer">3yr Skill${sortIcon('t3_skill')}</th>
+    <th class="${sortCls('t5_skill')}" onclick="sortPeerTable('t5_skill')" style="cursor:pointer">5yr Skill${sortIcon('t5_skill')}</th>
+    <th class="${sortCls('si_skill')}" onclick="sortPeerTable('si_skill')" style="cursor:pointer">SI Skill${sortIcon('si_skill')}</th>
     <th class="${sortCls('ns_z')}" onclick="sortPeerTable('ns_z')" style="cursor:pointer" title="Normalized Skill Z-score: annualized since-inception skill, z-scored against same-window peers">Norm Skill (Z)${sortIcon('ns_z')}</th>
+    <th class="${sortCls('q_firm_aum')}" onclick="sortPeerTable('q_firm_aum')" style="cursor:pointer;border-left:1px solid var(--border2)" title="Firm AUM ($mm)">Firm AUM${sortIcon('q_firm_aum')}</th>
+    <th class="${sortCls('q_diverse_pct')}" onclick="sortPeerTable('q_diverse_pct')" style="cursor:pointer" title="Diverse / Woman Ownership %">Div/Woman %${sortIcon('q_diverse_pct')}</th>
     </tr></thead><tbody>`;
+  const money = v => v==null ? '<span style="color:var(--text3)">—</span>'
+    : (v>=1000 ? '$'+(v/1000).toFixed(1)+'B' : '$'+Math.round(v)+'M');
+  const divPct = v => {
+    if (v==null) return '<span style="color:var(--text3)">—</span>';
+    if (v===0)   return '<span style="color:var(--text3)">0%</span>';
+    const c = v>=50 ? 'var(--green)' : 'var(--amber)';
+    return `<span style="color:${c};font-weight:600;">${Math.round(v)}%</span>`;
+  };
   managers.forEach(m=>{
     const sc=(v)=>v==null?'':v>0?'skill-pos':'skill-neg';
     const zc=(v)=>v==null?'':v>0?'skill-pos':'skill-neg';
     const zFmt=(v)=>v==null?'--':(v>=0?'+':'')+v.toFixed(2);
     const safeName = m.name.replace(/'/g,"\\'");
+    const tabForRow = (m._source_tab || rawTab).replace(/'/g,"\\'");
+    const peerCell = isMulti
+      ? `<td class="mono" style="color:var(--text2);font-size:10px;letter-spacing:.04em;">${m._source_label || ''}</td>`
+      : '';
     skillHtml+=`<tr>
-      <td style="font-weight:500;cursor:pointer;color:var(--accent)" onclick="openManagerDetail('${safeName}','${safeTab}')">${m.name}</td>
+      ${peerCell}
+      <td style="font-weight:500;cursor:pointer;color:var(--accent)" onclick="openManagerDetail('${safeName}','${tabForRow}')">${m.name}</td>
       <td class="mono ${sc(m.t1_skill)}">${fmtPct(m.t1_skill)}</td>
       <td class="mono ${sc(m.t3_skill)}">${fmtPct(m.t3_skill)}</td>
       <td class="mono ${sc(m.t5_skill)}">${fmtPct(m.t5_skill)}</td>
       <td class="mono ${sc(m.si_skill)}">${fmtPct(m.si_skill)}</td>
       <td class="mono ${zc(m.ns_z)}" title="${m.ns_z!=null?`${m.ns_n_obs} mo · ${m.ns_n_peers} peers (${m.ns_adj_method})`:'Insufficient history'}">${zFmt(m.ns_z)}</td>
+      <td class="mono" style="border-left:1px solid var(--border2)">${money(m.q_firm_aum)}</td>
+      <td class="mono">${divPct(m.q_diverse_pct)}</td>
     </tr>`;
   });
   skillHtml+='</tbody></table></div></div>';
@@ -2535,7 +3547,7 @@ function sortPeerTable(col) {
   if(peerSortState.col===col) peerSortState.dir*=-1;
   else {peerSortState.col=col;peerSortState.dir=1;}
   // Re-render current view (same tab+style)
-  if(S.currentPeer) loadPeerView(S.currentPeer, S.currentPeerStyle || 'Core');
+  refreshPeerView();
 }
 
 // ── Manager Detail ────────────────────────────────────────────────────────
@@ -3308,10 +4320,13 @@ function showPage(id){
   document.querySelectorAll('.nav-tab').forEach(t=>t.classList.remove('active'));
   document.getElementById(`page-${id}`).classList.add('active');
   document.getElementById(`tab-${id}`).classList.add('active');
-  if(id==='peer'&&S.isReady) loadPeerView(S.currentPeer, S.currentPeerStyle||'Growth');
+  if(id==='peer'&&S.isReady) loadPeerView();
 }
 function setStatus(st,txt){document.getElementById('status-dot').className='status-dot'+(st?' '+st:'');document.getElementById('status-text').textContent=txt;}
 function fmtPct(v){if(v==null||isNaN(v))return'--';return(v*100).toFixed(1)+'%';}
+// Full-dollar formatting with thousands separators, e.g. 2500000000 -> "$2,500,000,000".
+// Client AUM is entered in raw dollars in column C of the weights file.
+function fmtDollars(v){if(v==null||isNaN(v))return'--';return '$'+Math.round(v).toLocaleString('en-US');}
 function fmtDate(s){const d=new Date(s);return d.toLocaleDateString('en-US',{month:'short',year:'2-digit'});}
 
 // ── Portfolio Contribution Tables ─────────────────────────────────────────
@@ -3488,12 +4503,15 @@ async function loadRiskAnalysis() {
       `<tr><td colspan="11" style="text-align:center;color:var(--text3);padding:16px">${msg}</td></tr>`;
     document.getElementById('regime-tbody').innerHTML =
       `<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:16px">${msg}</td></tr>`;
+    document.getElementById('struggle-tbody').innerHTML =
+      `<tr><td colspan="8" style="text-align:center;color:var(--text3);padding:16px">${msg}</td></tr>`;
     return;
   }
 
   renderMarginal(data);
   renderScenario(data);
   renderRegime(data);
+  renderManagerStruggle(data);
 
   // Top-right meta line
   const windowStr = `${data.peer_group} · ${data.start_date || '--'} → ${data.end_date || '--'} · ${data.n_months} mo`;
@@ -3675,6 +4693,69 @@ function renderRegime(data) {
   document.getElementById('regime-tbody').innerHTML = html;
 }
 
+function renderManagerStruggle(data) {
+  const meta  = document.getElementById('struggle-meta');
+  const tbody = document.getElementById('struggle-tbody');
+  const ms = data.manager_struggle;
+  if (!ms) {
+    if (meta) meta.textContent = '';
+    tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--text3);padding:16px">Load universe returns for this peer group to see this scenario.</td></tr>`;
+    return;
+  }
+  const pctBeat = Math.round((1 - ms.threshold) * 100);
+  const uCount  = ms.avg_universe_count != null ? Math.round(ms.avg_universe_count) : '--';
+  const nP      = ms.n_periods || 0;
+  if (meta) meta.textContent =
+    `${nP} period${nP===1?'':'s'} · rolling ${ms.smooth_months}m breadth (bmk beat ≥${pctBeat}%) · ~${uCount} mgrs/mo`;
+  const cell = (v, fmt) => v == null
+    ? `<td class="mono" style="color:var(--text3)">--</td>`
+    : `<td class="mono">${fmt(v)}</td>`;
+  const dash = `<td class="mono" style="color:var(--text3)">--</td>`;
+  const rows = [
+    {key: 'struggle', label: 'In Active-Struggle Periods'},
+    {key: 'normal',   label: 'Rest of Period'},
+  ];
+  let html = rows.map(({key, label}) => {
+    const b = ms[key];
+    if (!b || !b.current || b.current.n_months === 0) {
+      return `<tr>
+        <td style="font-weight:500">${label}</td>
+        <td class="mono">${b?.n_months ?? 0}</td>
+        <td colspan="6" class="mono" style="text-align:center;color:var(--text3)">No qualifying months</td>
+      </tr>`;
+    }
+    const c = b.current, p = b.proposed;
+    return `<tr>
+      <td style="font-weight:500">${label}</td>
+      <td class="mono">${b.n_months}</td>
+      ${cell(c.avg_return, v => fmtPctN(v, 2))}
+      ${cell(p.avg_return, v => fmtPctN(v, 2))}
+      ${cell(c.avg_excess, v => signedPct(v, 2))}
+      ${cell(p.avg_excess, v => signedPct(v, 2))}
+      ${cell(c.hit_rate,   v => fmtPctN(v, 0))}
+      ${cell(p.hit_rate,   v => fmtPctN(v, 0))}
+    </tr>`;
+  }).join('');
+
+  // Period list — reuses the Excess columns so each period's Current/Proposed
+  // avg monthly excess lines up under the right headers.
+  const periods = ms.periods || [];
+  if (periods.length) {
+    html += `<tr><td colspan="8" style="padding-top:12px;color:var(--text3);font-size:9px;text-transform:uppercase;letter-spacing:.06em;">Struggle periods (benchmark beat ≥${pctBeat}% of universe, rolling ${ms.smooth_months}m)</td></tr>`;
+    html += periods.map(p => `<tr>
+      <td style="color:var(--text2)">${p.start} → ${p.end}</td>
+      <td class="mono">${p.n_months}</td>
+      ${dash}${dash}
+      ${cell(p.cur_excess,  v => signedPct(v, 2))}
+      ${cell(p.prop_excess, v => signedPct(v, 2))}
+      ${dash}${dash}
+    </tr>`).join('');
+  } else {
+    html += `<tr><td colspan="8" style="padding-top:10px;color:var(--text3);font-size:10px;font-style:italic;">No sustained struggle periods at this threshold.</td></tr>`;
+  }
+  tbody.innerHTML = html;
+}
+
 // ── Market Cycle Chart ────────────────────────────────────────────────────
 // SVG-based renderer that matches the stylized market-cycle reference chart:
 // colored wave, top banner with style labels, quality gradient strip, four
@@ -3682,6 +4763,302 @@ function renderRegime(data) {
 // manager dots positioned ON the curve.
 
 let mcTimer = null;
+
+// ─────────────────────────────────────────────────────────────────────────
+//  HOLDINGS OVERLAP MATRIX
+// ─────────────────────────────────────────────────────────────────────────
+let ovlTimer      = null;
+let ovlBasis      = 'internal';  // 'internal' | 'scaled'
+let ovlDataCurrent  = null;      // cached /holdings_overlap response (current)
+let ovlDataProposed = null;      // cached /holdings_overlap response (proposed)
+let ovlDetailPair = null;        // {i,j,state} currently shown in the drill-down
+const OVL_MATCH   = 'issuer';    // always collapse share classes to issuer
+
+function scheduleOverlap() {
+  if (!S.hasExposures) return;
+  if (ovlTimer) clearTimeout(ovlTimer);
+  ovlTimer = setTimeout(loadOverlap, 450);
+}
+
+function setOverlapBasis(b) {
+  ovlBasis = b;
+  document.querySelectorAll('#ovl-basis-seg button').forEach(x =>
+    x.classList.toggle('active', x.dataset.basis === b));
+  // Basis is a pure re-render of cached data — no re-fetch needed.
+  if (ovlDataCurrent || ovlDataProposed) renderOverlap();
+  // Keep the drill-down consistent with the new basis
+  if (ovlDetailPair) openOverlapDetail(ovlDetailPair.i, ovlDetailPair.j, ovlDetailPair.state);
+}
+
+async function loadOverlap() {
+  const section = document.getElementById('overlap-section');
+  if (!S.hasExposures || !S.portfolioManagers || !S.portfolioManagers.length) {
+    if (section) section.style.display = 'none';
+    return;
+  }
+  const client = document.getElementById('client-select')?.value || null;
+  const mgrs = S.portfolioManagers.map(m => ({
+    matched_name:     m.matched_name,
+    weight_file_name: m.weight_file_name || m.matched_name,
+    current_weight:   m.current_weight  || 0,
+    proposed_weight:  m.proposed_weight || 0,
+  }));
+  const fetchState = (weight_state) => fetch('/holdings_overlap', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ client_name: client, weight_state,
+                           match_basis: OVL_MATCH, managers: mgrs }),
+  }).then(r => r.json());
+
+  let cur, prop;
+  try {
+    [cur, prop] = await Promise.all([fetchState('current'), fetchState('proposed')]);
+  } catch (e) {
+    if (section) section.style.display = 'none';
+    return;
+  }
+  if ((cur && cur.error) || (prop && prop.error)) {
+    if (section) section.style.display = 'none';
+    return;
+  }
+  section.style.display = '';
+  ovlDataCurrent  = cur;
+  ovlDataProposed = prop;
+  closeOverlapDetail();
+  renderOverlap();
+}
+
+// Cell background: sequential ramp from --surface2 (0) to --accent (max),
+// intensity keyed to common_weight on the active basis, normalised to the
+// matrix's own max so contrast is always usable.
+function _ovlCellColor(v, vmax) {
+  if (!vmax || v <= 0) return { bg: 'var(--surface2)', fg: 'var(--text3)' };
+  const t = Math.min(1, v / vmax);
+  // Interpolate white→accent-ish blue in RGB. Accent ≈ #0077cc.
+  const r = Math.round(255 + t * (0   - 255));
+  const g = Math.round(255 + t * (119 - 255));
+  const b = Math.round(255 + t * (204 - 255));
+  const fg = t > 0.55 ? '#fff' : 'var(--text)';
+  return { bg: `rgb(${r},${g},${b})`, fg };
+}
+
+function _ovlShortName(nm) {
+  // Trim common regional/style suffixes for the axis labels so the grid
+  // stays compact; the full name shows on hover via title=.
+  return String(nm)
+    .replace(/\s+(EAFE(\s*\+\s*Canada)?|ACWI(\s*ex\s*US)?|xUS|Non[- ]US|International|Global|World)(\s+(SC|Small\s*Cap|SMID))?.*$/i, '')
+    .trim() || nm;
+}
+
+function renderOverlap() {
+  // Shared colour scale across both matrices so Current vs Proposed are
+  // visually comparable (a cell of the same weight is the same shade in both).
+  const basisLabel = ovlBasis === 'internal'
+    ? 'strategy similarity (manager internal weights)'
+    : 'client-scaled weights (actual portfolio doubling-up)';
+  document.getElementById('overlap-subtitle').textContent =
+    `matched by issuer (share classes collapsed) · common weight = Σ min(wᵢ,wⱼ) over shared holdings · ${basisLabel}`;
+
+  let vmax = 0;
+  [ovlDataCurrent, ovlDataProposed].forEach(d => {
+    (d && d.pairs || []).forEach(p => { const v = p[ovlBasis].common_weight; if (v > vmax) vmax = v; });
+  });
+
+  renderOneMatrix('current',  ovlDataCurrent,  vmax);
+  renderOneMatrix('proposed', ovlDataProposed, vmax);
+
+  // Shared note (unmatched managers) — pull from whichever state has it.
+  const noteEl = document.getElementById('overlap-note');
+  const src = ovlDataCurrent || ovlDataProposed || {};
+  const notes = [];
+  if (src.unmatched && src.unmatched.length)
+    notes.push(`⚠ No holdings data for: ${src.unmatched.join(', ')}`);
+  noteEl.textContent = notes.join('  ');
+}
+
+function renderOneMatrix(stateKey, data, vmax) {
+  const tbl = document.getElementById('overlap-matrix-' + stateKey);
+  if (!tbl) return;
+  const mgrs  = (data && data.managers) || [];
+  const pairs = (data && data.pairs)    || [];
+  const n     = mgrs.length;
+  if (n < 2) {
+    tbl.innerHTML = `<tbody><tr><td style="padding:14px;font-family:var(--mono);font-size:10px;color:var(--text3);">Need at least two matched managers with a positive ${stateKey} weight.</td></tr></tbody>`;
+    renderTopPairs(stateKey, [], mgrs);
+    return;
+  }
+  const key = (i, j) => i < j ? `${i}-${j}` : `${j}-${i}`;
+  const pmap = {};
+  pairs.forEach(p => { pmap[key(p.i, p.j)] = p; });
+
+  let html = '<thead><tr><th class="ovl-corner"></th>';
+  mgrs.forEach(m => {
+    html += `<th class="ovl-col-head" title="${m.display}"><span>${_ovlShortName(m.display)}</span></th>`;
+  });
+  html += '</tr></thead><tbody>';
+  for (let i = 0; i < n; i++) {
+    html += `<tr><td class="ovl-row-head" title="${mgrs[i].display}">${_ovlShortName(mgrs[i].display)} <small>(${mgrs[i].count})</small></td>`;
+    for (let j = 0; j < n; j++) {
+      if (i === j) {
+        html += `<td class="ovl-cell ovl-diag" title="${mgrs[i].display} — ${mgrs[i].count} holdings"><div class="ovl-cnt">${mgrs[i].count}</div><div class="ovl-wt">holdings</div></td>`;
+        continue;
+      }
+      const p = pmap[key(i, j)];
+      const met = p ? p[ovlBasis] : null;
+      const cnt = met ? met.shared_count : 0;
+      const cw  = met ? met.common_weight : 0;
+      if (!cnt) {
+        html += `<td class="ovl-cell ovl-empty" onclick="openOverlapDetail(${Math.min(i,j)},${Math.max(i,j)},'${stateKey}')" title="No shared holdings"><div class="ovl-cnt">0</div><div class="ovl-wt">—</div></td>`;
+        continue;
+      }
+      const col = _ovlCellColor(cw, vmax);
+      html += `<td class="ovl-cell" style="background:${col.bg};color:${col.fg};" `
+        + `onclick="openOverlapDetail(${Math.min(i,j)},${Math.max(i,j)},'${stateKey}')" `
+        + `title="${mgrs[i].display} × ${mgrs[j].display}\n${cnt} shared holdings\ncommon weight ${cw.toFixed(2)}%">`
+        + `<div class="ovl-cnt">${cnt}</div><div class="ovl-wt">${cw.toFixed(1)}%</div></td>`;
+    }
+    html += '</tr>';
+  }
+  html += '</tbody>';
+  tbl.innerHTML = html;
+  renderTopPairs(stateKey, pairs, mgrs);
+}
+
+function renderTopPairs(stateKey, pairs, mgrs) {
+  const wrap = document.getElementById('overlap-top-pairs-' + stateKey);
+  if (!wrap) return;
+  const ranked = pairs
+    .map(p => ({ p, cw: p[ovlBasis].common_weight, cnt: p[ovlBasis].shared_count }))
+    .filter(x => x.cnt > 0)
+    .sort((a, b) => b.cw - a.cw)
+    .slice(0, 5);
+  if (!ranked.length) { wrap.innerHTML = ''; return; }
+  wrap.innerHTML = '<span style="font-family:var(--mono);font-size:9px;color:var(--text2);text-transform:uppercase;letter-spacing:.06em;font-weight:600;align-self:center;">Most overlap:</span>'
+    + ranked.map(x => {
+        const i = x.p.i, j = x.p.j;
+        return `<span class="ovl-chip" onclick="openOverlapDetail(${i},${j},'${stateKey}')">`
+          + `${_ovlShortName(mgrs[i].display)} × ${_ovlShortName(mgrs[j].display)} · `
+          + `<b>${x.cw.toFixed(1)}%</b> / ${x.cnt}</span>`;
+      }).join('');
+}
+
+async function openOverlapDetail(i, j, stateKey) {
+  stateKey = stateKey || 'current';
+  ovlDetailPair = { i, j, state: stateKey };
+  const data = stateKey === 'proposed' ? ovlDataProposed : ovlDataCurrent;
+  if (!data) return;
+  const mi = data.managers[i], mj = data.managers[j];
+  const client = document.getElementById('client-select')?.value || null;
+  const box = document.getElementById('overlap-detail');
+  const tbl = document.getElementById('overlap-detail-table');
+  document.getElementById('ovl-det-title').textContent =
+    `${mi.display} × ${mj.display}  ·  ${stateKey}`;
+  box.style.display = 'block';
+  tbl.innerHTML = '<tr><td class="l" style="padding:12px;color:var(--text3);">Loading shared holdings…</td></tr>';
+
+  let d;
+  try {
+    d = await fetch('/holdings_overlap_detail', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        client_name:  client,
+        weight_state: stateKey,
+        match_basis:  OVL_MATCH,
+        name_i: mi.display, name_j: mj.display,
+        managers: S.portfolioManagers.map(m => ({
+          matched_name:     m.matched_name,
+          weight_file_name: m.weight_file_name || m.matched_name,
+          current_weight:   m.current_weight  || 0,
+          proposed_weight:  m.proposed_weight || 0,
+        })),
+      }),
+    }).then(r => r.json());
+  } catch (e) {
+    tbl.innerHTML = '<tr><td class="l" style="padding:12px;color:var(--red);">Request failed.</td></tr>';
+    return;
+  }
+  if (d.error) {
+    tbl.innerHTML = `<tr><td class="l" style="padding:12px;color:var(--amber);">${d.error}</td></tr>`;
+    return;
+  }
+  if (!d.rows || !d.rows.length) {
+    tbl.innerHTML = '<tr><td class="l" style="padding:12px;color:var(--text3);">No shared holdings between these two managers.</td></tr>';
+    return;
+  }
+
+  // Column labels adapt to the active basis
+  const useScaled = ovlBasis === 'scaled';
+  const wI = useScaled ? 'wi_scaled' : 'wi_internal';
+  const wJ = useScaled ? 'wj_scaled' : 'wj_internal';
+  const wLbl = useScaled ? ' (scaled)' : '';
+
+  // Sums are computed over ALL shared rows so the total line is accurate
+  // regardless of how many rows we actually render.
+  let sumI = 0, sumJ = 0, sumMin = 0;
+  d.rows.forEach(r => { sumI += r[wI]; sumJ += r[wJ]; sumMin += Math.min(r[wI], r[wJ]); });
+
+  // Cache for the show-all toggle so re-rendering doesn't re-fetch.
+  ovlDetailData = { d, wI, wJ, wLbl, mi, mj, sumI, sumJ, sumMin };
+  ovlDetailShowAll = false;
+  renderOverlapDetail();
+}
+
+const OVL_DETAIL_CAP = 25;
+let ovlDetailData    = null;
+let ovlDetailShowAll = false;
+
+function toggleOverlapDetailAll() {
+  ovlDetailShowAll = !ovlDetailShowAll;
+  renderOverlapDetail();
+}
+
+function renderOverlapDetail() {
+  const st = ovlDetailData;
+  if (!st) return;
+  const { d, wI, wJ, wLbl, mi, mj, sumI, sumJ, sumMin } = st;
+  const tbl = document.getElementById('overlap-detail-table');
+
+  const total = d.rows.length;
+  const rows = ovlDetailShowAll ? d.rows : d.rows.slice(0, OVL_DETAIL_CAP);
+  const body = rows.map(r => {
+    const a = r[wI], b = r[wJ];
+    const collapsed = (r.n_lines && r.n_lines > 2)
+      ? ` <span style="color:var(--text3);font-size:9px;">(${r.n_lines} classes)</span>` : '';
+    return `<tr>`
+      + `<td class="l">${r.name}${collapsed}</td>`
+      + `<td class="l" style="color:var(--text3);">${r.sector || ''}</td>`
+      + `<td class="l" style="color:var(--text3);">${r.country || ''}</td>`
+      + `<td>${a.toFixed(2)}%</td>`
+      + `<td>${b.toFixed(2)}%</td>`
+      + `<td>${Math.min(a, b).toFixed(2)}%</td>`
+      + `</tr>`;
+  }).join('');
+
+  const hidden = total - rows.length;
+  const moreRow = (total > OVL_DETAIL_CAP)
+    ? `<tr><td class="l" colspan="6" style="text-align:center;padding:6px;">`
+      + `<span class="ovl-chip" onclick="toggleOverlapDetailAll()">`
+      + (ovlDetailShowAll ? `Show top ${OVL_DETAIL_CAP} only` : `Show all ${total} shared holdings (+${hidden})`)
+      + `</span></td></tr>`
+    : '';
+
+  tbl.innerHTML =
+    `<thead><tr>`
+    + `<th class="l">Security</th><th class="l">Sector</th><th class="l">Country</th>`
+    + `<th>${_ovlShortName(mi.display)}${wLbl}</th>`
+    + `<th>${_ovlShortName(mj.display)}${wLbl}</th>`
+    + `<th>min</th>`
+    + `</tr></thead><tbody>${body}`
+    + `<tr style="border-top:2px solid var(--border2);font-weight:600;">`
+    + `<td class="l">${d.shared_count} shared</td><td class="l"></td><td class="l"></td>`
+    + `<td>${sumI.toFixed(2)}%</td><td>${sumJ.toFixed(2)}%</td><td>${sumMin.toFixed(2)}%</td>`
+    + `</tr>${moreRow}</tbody>`;
+}
+
+function closeOverlapDetail() {
+  ovlDetailPair = null;
+  const box = document.getElementById('overlap-detail');
+  if (box) box.style.display = 'none';
+}
 
 // All 18 buckets with their x-axis positions, in the canonical order they
 // appear along the market-cycle curve.
@@ -3801,7 +5178,7 @@ async function loadMarketCycle() {
   if (data.error) {
     metaEl.textContent = data.error;
     missEl.style.display = 'none';
-    chartWrap.style.display = 'grid';
+    chartWrap.style.display = 'block';
     tableEl.innerHTML = '';
     return;
   }
@@ -3818,7 +5195,7 @@ async function loadMarketCycle() {
   }
 
   missEl.style.display = 'none';
-  chartWrap.style.display = 'grid';
+  chartWrap.style.display = 'block';
 
   let metaStr = `${data.n_total} manager${data.n_total !== 1 ? 's' : ''} classified`;
   if (unmapped.length) metaStr += ` · no universe for: ${unmapped.join(', ')}`;
@@ -3834,14 +5211,246 @@ async function loadMarketCycle() {
 // after any dropdown change.
 function mcRenderFromCache() {
   if (!mcLastData) return;
-  const withOverrides = {
-    current:  mcApplyOverrides(mcLastData.current),
-    proposed: mcApplyOverrides(mcLastData.proposed),
-    n_total:  mcLastData.n_total,
-  };
-  renderMarketCycleChart('mc-current-svg-wrap',  withOverrides.current,  'current');
-  renderMarketCycleChart('mc-proposed-svg-wrap', withOverrides.proposed, 'proposed');
+  // Build the union of current + proposed placements into a single list. Each
+  // placement already carries both current_weight and proposed_weight, and the
+  // same manager shares one placement object across the two arrays, so merging
+  // by name (proposed wins — it also carries any override) yields one entry per
+  // manager. renderMarketCycleChart's 'combined' mode colors each dot by whether
+  // the manager is retained (blue), removed (red), added (green), or a
+  // removed+added pair at the same placement (half red / half green).
+  const cur  = mcApplyOverrides(mcLastData.current);
+  const prop = mcApplyOverrides(mcLastData.proposed);
+  const byName = {};
+  cur.forEach(p  => { byName[p.name] = p; });
+  prop.forEach(p => { byName[p.name] = p; });
+  const combined = Object.values(byName);
+  renderMarketCycleChart('mc-combined-svg-wrap', combined, 'combined');
   renderMarketCyclePlacementTable(mcLastData);
+}
+
+// Classify a placement as the portfolio moves from current → proposed weights.
+function mcStatus(p) {
+  const cw = p.current_weight  || 0;
+  const pw = p.proposed_weight || 0;
+  if (cw > 0 && pw > 0)  return 'retained';
+  if (cw > 0 && pw <= 0) return 'removed';
+  if (cw <= 0 && pw > 0) return 'added';
+  return 'retained';
+}
+
+// Dot colors for the combined market-cycle chart.
+const MC_STATUS_COLORS = {
+  retained: { fill: '#0077cc', stroke: '#004a80' },
+  removed:  { fill: '#d94b42', stroke: '#a3352e' },
+  added:    { fill: '#22a24d', stroke: '#14713a' },
+};
+
+// Tooltip for a placement in combined mode: status + both weights.
+function mcCombinedTip(p) {
+  const isOverride = !!p.is_override;
+  const statusLabel = { retained: 'Retained', removed: 'Removed', added: 'Added' }[mcStatus(p)];
+  return (
+    `${p.name} — ${statusLabel}\n` +
+    `Bucket: ${p.bucket}${isOverride ? ' (override)' : ''}\n` +
+    (isOverride ? `Default bucket: ${p._original_bucket}\n` : '') +
+    `Initial: ${p.initial_bucket}${p.is_defensive ? ' → Defensive' : ''}\n` +
+    `V-vs-G: ${p.v_vs_g.toFixed(3)} (pctl ${(p.v_pct*100).toFixed(1)}%)\n` +
+    `Q-vs-D: ${p.q_vs_d.toFixed(3)} (pctl ${(p.q_pct*100).toFixed(1)}%)` +
+    (p.downside_capture != null ? `\n10yr Downside Cap: ${p.downside_capture.toFixed(1)}` : '') +
+    `\nWeight: ${((p.current_weight||0)*100).toFixed(1)}% → ${((p.proposed_weight||0)*100).toFixed(1)}%`
+  );
+}
+
+// ── Print Memo Report ────────────────────────────────────────────────────
+// Captures screenshots of each on-screen panel using html2canvas and sends
+// them to the server for embedding in a PowerPoint deck. The deck layout
+// mirrors the ATL_Health template: 3 slides, each with one or two embedded
+// PNGs at fixed positions, plus the Xponance branding (gradient bar + logo).
+//
+// Capture targets:
+//   Slide 1: #portfolio-managers-panel  (managers table)
+//            #vg-positioning-section    (V-G bars)
+//   Slide 2: #risk-section              (FactSet active style table)
+//            #mcr-section               (MCR bar chart)
+//   Slide 3: #mc-charts-wrap            (market cycle: current + proposed)
+//
+// Each section is captured at 2x device pixel ratio for crispness. Sections
+// that aren't visible (data not loaded) are skipped — the user gets a deck
+// with whichever sections are populated.
+async function exportMemoReport() {
+  const client = document.getElementById('client-select').value;
+  if (!client) {
+    alert('Select a portfolio first.');
+    return;
+  }
+  if (!S.portfolioManagers || !S.portfolioManagers.length) {
+    alert('No portfolio managers loaded.');
+    return;
+  }
+
+  const btn = document.getElementById('btn-print-memo');
+  const originalLabel = btn.textContent;
+  btn.textContent = 'Generating…';
+  btn.disabled = true;
+
+  try {
+    // The only image in the memo is the market-cycle chart; everything else is
+    // built as real (editable) tables server-side. Capture it as a PNG.
+    let mcImg = null;
+    if (typeof html2canvas !== 'undefined') {
+      const el = document.querySelector('#mc-charts-wrap');
+      const r = el && el.getBoundingClientRect();
+      if (el && r.width > 10 && r.height > 10) {
+        try {
+          const canvas = await html2canvas(el, {
+            scale: 2, backgroundColor: '#ffffff', useCORS: true, logging: false,
+            width: el.scrollWidth, height: el.scrollHeight,
+          });
+          mcImg = canvas.toDataURL('image/png');
+        } catch (e) { console.warn('market-cycle capture failed:', e); }
+      }
+    }
+
+    // Current/proposed weights come straight from live state (proposed weights
+    // reflect any edits the user has made in the managers table).
+    const managers = S.portfolioManagers.map(m => ({
+      matched_name:    m.matched_name,
+      weight_file_name: m.weight_file_name,
+      tab:             m.tab,
+      current_weight:  m.current_weight  || 0,
+      proposed_weight: m.proposed_weight || 0,
+    }));
+
+    const resp = await fetch('/export_portfolio_docx', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ client_name: client, managers,
+                             images: { market_cycle: mcImg } }),
+    });
+    if (!resp.ok) {
+      let err = `HTTP ${resp.status}`;
+      try { const j = await resp.json(); err = j.error || err; } catch {}
+      alert('Could not generate memo: ' + err);
+      return;
+    }
+    const blob = await resp.blob();
+    const cd = resp.headers.get('Content-Disposition') || '';
+    const m = cd.match(/filename="([^"]+)"/);
+    const filename = m ? m[1] : 'Rebalance_Memo.docx';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert('Export error: ' + (e.message || e));
+  } finally {
+    btn.textContent = originalLabel;
+    btn.disabled = false;
+  }
+}
+
+// ── Reports tab: Quarterly Portfolio Report → PDF ─────────────────────────
+// Captures the off-screen report sheet page-by-page with html2canvas and posts
+// the images to /export_report_pdf, which stitches them into a PDF. Mirrors
+// exportMemoReport() but outputs PDF instead of PPTX.
+async function exportQuarterlyReportPDF() {
+  if (typeof html2canvas === 'undefined') {
+    alert('html2canvas library not loaded. Refresh the page and try again.');
+    return;
+  }
+  const clients = rptSelectedClients();
+  if (!clients.length) { alert('Select at least one client portfolio.'); return; }
+  const btn = document.getElementById('btn-quarterly-report');
+  const orig = btn.textContent;
+  btn.disabled = true;
+  try {
+    async function snapEl(id) {
+      const el = document.getElementById(id);
+      if (!el) return null;
+      const canvas = await html2canvas(el, {
+        scale: 2, backgroundColor: '#ffffff', useCORS: true, logging: false,
+        width: el.scrollWidth, height: el.scrollHeight,
+      });
+      return canvas.toDataURL('image/png');
+    }
+
+    // One report per selected client, all pages combined into a single PDF.
+    const imgs = [];
+    for (let ci = 0; ci < clients.length; ci++) {
+      const client = clients[ci];
+      const tag = clients.length > 1 ? `${client} (${ci+1}/${clients.length})` : client;
+      btn.textContent = `${tag}: loading…`;
+      const data = await buildLiveReportData(client);
+      btn.textContent = `${tag}: rendering…`;
+      renderReport(data);
+      await new Promise(r => setTimeout(r, 450));  // let Chart.js / SVG paint
+      btn.textContent = `${tag}: capturing…`;
+      for (const id of ['rpt-page-1', 'rpt-page-2', 'rpt-page-3']) {
+        const im = await snapEl(id);
+        if (im) imgs.push(im);
+      }
+    }
+    if (!imgs.length) { alert('Could not capture the report.'); return; }
+
+    btn.textContent = 'Generating PDF…';
+    const resp = await fetch('/export_report_pdf', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ images: imgs }),
+    });
+    if (!resp.ok) {
+      let err = `HTTP ${resp.status}`;
+      try { const j = await resp.json(); err = j.error || err; } catch {}
+      alert('Could not generate PDF: ' + err);
+      return;
+    }
+    const blob = await resp.blob();
+    const cd = resp.headers.get('Content-Disposition') || '';
+    const m = cd.match(/filename="([^"]+)"/);
+    const filename = m ? m[1] : 'Quarterly_Portfolio_Report.pdf';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert('Export error: ' + (e.message || e));
+  } finally {
+    btn.textContent = orig; btn.disabled = false;
+  }
+}
+
+// ── Reports tab: Dispersion Report → Excel ────────────────────────────────
+// Pure server-side compute (all client backtests) → .xlsx download.
+async function exportDispersionReport() {
+  const btn = document.getElementById('btn-dispersion-report');
+  const orig = btn.textContent;
+  btn.textContent = 'Generating…'; btn.disabled = true;
+  try {
+    const resp = await fetch('/export_dispersion_xlsx');
+    if (!resp.ok) {
+      let err = `HTTP ${resp.status}`;
+      try { const j = await resp.json(); err = j.error || err; } catch {}
+      alert('Could not generate report: ' + err);
+      return;
+    }
+    const blob = await resp.blob();
+    const cd = resp.headers.get('Content-Disposition') || '';
+    const m = cd.match(/filename="([^"]+)"/);
+    const filename = m ? m[1] : 'Dispersion_Report.xlsx';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert('Export error: ' + (e.message || e));
+  } finally {
+    btn.textContent = orig; btn.disabled = false;
+  }
 }
 
 // Compute the y-coordinate of the market-cycle wave at a given x.
@@ -3941,8 +5550,8 @@ function renderMarketCycleChart(wrapId, placements, portfolioKey, idPrefix) {
   //   metricsPanelY .. +90    four bullet panels with security metrics
   const phaseHeaderY   = 4;   const phaseHeaderH = 26;
   const macroLabelY    = phaseHeaderY + phaseHeaderH + 2;   const labelBandH = 18;
-  const macroPanelY    = macroLabelY + labelBandH;          const macroPanelH = 118;
-  const momentumY      = macroPanelY + macroPanelH + 10;    const momentumH = 14;
+  const macroPanelY    = macroLabelY + labelBandH;          const macroPanelH = 84;
+  const momentumY      = macroPanelY + macroPanelH + 6;     const momentumH = 14;
   const plotTop        = momentumY + momentumH + 6;
   const plotH          = 200;
   const plotBottom     = plotTop + plotH;
@@ -4144,7 +5753,45 @@ function renderMarketCycleChart(wrapId, placements, portfolioKey, idPrefix) {
        + `stroke-width="5.5" stroke-linecap="round"/>`;
 
   // ── Manager dots on the curve + labels ────────────────────────────────
-  if (placements && placements.length) {
+  if (placements && placements.length && portfolioKey === 'combined') {
+    // Combined view: one chart for the whole portfolio, dots colored by the
+    // proposed change. Group by x (y is a pure function of x) so a removed and
+    // an added manager landing on the exact same placement collapse into a
+    // single half-red/half-green dot instead of two overlapping dots.
+    const groups = {};
+    placements.forEach(p => {
+      const key = p.x.toFixed(3);
+      (groups[key] = groups[key] || []).push(p);
+    });
+    Object.values(groups).forEach(grp => {
+      const cx = xScale(grp[0].x);
+      const cy = yScale(mcWaveY(grp[0].x));
+      const r = 9;
+      const hasRemoved = grp.some(p => mcStatus(p) === 'removed');
+      const hasAdded   = grp.some(p => mcStatus(p) === 'added');
+      const tip = grp.map(mcCombinedTip).join('\n───\n').replace(/</g, '&lt;');
+      if (hasRemoved && hasAdded) {
+        // Left semicircle red (removed), right semicircle green (added).
+        svg += `<path d="M ${cx.toFixed(1)} ${(cy-r).toFixed(1)} A ${r} ${r} 0 0 0 ${cx.toFixed(1)} ${(cy+r).toFixed(1)} Z" fill="${MC_STATUS_COLORS.removed.fill}"/>`;
+        svg += `<path d="M ${cx.toFixed(1)} ${(cy-r).toFixed(1)} A ${r} ${r} 0 0 1 ${cx.toFixed(1)} ${(cy+r).toFixed(1)} Z" fill="${MC_STATUS_COLORS.added.fill}"/>`;
+        svg += `<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${r}" fill="none" stroke="#555" stroke-width="1.5"><title>${tip}</title></circle>`;
+      } else {
+        const c = hasRemoved ? MC_STATUS_COLORS.removed
+                : hasAdded   ? MC_STATUS_COLORS.added
+                :              MC_STATUS_COLORS.retained;
+        svg += `<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${r}" `
+             + `fill="${c.fill}" stroke="${c.stroke}" stroke-width="1.5"><title>${tip}</title></circle>`;
+      }
+    });
+    // Labels: one per manager (so both names in a shared placement still show).
+    placements.forEach((p, idx) => {
+      const cx = xScale(p.x);
+      const cy = yScale(mcWaveY(p.x));
+      const labelY = cy + labelOffsets[idx].dy;
+      svg += `<text x="${cx.toFixed(1)}" y="${labelY.toFixed(1)}" text-anchor="middle" `
+           + `font-size="11" fill="#2a2a2a" font-weight="500">${mcFirmName(p.name)}</text>`;
+    });
+  } else if (placements && placements.length) {
     placements.forEach((p, idx) => {
       const cx = xScale(p.x);
       const cy = yScale(mcWaveY(p.x));
@@ -4173,9 +5820,12 @@ function renderMarketCycleChart(wrapId, placements, portfolioKey, idPrefix) {
            + `font-size="11" fill="#2a2a2a" font-weight="500">${label}</text>`;
     });
   } else {
+    const emptyMsg = portfolioKey === 'combined'
+      ? 'No managers in portfolio'
+      : `No managers with ${portfolioKey} weight &gt; 0`;
     svg += `<text x="${chartLeft + chartW/2}" y="${(plotTop + plotBottom)/2}" `
          + `text-anchor="middle" font-family="IBM Plex Mono" font-size="11" fill="#888">`
-         + `No managers with ${portfolioKey} weight &gt; 0</text>`;
+         + `${emptyMsg}</text>`;
   }
 
   // ── Quality gradient strip ────────────────────────────────────────────
@@ -4257,7 +5907,7 @@ function renderMarketCyclePlacementTable(data) {
   let html = `<table class="data-table w-full" style="margin-top:8px;"><thead><tr>
     <th style="text-align:left">Manager</th>
     <th style="text-align:left">Initial Peer Group</th>
-    <th style="text-align:left;min-width:190px">Final Bucket</th>
+    <th style="text-align:left;min-width:150px">Final Bucket</th>
     <th>V-vs-G %ile</th>
     <th>Q-vs-D %ile</th>
     <th>10yr DnCap</th>
@@ -4747,6 +6397,7 @@ async function uploadExposuresFile(input, zoneId) {
       if (S.portfolioManagers.length) {
         await buildExposuresSelector();
         loadExposures(S.currentExposureGrouping || null);
+        loadOverlap();
       }
     } else {
       fname.textContent = 'Error: ' + (data.message || 'unknown');
@@ -4764,6 +6415,48 @@ function dropFileExposures(event, zoneId) {
   if (!file) return;
   uploadExposuresFile({files:[file]}, zoneId);
 }
+
+async function uploadQualitativeFile(input, zoneId) {
+  const file = input.files[0];
+  if (!file) return;
+  const zone  = document.getElementById(zoneId);
+  const fname = document.getElementById('fname-qual');
+  fname.textContent = 'Uploading…';
+  const fd = new FormData();
+  fd.append('qualitative', file);
+  try {
+    const data = await fetch('/upload_qualitative', {method:'POST', body:fd}).then(r=>r.json());
+    if (data.status === 'ok') {
+      zone.classList.add('has-file');
+      let msg = `${file.name} — ${data.n_firms} firms`;
+      fname.textContent = msg;
+      fname.style.color = 'var(--green)';
+      S.hasQualitative = true;
+      if (data.warnings && data.warnings.length) {
+        fname.textContent += `  ⚠ ${data.warnings.length} note(s)`;
+        fname.title = data.warnings.join('\n');
+      }
+      // Refresh any views that show qualitative data
+      if (S.portfolioManagers && S.portfolioManagers.length) {
+        loadPortfolio(document.getElementById('client-select').value);
+      }
+    } else {
+      fname.textContent = 'Error: ' + (data.message || 'unknown');
+      fname.style.color = 'var(--red)';
+    }
+  } catch(e) {
+    fname.textContent = 'Upload failed.';
+    fname.style.color = 'var(--red)';
+  }
+}
+
+function dropFileQualitative(event, zoneId) {
+  event.preventDefault();
+  const file = event.dataTransfer.files[0];
+  if (!file) return;
+  uploadQualitativeFile({files:[file]}, zoneId);
+}
+
 
 // ── Portfolio exposures section ───────────────────────────────────────────
 // Two-row selector: A (Categorical) and B (Continuous). Each pick is
@@ -5198,10 +6891,11 @@ refreshPortfolioViewsFromOverrides = function() {
   if (S.hasExposures && expCurrentGrouping) loadExposures(expCurrentGrouping);
 };
 
-// ── Default Portfolio Report ──────────────────────────────────────────────
-// Mock data for a theoretical client so we can lock the UI before wiring
-// to live portfolios. Shape matches what the backend endpoints already
-// return (see /portfolio, /risk_analysis, /market_cycle, /portfolio_exposures).
+// ── Quarterly Portfolio Report — live data ─────────────────────────────────
+// The report is built per-client from live endpoints (buildLiveReportData)
+// and rendered by renderReport(data). The original mock object is retired
+// below (fenced out; kept briefly as a shape reference — safe to delete).
+/* RETIRED MOCK — no longer referenced anywhere.
 const REPORT_MOCK = {
   client: 'Sample Pension Fund',
   benchmark: 'MSCI ACWI',
@@ -5437,9 +7131,321 @@ const REPORT_MOCK = {
     },
   },
 };
+END RETIRED MOCK */
+
+// Fetch JSON, never throw — errors come back as {error} so one failed section
+// can't abort the whole report.
+async function rptFetchJson(url, opts) {
+  try {
+    const r = await fetch(url, opts);
+    return await r.json();
+  } catch (e) {
+    return { error: 'Request failed: ' + (e.message || e) };
+  }
+}
+
+// Assemble the live report object for one client. Every section that can't be
+// computed carries {error: '...'} and renders as a note inside the PDF.
+async function buildLiveReportData(client) {
+  const port = await rptFetchJson(`/portfolio/${encodeURIComponent(client)}`);
+  if (port.error) throw new Error(port.error);
+
+  // Managers payload for the POST endpoints (same fields the Portfolio tab sends)
+  const managers = (port.managers || []).map(m => ({
+    matched_name:    m.matched_name,
+    tab:             m.tab,
+    current_weight:  m.current_weight  || 0,
+    proposed_weight: m.proposed_weight || 0,
+    style_buckets:   m.style_buckets   || {},
+    vg_full: m.vg_full, vg_3factor: m.vg_3factor,
+    pct_small: m.pct_small, pct_em: m.pct_em,
+    ns_z: m.ns_z,
+  }));
+  const post = body => ({method:'POST', headers:{'Content-Type':'application/json'},
+                         body: JSON.stringify(body)});
+  const PCTX = v => (v == null || isNaN(v)) ? null : v * 100;  // decimal → percent
+
+  const expGroupings = [['region','MSCI Region'], ['country','MSCI Country'],
+                        ['sector','GICS Sector'], ['industry','GICS Industry']];
+  const ovlMgrs = (port.managers || []).map(m => ({
+    matched_name:     m.matched_name,
+    weight_file_name: m.weight_file_name || m.matched_name,
+    current_weight:   m.current_weight  || 0,
+    proposed_weight:  m.proposed_weight || 0,
+  }));
+  const [stats, risk, mc, ra, perf,
+         cmpMgrBt, cmpFacBt, cmpMgrAct, cmpFacAct, div, ovl, ...expRes] = await Promise.all([
+    rptFetchJson('/compute_portfolio_stats', post({managers})),
+    (S.hasSecurityRisk
+       ? rptFetchJson('/compute_security_risk_exposures', post({managers, client_name: client}))
+       : rptFetchJson('/compute_risk_exposures', post({managers, client_name: client}))),
+    rptFetchJson('/market_cycle', post({client_name: client, managers})),
+    rptFetchJson('/risk_analysis', post({managers, client_name: client})),
+    rptFetchJson('/report_performance', post({client_name: client})),
+    rptFetchJson('/ideal_complement',        post({client_name: client, managers})),
+    rptFetchJson('/ideal_factor_complement', post({client_name: client, managers})),
+    rptFetchJson('/ideal_complement',        post({client_name: client, managers, basis: 'actual'})),
+    rptFetchJson('/ideal_factor_complement', post({client_name: client, managers, basis: 'actual'})),
+    rptFetchJson('/diverse_ownership', post({client_name: client, managers})),
+    rptFetchJson('/holdings_overlap', post({client_name: client, weight_state: 'current',
+                                            match_basis: 'issuer', managers: ovlMgrs})),
+    ...expGroupings.map(([k, g]) =>
+      rptFetchJson('/portfolio_exposures', post({managers, grouping: g, client_name: client}))),
+  ]);
+
+  // Holdings — V-G decimals → percent for the report's signed-number cells
+  const holdings = (port.managers || []).map(m => ({
+    name: m.matched_name, tab: m.tab, weight: m.current_weight || 0,
+    vg_3factor: PCTX(m.vg_3factor), vg_full: PCTX(m.vg_full), ns_z: m.ns_z,
+  }));
+
+  const portfolio_vg = (stats && !stats.error && stats.current)
+    ? { vg_3factor: PCTX(stats.current.vg_3factor), vg_full: PCTX(stats.current.vg_full) }
+    : { error: (stats && stats.error) || 'Portfolio stats unavailable.' };
+
+  // Portfolio Edge (current): weighted-avg normalized skill Z + coverage.
+  const edge = (stats && !stats.error && stats.edge_current)
+    ? stats.edge_current
+    : { error: (stats && stats.error) || 'Portfolio stats unavailable.' };
+
+  // Diverse / Woman Owned (current): weight in majority diverse/woman-owned firms.
+  const diverse = (div && !div.error && div.has_data && div.current)
+    ? div.current
+    : { error: (div && div.error) || 'Firm qualitative data not loaded.' };
+
+  // Holdings overlap (current weights, issuer-matched, strategy-internal basis).
+  const overlap = (ovl && !ovl.error && Array.isArray(ovl.managers) && ovl.managers.length >= 2)
+    ? { managers: ovl.managers, pairs: ovl.pairs || [], unmatched: ovl.unmatched || [] }
+    : { error: (ovl && ovl.error) || 'Exposures/holdings file not loaded (need ≥2 matched managers).' };
+
+  const frHasVals = risk && risk.current && Object.values(risk.current).some(v => v != null);
+  const factset_risk = (risk && !risk.error && risk.factors && frHasVals)
+    ? risk
+    : { error: (risk && risk.error)
+        || (risk && risk.factors && !frHasVals
+             ? 'Active exposures unavailable — no portfolio managers matched in the FactSet Risk Summary.'
+             : 'FactSet Risk Summary not loaded.') };
+
+  const market_cycle = (mc && !mc.error && Array.isArray(mc.current) && mc.current.length)
+    ? mc.current
+    : { error: (mc && (mc.error || (mc.missing_universe ? 'Universe data not loaded.' : null)))
+               || 'Market cycle unavailable.' };
+
+  let mcr;
+  if (ra && !ra.error && ra.marginal && ra.marginal.current) {
+    const cur = ra.marginal.current;
+    mcr = { base_te: cur.base_te, base_dd: cur.base_dd, managers: cur.managers || [] };
+  } else {
+    mcr = { error: (ra && ra.error) || 'Risk analysis unavailable.' };
+  }
+
+  // Exposures: flat percent rows → top-3 OW / top-3 UW in decimals
+  const exposures = {};
+  expGroupings.forEach(([key], i) => {
+    const res = expRes[i];
+    if (!res || res.error || !Array.isArray(res.rows)) {
+      exposures[key] = { error: (res && res.error) || 'Exposures file not loaded.' };
+      return;
+    }
+    const rows = res.rows
+      .filter(r => r.label !== 'Unclassified' && r.delta_current != null)
+      .map(r => ({ label: r.label, port: (r.current || 0) / 100,
+                   bmk: (r.benchmark || 0) / 100, active: (r.delta_current || 0) / 100 }));
+    const ow = [...rows].sort((a, b) => b.active - a.active).filter(r => r.active > 0).slice(0, 3);
+    const uw = [...rows].sort((a, b) => a.active - b.active).filter(r => r.active < 0).slice(0, 3);
+    exposures[key] = (ow.length || uw.length)
+      ? { ow, uw }
+      : { error: 'Not classified for these holdings in the exposures file.' };
+  });
+
+  // Performance
+  const perf_backtested = (perf && !perf.error && perf.backtested && !perf.backtested.error)
+    ? perf.backtested
+    : { error: (perf && (perf.error || (perf.backtested || {}).error)) || 'Backtest unavailable.' };
+  const perf_actual = (perf && !perf.error && perf.actual && !perf.actual.error)
+    ? perf.actual
+    : { error: (perf && ((perf.actual || {}).error || perf.error))
+               || 'Client track record not loaded.' };
+
+  // Complements (manager + Aapryl factor live; FactSet risk factor pending)
+  const mkCmp = (mgrRes, facRes) => ({
+    benchmark_name: (mgrRes && mgrRes.benchmark_name) || (facRes && facRes.benchmark_name)
+                    || port.client_benchmark || 'benchmark',
+    n_underperf_months: (mgrRes && mgrRes.n_underperform_months)
+                        || (facRes && facRes.n_underperform_months) || null,
+    manager: (mgrRes && mgrRes.best)
+      ? { ...mgrRes.best, vg_3factor: PCTX(mgrRes.best.vg_3factor),
+          vg_full: PCTX(mgrRes.best.vg_full) }
+      : { error: (mgrRes && mgrRes.error) || 'Unavailable.' },
+    aapryl_factor: (facRes && facRes.best)
+      ? facRes.best
+      : { error: (facRes && facRes.error) || 'Unavailable.' },
+    factset_risk: { error: 'Pending — FactSet risk factor return history not yet loaded.' },
+  });
+
+  return {
+    client: port.client || client,
+    benchmark: port.client_benchmark || (perf && perf.benchmark_name) || '—',
+    as_of: (perf && perf.as_of) || '',
+    managers: holdings,
+    portfolio_vg, edge, diverse, overlap,
+    factset_risk, market_cycle, mcr, exposures,
+    perf_actual, perf_backtested,
+    complements_actual:     mkCmp(cmpMgrAct, cmpFacAct),
+    complements_backtested: mkCmp(cmpMgrBt,  cmpFacBt),
+  };
+}
+
+// Neutral in-PDF note for a section whose data isn't available.
+function rptNoteHtml(msg) {
+  return `<div style="font-family:var(--mono);font-size:10px;color:var(--text3);` +
+         `border:1px dashed var(--border);border-radius:3px;padding:10px 12px;">` +
+         `${msg}</div>`;
+}
+function rptNoteTable(tableId, msg) {
+  document.getElementById(tableId).innerHTML =
+    `<tbody><tr><td style="font-family:var(--mono);font-size:10px;color:var(--text3);` +
+    `padding:10px 12px;">${msg}</td></tr></tbody>`;
+}
+
+// Reports-tab client picker: a plain clickable list. Click a client to toggle
+// it; "All Clients" at the top selects/clears everything. Selection is held
+// in RPT_SEL and read by rptSelectedClients().
+const RPT_SEL = new Set();
+
+function rptAllClients() {
+  const src = document.getElementById('client-select');
+  return src ? Array.from(src.options).map(o => o.value).filter(Boolean) : [];
+}
+
+function populateReportClientSelect() {
+  const box = document.getElementById('rpt-client-list');
+  if (!box) return;
+  const all = rptAllClients();
+  // Drop stale selections; default to the Portfolio tab's current client.
+  Array.from(RPT_SEL).forEach(v => { if (!all.includes(v)) RPT_SEL.delete(v); });
+  const src = document.getElementById('client-select');
+  if (!RPT_SEL.size && src && src.value) RPT_SEL.add(src.value);
+
+  const allSelected = all.length > 0 && all.every(c => RPT_SEL.has(c));
+  const row = (label, value, selected, isAll) => `
+    <div onclick="rptToggleClient('${escapeHtml(value)}')"
+         style="padding:5px 10px;cursor:pointer;font-family:var(--mono);font-size:11px;
+                display:flex;align-items:center;gap:7px;user-select:none;
+                ${isAll ? 'border-bottom:1px solid var(--border);font-weight:600;' : ''}
+                ${selected ? 'background:rgba(0,119,204,.10);color:var(--text);' : 'color:var(--text2);'}">
+      <span style="width:12px;color:var(--accent);">${selected ? '✓' : ''}</span>
+      <span>${escapeHtml(label)}</span>
+    </div>`;
+  box.innerHTML = row('All Clients', '__ALL__', allSelected, true)
+    + all.map(c => row(c, c, RPT_SEL.has(c), false)).join('');
+}
+
+function rptToggleClient(value) {
+  const all = rptAllClients();
+  if (value === '__ALL__') {
+    const allSelected = all.length > 0 && all.every(c => RPT_SEL.has(c));
+    RPT_SEL.clear();
+    if (!allSelected) all.forEach(c => RPT_SEL.add(c));
+  } else if (RPT_SEL.has(value)) {
+    RPT_SEL.delete(value);
+  } else {
+    RPT_SEL.add(value);
+  }
+  populateReportClientSelect();
+}
+
+function rptSelectedClients() {
+  // Preserve the tool's client order rather than click order.
+  return rptAllClients().filter(c => RPT_SEL.has(c));
+}
+
+// ── Reports tab: Returns Download section selector ────────────────────────
+// Fixed sub-asset-class options (label + peer-tab code). Selection held in
+// RTN_SEL (tab codes) and read by rtnSelectedTabs(). Defaults to all.
+const RTN_SECTIONS = [
+  { label: 'EAFE',  tab: 'EAFE' },
+  { label: 'Global', tab: 'ACWI' },
+  { label: 'ISC',   tab: 'ISC' },
+  { label: 'EM',    tab: 'EM' },
+  { label: 'US',    tab: 'US' },
+  { label: 'US SC', tab: 'USSC' },
+];
+const RTN_SEL = new Set(RTN_SECTIONS.map(s => s.tab));
+// Cross-cutting filter: when true, restrict to "funded" managers (held at a
+// current weight > 0 in some client portfolio). Composes with the section pick.
+let RTN_FUNDED = false;
+
+function populateReturnsSectionSelect() {
+  const box = document.getElementById('rtn-section-list');
+  if (!box) return;
+  const allSelected = RTN_SECTIONS.every(s => RTN_SEL.has(s.tab));
+  const row = (label, value, selected, sep) => `
+    <div onclick="rtnToggleSection('${escapeHtml(value)}')"
+         style="padding:5px 10px;cursor:pointer;font-family:var(--mono);font-size:11px;
+                display:flex;align-items:center;gap:7px;user-select:none;
+                ${sep ? 'border-bottom:1px solid var(--border);font-weight:600;' : ''}
+                ${selected ? 'background:rgba(0,119,204,.10);color:var(--text);' : 'color:var(--text2);'}">
+      <span style="width:12px;color:var(--accent);">${selected ? '✓' : ''}</span>
+      <span>${escapeHtml(label)}</span>
+    </div>`;
+  box.innerHTML = row('All', '__ALL__', allSelected, true)
+    + row('Funded', '__FUNDED__', RTN_FUNDED, true)
+    + RTN_SECTIONS.map(s => row(s.label, s.tab, RTN_SEL.has(s.tab), false)).join('');
+}
+
+function rtnToggleSection(value) {
+  if (value === '__ALL__') {
+    const allSelected = RTN_SECTIONS.every(s => RTN_SEL.has(s.tab));
+    RTN_SEL.clear();
+    if (!allSelected) RTN_SECTIONS.forEach(s => RTN_SEL.add(s.tab));
+  } else if (value === '__FUNDED__') {
+    RTN_FUNDED = !RTN_FUNDED;
+  } else if (RTN_SEL.has(value)) {
+    RTN_SEL.delete(value);
+  } else {
+    RTN_SEL.add(value);
+  }
+  populateReturnsSectionSelect();
+}
+
+function rtnSelectedTabs() {
+  // Preserve the fixed display order rather than click order.
+  return RTN_SECTIONS.map(s => s.tab).filter(t => RTN_SEL.has(t));
+}
+
+async function exportReturnsDownload() {
+  const tabs = rtnSelectedTabs();
+  if (!tabs.length) { alert('Select at least one sub-asset class.'); return; }
+  const btn = document.getElementById('btn-returns-download');
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Generating…';
+  try {
+    const resp = await fetch('/export_returns_xlsx?sections=' + encodeURIComponent(tabs.join(','))
+                             + (RTN_FUNDED ? '&funded=1' : ''));
+    if (!resp.ok) {
+      let err = `HTTP ${resp.status}`;
+      try { const j = await resp.json(); err = j.error || err; } catch {}
+      alert('Could not generate workbook: ' + err);
+      return;
+    }
+    const blob = await resp.blob();
+    const cd = resp.headers.get('Content-Disposition') || '';
+    const m = cd.match(/filename="([^"]+)"/);
+    const filename = m ? m[1] : 'Returns_Download.xlsx';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert('Export error: ' + (e.message || e));
+  } finally {
+    btn.textContent = orig; btn.disabled = false;
+  }
+}
 
 let rptMcrChart = null;
-let rptInited = false;
 
 function rptFmtPct1(v){ return (v==null||isNaN(v)) ? '--' : (v*100).toFixed(1)+'%'; }
 function rptFmtPp(v){ // active weight in pp, signed
@@ -5453,9 +7459,15 @@ function rptFmtSigned(v, digits=2){
   const sign = v >= 0 ? '+' : '−';
   return `${sign}${Math.abs(v).toFixed(digits)}`;
 }
+// Value-Growth values are carried in percent; show with a % sign so the scale
+// (e.g. +7.69%) is unambiguous.
+function rptFmtSignedPct(v, digits=2){
+  if (v==null||isNaN(v)) return '--';
+  const sign = v >= 0 ? '+' : '−';
+  return `${sign}${Math.abs(v).toFixed(digits)}%`;
+}
 
-function renderReport() {
-  const r = REPORT_MOCK;
+function renderReport(r) {
   // Cover
   document.getElementById('rpt-cover-client').textContent = r.client;
   document.getElementById('rpt-cover-bmk').textContent    = r.benchmark;
@@ -5474,8 +7486,8 @@ function renderReport() {
       <td>${m.name}</td>
       <td>${m.tab}</td>
       <td>${rptFmtPct1(m.weight)}</td>
-      <td class="${vg3cls}">${rptFmtSigned(m.vg_3factor)}</td>
-      <td class="${vgFcls}">${rptFmtSigned(m.vg_full)}</td>
+      <td class="${vg3cls}">${rptFmtSignedPct(m.vg_3factor)}</td>
+      <td class="${vgFcls}">${rptFmtSignedPct(m.vg_full)}</td>
       <td class="${skillCls}">${rptFmtSigned(m.ns_z)}</td>
     </tr>`;
   }).join('');
@@ -5485,9 +7497,12 @@ function renderReport() {
   // Value-Growth Positioning (current only) — two horizontal tracks
   // Convention: + = value lean (red, right of center), − = growth lean (green, left of center)
   const vg = r.portfolio_vg;
-  const vgScale = 4; // ±4 covers the typical V-G range
-  const vgPctFor = v => Math.max(0, Math.min(100, 50 + (v / vgScale) * 50));
   const vgBox = document.getElementById('rpt-vg-positioning');
+  if (!vg || vg.error) {
+    vgBox.innerHTML = rptNoteHtml((vg && vg.error) || 'Portfolio V-G unavailable.');
+  } else {
+  const vgScale = 8; // values are percent V-G; ±8 covers the ±7% band
+  const vgPctFor = v => Math.max(0, Math.min(100, 50 + (v / vgScale) * 50));
   vgBox.innerHTML = `
     <div class="rpt-vg-row">
       <div class="rpt-vg-label">3-Factor</div>
@@ -5498,7 +7513,7 @@ function renderReport() {
         </div>
         <div class="rpt-vg-scale"><span>Growth −${vgScale}</span><span>0</span><span>Value +${vgScale}</span></div>
       </div>
-      <div class="rpt-vg-value ${vg.vg_3factor>0?'val-pos':'val-neg'}">${rptFmtSigned(vg.vg_3factor)}</div>
+      <div class="rpt-vg-value ${vg.vg_3factor>0?'val-pos':'val-neg'}">${rptFmtSignedPct(vg.vg_3factor)}</div>
     </div>
     <div class="rpt-vg-row">
       <div class="rpt-vg-label">Full</div>
@@ -5509,15 +7524,54 @@ function renderReport() {
         </div>
         <div class="rpt-vg-scale"><span>Growth −${vgScale}</span><span>0</span><span>Value +${vgScale}</span></div>
       </div>
-      <div class="rpt-vg-value ${vg.vg_full>0?'val-pos':'val-neg'}">${rptFmtSigned(vg.vg_full)}</div>
+      <div class="rpt-vg-value ${vg.vg_full>0?'val-pos':'val-neg'}">${rptFmtSignedPct(vg.vg_full)}</div>
     </div>
   `;
+  }
+
+  // Portfolio Edge (current) — weighted-avg normalized skill Z + coverage
+  const edgeBox = document.getElementById('rpt-edge');
+  const eg = r.edge || {};
+  if (eg.error || !('z' in eg)) {
+    edgeBox.innerHTML = rptNoteHtml(eg.error || 'Unavailable.');
+  } else {
+    const z = eg.z;
+    const zTxt = z == null ? '--' : (z >= 0 ? '+' : '−') + Math.abs(z).toFixed(2);
+    const zCol = z == null ? 'var(--text3)' : z > 0 ? 'var(--green)' : z < 0 ? 'var(--red)' : 'var(--text)';
+    const cov = (eg.covered_weight != null && eg.total_weight)
+      ? `${(eg.covered_weight / eg.total_weight * 100).toFixed(0)}% of portfolio weight covered by a skill score` : '';
+    edgeBox.innerHTML = `
+      <div style="border:1px solid var(--border);border-radius:4px;padding:7px 11px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
+        <div style="font-family:var(--mono);font-size:18px;font-weight:600;color:${zCol};">${zTxt}</div>
+        <div style="font-family:var(--mono);font-size:9px;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;">Weighted Avg Norm Skill (Z)</div>
+        <div style="font-family:var(--mono);font-size:8px;color:var(--text3);width:100%;">${cov}</div>
+      </div>`;
+  }
+
+  // Diverse / Woman Owned (current)
+  const dvBox = document.getElementById('rpt-diverse');
+  const dv = r.diverse || {};
+  if (dv.error || dv.weight_pct == null) {
+    dvBox.innerHTML = rptNoteHtml(dv.error || 'Unavailable.');
+  } else {
+    const unk = dv.unknown_weight_pct || 0;
+    dvBox.innerHTML = `
+      <div style="border:1px solid var(--border);border-radius:4px;padding:7px 11px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
+        <div style="font-family:var(--mono);font-size:18px;font-weight:600;color:var(--green);">${dv.weight_pct.toFixed(1)}%</div>
+        <div style="font-family:var(--mono);font-size:9px;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;">Weight in Majority-Owned (≥50%) Diverse/Woman Firms</div>
+        <div style="font-family:var(--mono);font-size:8px;color:var(--text3);width:100%;">${dv.n_diverse} of ${dv.n_firms} firms${unk > 0.5 ? ` · ${unk.toFixed(0)}% of portfolio lacks a firm record` : ''}</div>
+      </div>`;
+  }
 
   // FactSet Risk — current-only active style exposures table.
   // Same visual format as the Portfolio tab's renderRiskExposures (factor
   // name + value + centered bar around 0), with proposed/delta columns
   // dropped per the report spec.
-  const fr = r.factset_risk;
+  const fr = r.factset_risk || {};
+  if (fr.error || !fr.factors) {
+    document.getElementById('rpt-factset-risk').innerHTML =
+      rptNoteHtml(fr.error || 'FactSet Risk Summary not loaded.');
+  } else {
   const frFactors = fr.factors || [];
   const frCur = fr.current || {};
   const frMaxAbs = Math.max(...frFactors.map(f => Math.abs(frCur[f] ?? 0)), 0.01);
@@ -5555,22 +7609,35 @@ function renderReport() {
   });
   frHtml += '</tbody></table></div>';
   document.getElementById('rpt-factset-risk').innerHTML = frHtml;
+  }
 
   // Market Cycle — reuse the existing full wave SVG chart (renderMarketCycleChart)
-  // with mock placements. Same exact visual as the Portfolio tab. We pass a
+  // with live placements. Same exact visual as the Portfolio tab. We pass a
   // distinct idPrefix so the report's gradient IDs don't collide with the
   // hidden Portfolio chart's defs.
-  renderMarketCycleChart('rpt-mc-wrap', r.market_cycle, 'current', 'rpt_current');
+  if (Array.isArray(r.market_cycle) && r.market_cycle.length) {
+    renderMarketCycleChart('rpt-mc-wrap', r.market_cycle, 'current', 'rpt_current');
+  } else {
+    document.getElementById('rpt-mc-wrap').innerHTML =
+      rptNoteHtml((r.market_cycle && r.market_cycle.error) || 'Market cycle unavailable.');
+  }
+
+  // Holdings Overlap (current weights)
+  rptRenderOverlap(document.getElementById('rpt-overlap'), r.overlap);
 
   // MCR — same format as renderMarginal: grouped bars per manager, Current TE
   // + Current DD only (proposed dropped per report spec). Sorted by descending
   // base weight to match the Portfolio tab convention. Base TE/DD shown above.
-  const mcr = r.mcr;
+  const mcr = r.mcr || {};
+  if (rptMcrChart) { rptMcrChart.destroy(); rptMcrChart = null; }
+  if (mcr.error || !Array.isArray(mcr.managers) || !mcr.managers.length) {
+    document.getElementById('rpt-mcr-caption').innerHTML =
+      rptNoteHtml(mcr.error || 'MCR unavailable.');
+  } else {
   const mcrMgrs = [...mcr.managers].sort((a,b) => (b.base_weight||0) - (a.base_weight||0));
   const mcrLabels = mcrMgrs.map(m => m.name);
   const teCur = mcrMgrs.map(m => m.te_delta_pct != null ? m.te_delta_pct * 100 : null);
   const ddCur = mcrMgrs.map(m => m.dd_delta_pct != null ? m.dd_delta_pct * 100 : null);
-  if (rptMcrChart) { rptMcrChart.destroy(); rptMcrChart = null; }
   // Wrap Chart.js call — if the CDN didn't load, we still want the rest of
   // renderReport to complete (including page 3 rendering below).
   try {
@@ -5619,17 +7686,23 @@ function renderReport() {
     `TE: <strong style="color:var(--text)">${(mcr.base_te*100).toFixed(2)}%</strong> · ` +
     `DD: <strong style="color:var(--text)">${(mcr.base_dd*100).toFixed(2)}%</strong>` +
     `<span style="color:var(--text3);margin-left:10px;">Bars show the relative % change in TE / DD from adding +1pp to that manager (with other managers reduced proportionally).</span>`;
+  }
 
   // Exposures (4 cards, top 3 OW + top 3 UW each)
   const expCard = (groupKey, groupLabel) => {
-    const data = r.exposures[groupKey];
+    const data = (r.exposures || {})[groupKey];
     const card = document.getElementById(`rpt-exp-${groupKey}`);
+    if (!data || data.error) {
+      card.innerHTML = `<div class="rpt-exp-card-title">${groupLabel}</div>` +
+        rptNoteHtml((data && data.error) || 'Exposures file not loaded.');
+      return;
+    }
     const rowHtml = (rows, dir) => rows.map(x => `
       <tr>
         <td>${x.label}</td>
         <td>${rptFmtPct1(x.port)}</td>
         <td style="color:var(--text2);">${rptFmtPct1(x.bmk)}</td>
-        <td class="rpt-exp-active ${dir==='ow'?'val-pos':'val-neg'}">${rptFmtPp(x.active)}</td>
+        <td class="rpt-exp-active ${dir==='ow'?'val-pos':'val-neg'}" style="white-space:nowrap;">${rptFmtPp(x.active)}</td>
       </tr>
     `).join('');
     card.innerHTML = `
@@ -5661,8 +7734,6 @@ function renderReport() {
   rptRenderPerfCalendar('rpt-perf-backtested-cal',      r.perf_backtested, /*includeClone=*/true);
   rptRenderQtr         ('rpt-qtr-backtested',           r.perf_backtested);
   rptRenderCmp         ('rpt-cmp-backtested',           r.complements_backtested);
-
-  rptInited = true;
 }
 
 // ── Page 3 renderers ─────────────────────────────────────────────────────
@@ -5678,6 +7749,7 @@ function rptValCls(v){ return v == null ? '' : (v > 0 ? 'val-pos' : v < 0 ? 'val
 
 // Trailing-period performance table: MRQ / 1Y / 3Y / 5Y / 10Y / Since Inception
 function rptRenderPerfTrailing(tableId, perf, includeClone){
+  if (!perf || perf.error) { rptNoteTable(tableId, (perf && perf.error) || 'Unavailable.'); return; }
   const periods = perf.periods;
   const keys    = ['mrq','t1y','t3y','t5y','t10y','si'];
   // Append inception year to the SI header if available
@@ -5719,7 +7791,9 @@ function rptRenderPerfTrailing(tableId, perf, includeClone){
 // Calendar-year performance table: separate from trailing periods so the
 // trailing-period table stays compact. Rows = streams, cols = years.
 function rptRenderPerfCalendar(tableId, perf, includeClone){
+  if (!perf || perf.error) { rptNoteTable(tableId, (perf && perf.error) || 'Unavailable.'); return; }
   const cal = perf.calendar;
+  if (!cal || !cal.length) { rptNoteTable(tableId, 'No complete calendar years in the window.'); return; }
   const head = `<thead><tr>
     <th style="text-align:left">Return Stream</th>
     ${cal.map(c => `<th>${c.year}</th>`).join('')}
@@ -5754,6 +7828,7 @@ function rptRenderPerfCalendar(tableId, perf, includeClone){
 // returns. (The compound approach is mathematically right for excess across
 // a year. Calendar fallback ties cleanly to the calendar table above.)
 function rptRenderQtr(tableId, perf){
+  if (!perf || perf.error) { rptNoteTable(tableId, (perf && perf.error) || 'Unavailable.'); return; }
   // Pivot quarterly_excess into byYear[year][quarter] = {port, bmk}
   const byYear = {};
   perf.quarterly_excess.forEach(rec => {
@@ -5809,13 +7884,66 @@ function rptRenderQtr(tableId, perf){
   document.getElementById(tableId).innerHTML = head + `<tbody>${rows}</tbody>`;
 }
 
+// Holdings Overlap matrix for the report — a compact, self-contained version
+// of the Portfolio tab's renderOneMatrix (no click handlers, inline styles so
+// html2canvas captures it faithfully). Current weights, issuer-matched,
+// strategy-internal basis.
+function rptRenderOverlap(box, data) {
+  if (!box) return;
+  if (!data || data.error) {
+    box.innerHTML = rptNoteHtml((data && data.error) || 'Unavailable.');
+    return;
+  }
+  const mgrs = data.managers, pairs = data.pairs || [];
+  const key = (i, j) => i < j ? `${i}-${j}` : `${j}-${i}`;
+  const pmap = {};
+  pairs.forEach(p => { pmap[key(p.i, p.j)] = p; });
+  let vmax = 0;
+  pairs.forEach(p => { const v = (p.internal || {}).common_weight || 0; if (v > vmax) vmax = v; });
+
+  const cellBase = 'text-align:center;padding:3px 4px;font-family:var(--mono);border:1px solid var(--border);';
+  let html = `<div style="font-family:var(--mono);font-size:9px;color:var(--text3);margin-bottom:6px;">
+    matched by issuer · common weight = Σ min(wᵢ,wⱼ) over shared holdings · strategy-internal weights</div>`;
+  html += '<table style="border-collapse:collapse;margin:0 auto;"><thead><tr><th></th>';
+  mgrs.forEach(m => {
+    html += `<th style="${cellBase}font-size:8px;color:var(--text2);font-weight:600;max-width:64px;overflow:hidden;">${escapeHtml(_ovlShortName(m.display))}</th>`;
+  });
+  html += '</tr></thead><tbody>';
+  for (let i = 0; i < mgrs.length; i++) {
+    html += `<tr><td style="${cellBase}font-size:8px;color:var(--text2);font-weight:700;text-align:right;white-space:nowrap;">${escapeHtml(_ovlShortName(mgrs[i].display))} <span style="font-weight:400;color:var(--text3);">(${mgrs[i].count})</span></td>`;
+    for (let j = 0; j < mgrs.length; j++) {
+      if (i === j) {
+        html += `<td style="${cellBase}font-size:8px;background:var(--surface2);color:var(--text3);"><div style="font-weight:600;">${mgrs[i].count}</div><div style="font-size:7px;">holdings</div></td>`;
+        continue;
+      }
+      const p = pmap[key(i, j)];
+      const met = p ? p.internal : null;
+      const cnt = met ? met.shared_count : 0;
+      const cw  = met ? met.common_weight : 0;
+      if (!cnt) {
+        html += `<td style="${cellBase}font-size:8px;background:var(--surface2);color:var(--text3);"><div>0</div><div style="font-size:7px;">—</div></td>`;
+        continue;
+      }
+      const col = _ovlCellColor(cw, vmax);
+      html += `<td style="${cellBase}font-size:8px;background:${col.bg};color:${col.fg};"><div style="font-weight:600;">${cnt}</div><div style="font-size:7px;">${cw.toFixed(1)}%</div></td>`;
+    }
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+  if (data.unmatched && data.unmatched.length) {
+    html += `<div style="font-family:var(--mono);font-size:8px;color:var(--amber);margin-top:5px;">⚠ No holdings data for: ${escapeHtml(data.unmatched.join(', '))}</div>`;
+  }
+  box.innerHTML = html;
+}
+
 // Ideal Complements table: three stacked sections (Manager, Aapryl Factor,
 // FactSet Risk). Each section is a [header row + candidate row] pair.
 // Mirrors the on-screen ic-header / ic-candidate pattern from the
 // Portfolio Managers table.
 function rptRenderCmp(tableId, cmp){
+  if (!cmp || cmp.error) { rptNoteTable(tableId, (cmp && cmp.error) || 'Unavailable.'); return; }
   const benchName = cmp.benchmark_name || 'benchmark';
-  const nUnder = cmp.n_underperf_months;
+  const nUnder = cmp.n_underperf_months != null ? cmp.n_underperf_months : '—';
   const head = `<thead><tr>
     <th style="text-align:left">Name</th>
     <th style="text-align:left;width:100px">Category</th>
@@ -5830,6 +7958,12 @@ function rptRenderCmp(tableId, cmp){
   // Manager complements have V-G and norm skill; factor complements don't.
   const section = (label, c, kind) => {
     if (!c) return '';
+    if (c.error) {
+      return `<tr class="cmp-header"><td colspan="7">
+        <strong>${label}</strong>
+        <span class="cmp-stat" style="color:var(--text3)">${c.error}</span>
+      </td></tr>`;
+    }
     const hr   = (c.hit_rate*100).toFixed(1) + '%';
     const ae   = rptFmtRet(c.avg_excess, 2);
     const aeCls= rptValCls(c.avg_excess);
@@ -5839,7 +7973,7 @@ function rptRenderCmp(tableId, cmp){
     </td></tr>`;
     let vg3Cell, nsCell, catCell;
     if (kind === 'manager') {
-      const vg3 = c.vg_3factor != null ? rptFmtSigned(c.vg_3factor) : '--';
+      const vg3 = c.vg_3factor != null ? rptFmtSignedPct(c.vg_3factor) : '--';
       const vg3Cls = c.vg_3factor != null ? (c.vg_3factor > 0 ? 'val-pos' : 'val-neg') : '';
       const ns  = c.ns_z != null ? rptFmtSigned(c.ns_z) : '--';
       const nsCls = c.ns_z != null ? (c.ns_z > 0 ? 'skill-pos' : 'skill-neg') : '';
@@ -5872,12 +8006,53 @@ function rptRenderCmp(tableId, cmp){
   document.getElementById(tableId).innerHTML = head + `<tbody>${body}</tbody>`;
 }
 
-// Hook the report tab into the existing showPage flow
+// Hook the report tab into the existing showPage flow: keep the report-card
+// client dropdown in sync with the Portfolio tab's selector. (The report
+// itself renders only on demand, from exportQuarterlyReportPDF.)
 const _origShowPage = showPage;
 showPage = function(id) {
   _origShowPage(id);
-  if (id === 'reports' && !rptInited) renderReport();
+  if (id === 'reports') { populateReportClientSelect(); populateReturnsSectionSelect(); }
 };
+
+// ── Dev report preview ─────────────────────────────────────────────────────
+// ?rptpreview=CLIENT renders the live Quarterly Report on-screen (nothing
+// else) so the PDF layout can be screenshot-iterated headlessly. Sets the
+// document title to RPT_PREVIEW_READY / RPT_PREVIEW_FAILED for automation.
+(async function initRptPreview() {
+  const c = new URLSearchParams(location.search).get('rptpreview');
+  if (!c) return;
+  document.body.classList.add('rpt-preview');
+  try {
+    const data = await buildLiveReportData(c);
+    renderReport(data);
+    await new Promise(r => setTimeout(r, 600));
+    document.title = 'RPT_PREVIEW_READY';
+  } catch (e) {
+    document.getElementById('rpt-sheet').innerHTML =
+      '<div style="padding:20px;font-family:monospace;">Preview failed: ' + (e.message || e) + '</div>';
+    document.title = 'RPT_PREVIEW_FAILED';
+  }
+})();
+
+// ── Dev live-reload ────────────────────────────────────────────────────────
+// Polls /__livereload for a source-file token and reloads the page when it
+// changes. The endpoint returns enabled=false unless the server runs in debug
+// mode, so this loop turns itself off in production after a single request.
+(function initLiveReload() {
+  let lastToken = null;
+  async function poll() {
+    try {
+      const r = await fetch('/__livereload', { cache: 'no-store' });
+      const d = await r.json();
+      if (!d.enabled) return;                 // production — stop polling
+      if (lastToken === null) lastToken = d.token;
+      else if (d.token !== lastToken) { location.reload(); return; }
+    } catch (e) { /* server mid-restart — retry next tick */ }
+    setTimeout(poll, 1000);
+  }
+  poll();
+})();
 
 </script>
 </body>

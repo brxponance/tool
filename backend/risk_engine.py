@@ -481,6 +481,160 @@ def regime_analysis(current_rets, proposed_rets, bench_df, n_months=REGIME_N_MON
     }
 
 
+# ── Active-manager-struggle analysis ──────────────────────────────────────
+# Maps a risk peer-group key to the universe-returns peer tab (data_loader
+# PEER_TABS). Most are identity; the two risk-only variants fall back to the
+# closest available universe.
+UNIVERSE_TAB_FOR_PEER = {
+    'EAFE': 'EAFE', 'EAFE_SC': 'ISC', 'ACWI': 'ACWI', 'ACWI_xUS': 'EAFE',
+    'US': 'US', 'USSC': 'USSC', 'EM': 'EM', 'ISC': 'ISC',
+}
+STRUGGLE_THRESHOLD     = 0.40  # struggle: benchmark beat >= 60% of the universe over the window
+STRUGGLE_SMOOTH_MONTHS = 6     # rolling window (months) for the cumulative-breadth signal
+STRUGGLE_BRIDGE        = 1     # bridge reprieves of <= this many months within a period
+STRUGGLE_MIN_LEN       = 3     # drop struggle runs shorter than this many months
+STRUGGLE_MIN_MANAGERS  = 15    # min qualifying universe managers to classify a month
+
+
+def manager_struggle_analysis(current_rets, proposed_rets, core_bench, universe_df,
+                              threshold=STRUGGLE_THRESHOLD,
+                              smooth_months=STRUGGLE_SMOOTH_MONTHS,
+                              bridge=STRUGGLE_BRIDGE, min_len=STRUGGLE_MIN_LEN,
+                              min_managers=STRUGGLE_MIN_MANAGERS):
+    """Portfolio performance during sustained PERIODS when active managers, as a
+    group, struggled — SPIVA-style breadth on a rolling cumulative basis.
+
+    Signal: for each month, breadth = the share of universe managers whose
+    trailing `smooth_months`-month CUMULATIVE return beat the benchmark's
+    cumulative return over the same window (a manager needs a full window to
+    count; a month needs >= min_managers qualifiers to be classified). A month
+    is 'struggle' when breadth <= threshold (benchmark beat >= 1-threshold of
+    the universe). Consecutive struggle months are coalesced into periods:
+    reprieves of <= `bridge` months are bridged (a brief pop above the line
+    stays inside the period) and runs shorter than `min_len` months are dropped.
+
+    Reports, for Current and Proposed, conditional stats (avg monthly return,
+    avg excess vs Core, hit rate) over all months inside struggle periods vs the
+    rest of the classified window, plus the list of detected periods.
+
+    Returns None if there isn't enough universe overlap to classify anything.
+    """
+    if universe_df is None or getattr(universe_df, 'empty', True) or core_bench is None:
+        return None
+
+    idx = core_bench.dropna().index
+    if len(idx) == 0:
+        return None
+    idx = idx.sort_values()  # ascending time for rolling / period logic
+    core = core_bench.reindex(idx)
+
+    # Align universe rows to the analysis month-ends by calendar month, so a
+    # differing day-of-month convention in the eVestment file doesn't misalign.
+    try:
+        uni = universe_df.copy()
+        uni.index = pd.PeriodIndex(pd.to_datetime(uni.index), freq='M')
+        uni = uni[~uni.index.duplicated(keep='last')]
+        uni = uni.reindex(idx.to_period('M'))
+        uni.index = idx
+    except Exception:
+        uni = universe_df.reindex(idx)
+
+    # Rolling cumulative returns (vectorized via log-returns). A NaN anywhere in
+    # a manager's window makes that window NaN, enforcing a full history.
+    w = int(smooth_months)
+    uni_cum  = np.expm1(np.log1p(uni).rolling(w, min_periods=w).sum())
+    core_cum = np.expm1(np.log1p(core).rolling(w, min_periods=w).sum())
+
+    qualifying = uni_cum.notna().sum(axis=1)
+    beat = uni_cum.gt(core_cum, axis=0).where(uni_cum.notna()).sum(axis=1)
+    breadth = beat / qualifying.replace(0, np.nan)
+    classified = qualifying >= min_managers
+    if not classified.any():
+        return None
+
+    struggle_raw = classified & (breadth <= threshold)
+
+    # ── Coalesce classified months into sustained periods ─────────────────
+    cls_idx = idx[classified.values]                       # ascending classified months
+    s = struggle_raw.reindex(cls_idx).fillna(False).to_numpy().astype(bool)
+    n = len(s)
+    merged = s.copy()
+    # bridge short reprieves flanked by struggle on both sides
+    j = 0
+    while j < n:
+        if not merged[j]:
+            k = j
+            while k < n and not merged[k]:
+                k += 1
+            if j > 0 and k < n and merged[j-1] and merged[k] and (k - j) <= bridge:
+                merged[j:k] = True
+            j = k
+        else:
+            j += 1
+    # split into runs; keep only those >= min_len
+    in_flags = np.zeros(n, dtype=bool)
+    runs = []
+    j = 0
+    while j < n:
+        if merged[j]:
+            k = j
+            while k < n and merged[k]:
+                k += 1
+            if (k - j) >= min_len:
+                in_flags[j:k] = True
+                runs.append((j, k))
+            j = k
+        else:
+            j += 1
+
+    struggle_months = cls_idx[in_flags]
+    normal_months   = cls_idx[~in_flags]
+
+    def stats(port, months):
+        p = port.reindex(months).dropna()
+        if p.empty:
+            return {'n_months': 0, 'avg_return': None, 'avg_excess': None, 'hit_rate': None}
+        ex = p - core.reindex(p.index)
+        return {
+            'n_months':   int(p.shape[0]),
+            'avg_return': _safe(float(p.mean())),
+            'avg_excess': _safe(float(ex.mean())),
+            'hit_rate':   _safe(float((ex > 0).mean())),
+        }
+
+    def block(months):
+        return {'n_months': int(len(months)),
+                'current': stats(current_rets, months),
+                'proposed': stats(proposed_rets, months)}
+
+    cur_ex_full  = current_rets.reindex(idx)  - core
+    prop_ex_full = proposed_rets.reindex(idx) - core
+    periods = []
+    for a, b in runs:
+        pm = cls_idx[a:b]
+        periods.append({
+            'start':       pm.min().strftime('%Y-%m'),
+            'end':         pm.max().strftime('%Y-%m'),
+            'n_months':    int(len(pm)),
+            'avg_breadth': _safe(float(breadth.reindex(pm).mean())),
+            'cur_excess':  _safe(float(cur_ex_full.reindex(pm).mean())),
+            'prop_excess': _safe(float(prop_ex_full.reindex(pm).mean())),
+        })
+
+    return {
+        'threshold':          threshold,
+        'smooth_months':      w,
+        'min_len':            min_len,
+        'bridge':             bridge,
+        'n_periods':          len(periods),
+        'avg_universe_count': _safe(float(qualifying[classified].mean())),
+        'avg_breadth':        _safe(float(breadth[classified].mean())),
+        'struggle':           block(struggle_months),
+        'normal':             block(normal_months),
+        'periods':            periods,
+    }
+
+
 # ── Main entry point ──────────────────────────────────────────────────────
 def dominant_peer_group(managers):
     """Weighted majority peer group across the portfolio.
@@ -499,7 +653,8 @@ def dominant_peer_group(managers):
 
 
 def compute_risk_analysis(managers, clone_results, factor_df,
-                          client_name=None, peer_benchmark=None):
+                          client_name=None, peer_benchmark=None,
+                          universe_dfs=None):
     """
     managers: list of {matched_name, tab, current_weight, proposed_weight}
               (the output of build_portfolio_view's 'managers' field, possibly
@@ -592,6 +747,13 @@ def compute_risk_analysis(managers, clone_results, factor_df,
     regime = regime_analysis(current_rets_full, proposed_rets_full, bench_df_full,
                              n_months=REGIME_N_MONTHS)
 
+    # Active-manager-struggle analysis (SPIVA-style breadth on the actual
+    # peer-group universe). None if no universe returns loaded for this group.
+    uni_tab = UNIVERSE_TAB_FOR_PEER.get(peer_group, peer_group)
+    uni_df  = (universe_dfs or {}).get(uni_tab)
+    manager_struggle = manager_struggle_analysis(
+        current_rets_full, proposed_rets_full, bench_df_full['core'], uni_df)
+
     cur_clean = current_rets_full.dropna()
     start = cur_clean.index.min().strftime('%Y-%m-%d') if not cur_clean.empty else None
     end   = cur_clean.index.max().strftime('%Y-%m-%d') if not cur_clean.empty else None
@@ -615,4 +777,5 @@ def compute_risk_analysis(managers, clone_results, factor_df,
         'scenario':     scenario,
         'marginal':     marginal,
         'regime':       regime,
+        'manager_struggle': manager_struggle,
     }

@@ -35,6 +35,46 @@ EAFE_CANADA  = EAFE_COUNTRIES | _CANADA
 WORLD        = EAFE_CANADA | _US
 ALL_STANDARD = WORLD | _EM
 
+# Case-insensitive lookup sets (built once) so 'JAPAN' matches 'Japan'.
+_US_LC     = frozenset(c.lower() for c in _US)
+_EAFE_LC   = frozenset(c.lower() for c in EAFE_COUNTRIES)
+_CANADA_LC = frozenset(c.lower() for c in _CANADA)
+_EM_LC     = frozenset(c.lower() for c in _EM)
+
+# Common spelling variants → the canonical name used in the sets above. Keyed on
+# the lowercased/stripped input so FactSet exports that write 'Korea', 'USA',
+# 'Taiwan, Province of China', etc. still classify correctly.
+_COUNTRY_ALIASES = {
+    'korea': 'South Korea', 'republic of korea': 'South Korea',
+    'korea, republic of': 'South Korea', 'korea (south)': 'South Korea',
+    'south korea': 'South Korea',
+    'usa': 'United States', 'u.s.': 'United States', 'u.s.a.': 'United States',
+    'us': 'United States', 'united states of america': 'United States',
+    'uk': 'United Kingdom', 'u.k.': 'United Kingdom', 'great britain': 'United Kingdom',
+    'britain': 'United Kingdom',
+    'hong kong sar': 'Hong Kong', 'hong kong sar china': 'Hong Kong',
+    'taiwan, province of china': 'Taiwan', 'taiwan province of china': 'Taiwan',
+    'chinese taipei': 'Taiwan',
+    'russian federation': 'Russia',
+    'czechia': 'Czech Republic', 'czech rep.': 'Czech Republic',
+    'uae': 'United Arab Emirates', 'u.a.e.': 'United Arab Emirates',
+    'turkiye': 'Turkey', 'türkiye': 'Turkey',
+    'egypt, arab rep.': 'Egypt',
+    'viet nam': 'Vietnam', 'macao': 'Macau',
+}
+
+
+def _canonical_country(country):
+    """Trim + resolve common name variants to the canonical spelling used in the
+    classification sets, or None when the value is missing. Case-insensitive."""
+    if country is None:
+        return None
+    c = str(country).strip()
+    if c.lower() in ('', '--', 'none', 'n/a', 'na'):
+        return None
+    return _COUNTRY_ALIASES.get(c.lower(), c)
+
+
 SLEEVE_US    = 'US'
 SLEEVE_NONUS = 'Non-US'
 SLEEVE_EM    = 'EM'
@@ -59,18 +99,37 @@ def classify_country(country: str, has_em_sleeve: bool = False):
       Listed EM country        -> EM if 3-way; else lumped into Non-US.
       Unclassified non-US      -> EM if 3-way; else lumped into Non-US.
     """
-    if not country or country.strip() in ('--', ''):
+    c = _canonical_country(country)
+    if c is None:
         return None, None
-    c = country.strip()
-    if c in _US:            return SLEEVE_US,    None
-    if c in EAFE_COUNTRIES: return SLEEVE_NONUS, None
-    if c in _CANADA:        return SLEEVE_NONUS, None
-    if c in _EM:
+    cl = c.lower()
+    if cl in _US_LC:     return SLEEVE_US,    None
+    if cl in _EAFE_LC:   return SLEEVE_NONUS, None
+    if cl in _CANADA_LC: return SLEEVE_NONUS, None
+    if cl in _EM_LC:
         if has_em_sleeve:   return SLEEVE_EM, None
         return SLEEVE_NONUS, f'{c} is EM — included in Non-US (no EM sleeve)'
     flag = f'{c} not in standard classification — treated as {"EM" if has_em_sleeve else "Non-US"}'
     if has_em_sleeve:       return SLEEVE_EM, flag
     return SLEEVE_NONUS, flag
+
+
+def classify_market_development(country):
+    """Developed / Emerging / Other from the same country sets the risk table
+    uses. Returns None when country is missing. 'Other' catches anything outside
+    the standard developed + EM lists (Frontier/Standalone countries land here
+    for now). Case-insensitive and variant-aware (see _canonical_country, so
+    'Korea' → South Korea → Emerging). Used by the exposures 'Market Development'
+    grouping."""
+    c = _canonical_country(country)
+    if c is None:
+        return None
+    cl = c.lower()
+    if cl in _US_LC or cl in _EAFE_LC or cl in _CANADA_LC:
+        return 'Developed'
+    if cl in _EM_LC:
+        return 'Emerging'
+    return 'Other'
 
 
 def _norm_bench(s):

@@ -10,11 +10,13 @@ import { OptimizerPanel } from "@/features/optimize/components/optimizer-panel";
 
 import { AddManagerModal } from "../components/add-manager-modal";
 import { ClientManageModal } from "../components/client-manage-modal";
+import { ClientRedemptionSection } from "../components/client-redemption-section";
 import { DiverseOwnershipSection } from "../components/diverse-ownership-section";
 import { PortfolioAnalyticsSections } from "../components/portfolio-analytics-sections";
 import { PortfolioTable } from "../components/portfolio-table";
 import { PresetBar } from "../components/preset-bar";
 import { useIdealComplement } from "../hooks/use-ideal-complement";
+import { useIdealFactorComplement } from "../hooks/use-ideal-factor-complement";
 import { usePortfolioScreen } from "../hooks/use-portfolio-screen";
 
 export function PortfolioRoute() {
@@ -64,6 +66,10 @@ export function PortfolioRoute() {
 
   const managers = portfolio?.managers ?? [];
   const idealComplement = useIdealComplement(selectedClient, managers);
+  const idealFactorComplement = useIdealFactorComplement(selectedClient, managers);
+  // null when the weights workbook carries no client total — the AUM columns,
+  // banner, and redemption sizing all key off this.
+  const clientAum = portfolio?.client_aum ?? null;
   const proposedTotal = sum(managers.map((manager) => manager.proposed_weight));
   const benchmark = portfolio?.client_benchmark ?? benchmarks[selectedClient ?? ""] ?? "--";
   const unmatched = portfolio?.unmatched ?? [];
@@ -173,12 +179,13 @@ export function PortfolioRoute() {
             <button
               type="button"
               className="btn btn-primary btn-sm"
+              title="Overwrite the client's saved base book — this becomes the new 'Saved portfolio (base)' shown in the Preset dropdown. To keep a what-if scenario without touching the base, use Save preset instead."
               disabled={saving}
               onClick={async () => {
                 const ok = await confirm({
                   title: "Save changes",
                   message:
-                    "Are you sure you want to save these changes? This overwrites the client's saved portfolio.",
+                    "This overwrites the client's saved base book — it becomes the new “Saved portfolio (base)” in the Preset dropdown. To keep this as a named what-if scenario without changing the base, cancel and use “Save preset” instead.",
                   confirmLabel: "Save",
                 });
                 if (!ok) {
@@ -266,6 +273,10 @@ export function PortfolioRoute() {
                 idealComplement={idealComplement.data}
                 idealComplementLoading={idealComplement.loading}
                 idealComplementError={idealComplement.error}
+                idealFactorComplement={idealFactorComplement.data}
+                idealFactorComplementLoading={idealFactorComplement.loading}
+                idealFactorComplementError={idealFactorComplement.error}
+                clientAum={clientAum}
               />
             ) : (
               <div style={{ padding: 24, textAlign: "center", color: "var(--text3)" }}>
@@ -276,6 +287,14 @@ export function PortfolioRoute() {
         </div>
         <OptimizerPanel clientName={selectedClient} />
       </div>
+
+      {portfolio ? (
+        <ClientRedemptionSection
+          client={selectedClient}
+          managers={managers}
+          clientAum={clientAum}
+        />
+      ) : null}
 
       <PortfolioAnalyticsSections
         benchmark={benchmark}

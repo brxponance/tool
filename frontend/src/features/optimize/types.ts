@@ -13,6 +13,14 @@ export type ForcedManagerInput = {
   weight?: number | null;
 };
 
+// User-side excluded manager input. Removes the named strategy from the
+// candidate set entirely — the mirror image of forcing. Strategy-specific: it
+// does NOT block sibling strategies from the same firm.
+export type ExcludedManagerInput = {
+  name: string;
+  tab: string;
+};
+
 // Single candidate returned by GET /optimize_candidates/<peer_group>.
 export type OptimizerCandidate = {
   name: string;
@@ -54,6 +62,8 @@ export type OptimizerSummary = {
   candidates_excluded_xus?: number;
   candidates_excluded_forced_firm?: number;
   candidates_excluded_no_skill?: number;
+  // Count removed by the user's explicit exclude list.
+  candidates_excluded_user?: number;
   firm_groups_constrained?: number;
   vg_band: number;
   vg_center: number;
@@ -99,6 +109,7 @@ export type OptimizerRequest = {
   client_name?: string;
   peer_group: PeerGroup | string;
   forced_managers: ForcedManagerInput[];
+  excluded_managers?: ExcludedManagerInput[];
 } & Partial<OptimizerConstraints>;
 
 // Client-scoped request payload for POST /optimize_portfolio (reference UX).
@@ -107,4 +118,5 @@ export type OptimizerRequest = {
 export type ClientOptimizerRequest = {
   client_name: string;
   forced_managers: ForcedManagerInput[];
+  excluded_managers?: ExcludedManagerInput[];
 };
