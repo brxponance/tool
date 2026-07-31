@@ -7,10 +7,15 @@ import type {
   ManagerStruggleResponse,
   MarketCycleResponse,
   PortfolioExposuresResponse,
+  PortfolioManager,
   PortfolioStats,
   RiskAnalysisResponse,
   RiskExposuresResponse,
 } from "../types";
+import { OverlapSection } from "@/features/overlap/components/overlap-section";
+import type { OverlapManagerInput } from "@/features/overlap/types";
+
+import { DiverseOwnershipSection } from "./diverse-ownership-section";
 import { MarginalContributionChart } from "./marginal-contribution-chart";
 import { MarketCycleSection } from "./market-cycle-section";
 import { PortfolioExposuresSection } from "./portfolio-exposures-section";
@@ -331,6 +336,11 @@ type PortfolioAnalyticsSectionsProps = {
   selectedExposureCategorical: string | null;
   selectedExposureContinuous: string | null;
   stats: PortfolioStats | null;
+  // Live portfolio context for the sections that post the manager list
+  // themselves (holdings overlap, diverse-ownership rollup).
+  client: string | null;
+  portfolioManagers: PortfolioManager[];
+  hasExposures: boolean;
 };
 
 export function PortfolioAnalyticsSections({
@@ -347,7 +357,17 @@ export function PortfolioAnalyticsSections({
   selectedExposureCategorical,
   selectedExposureContinuous,
   stats,
+  client,
+  portfolioManagers,
+  hasExposures,
 }: PortfolioAnalyticsSectionsProps) {
+  // The overlap endpoints only need name + weights.
+  const overlapManagers: OverlapManagerInput[] = portfolioManagers.map((m) => ({
+    matched_name: m.matched_name,
+    weight_file_name: m.weight_file_name,
+    current_weight: m.current_weight ?? 0,
+    proposed_weight: m.proposed_weight ?? 0,
+  }));
   const vgRows = [
     { label: "3-Factor Current", value: metricValue(stats?.current, "vg_3factor") },
     { label: "3-Factor Proposed", value: metricValue(stats?.proposed, "vg_3factor") },
@@ -455,21 +475,21 @@ export function PortfolioAnalyticsSections({
             <div style={{ overflowX: "auto" }}>
               <table className="data-table w-full">
                 <thead>
+                  {/* Group labels belong on the FIRST row, spanning their
+                      value+bar pair; the sub-row carries Value/Bar. These were
+                      previously inverted (and missing colspans), so the header
+                      read "Value | Bar" above "Current Weights | Bar". */}
                   <tr>
-                    <th style={{ width: 140 }}>Factor</th>
-                    <th className="sep-col">Value</th>
-                    <th>Bar</th>
-                    <th className="sep-col">Value</th>
-                    <th>Bar</th>
-                    <th className="sep-col">Delta</th>
+                    <th style={{ width: 140 }} rowSpan={2}>Factor</th>
+                    <th colSpan={2} className="period-group sep-col">Current Weights</th>
+                    <th colSpan={2} className="period-group sep-col">Proposed Weights</th>
+                    <th className="sep-col" rowSpan={2}>Delta</th>
                   </tr>
                   <tr>
-                    <th></th>
-                    <th className="sub sep-col">Current Weights</th>
-                    <th className="sub">Bar</th>
-                    <th className="sub sep-col">Proposed Weights</th>
+                    <th className="sub sep-col">Value</th>
                     <th className="sub">Bar</th>
                     <th className="sub sep-col">Value</th>
+                    <th className="sub">Bar</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -512,10 +532,23 @@ export function PortfolioAnalyticsSections({
         </div>
       </div>
 
+      {/* Diverse rollup sits with the other headline portfolio metrics, above
+          Market Cycle — matching the reference tool's ordering. */}
+      <DiverseOwnershipSection client={client} managers={portfolioManagers} />
+
       <MarketCycleSection
         benchmark={benchmark}
         loading={loadingAncillary}
         data={marketCycle}
+      />
+
+      {/* Holdings overlap sits between Market Cycle and Exposures, matching the
+          reference tool. Owned by the `overlap` feature — composed in here, not
+          reimplemented. Renders nothing without a FactSet exposures file. */}
+      <OverlapSection
+        client={client}
+        managers={overlapManagers}
+        hasExposures={hasExposures}
       />
 
       <PortfolioExposuresSection
@@ -534,6 +567,7 @@ export function PortfolioAnalyticsSections({
             {riskAnalysis ? (
               <span style={{ marginLeft: "auto", fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)" }}>
                 {riskAnalysis.peer_group} · {riskAnalysis.start_date ?? "--"} → {riskAnalysis.end_date ?? "--"}
+                {riskAnalysis.n_months ? ` · ${riskAnalysis.n_months} mo` : ""}
               </span>
             ) : null}
           </div>
@@ -545,6 +579,13 @@ export function PortfolioAnalyticsSections({
         <div className="panel">
           <div className="panel-header">
             <span className="panel-title">Scenario Analysis</span>
+            {riskAnalysis && !riskAnalysis.error ? (
+              <span style={{ marginLeft: "auto", fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)" }}>
+                {riskAnalysis.peer_group} · {riskAnalysis.start_date ?? "--"} →{" "}
+                {riskAnalysis.end_date ?? "--"}
+                {riskAnalysis.n_months ? ` · ${riskAnalysis.n_months} mo` : ""}
+              </span>
+            ) : null}
           </div>
           <div style={{ overflowX: "auto" }}>
             <table className="data-table w-full">
@@ -581,9 +622,31 @@ export function PortfolioAnalyticsSections({
                   ] as const).map((row) => {
                     const current = riskAnalysis?.scenario?.current?.[row.key] ?? null;
                     const proposed = riskAnalysis?.scenario?.proposed?.[row.key] ?? null;
+                    // Full index string (e.g. "85% MSCI EAFE Small Cap NR USD +
+                    // 15% …") is far too long for the cell — show the short
+                    // sleeve label and put the resolved index on hover.
+                    const fullName = riskAnalysis?.benchmarks?.[row.key] ?? null;
+                    // No metrics on either side means this sleeve doesn't exist
+                    // for the peer group. Collapse the row to one message rather
+                    // than printing dashes plus a portfolio-level max drawdown
+                    // that has nothing to do with this (absent) benchmark.
+                    if (!current && !proposed) {
+                      return (
+                        <tr key={row.key}>
+                          <td title={fullName ?? undefined}>{row.label}</td>
+                          <td
+                            colSpan={10}
+                            className="mono"
+                            style={{ textAlign: "center", color: "var(--text3)" }}
+                          >
+                            Not available for this peer group
+                          </td>
+                        </tr>
+                      );
+                    }
                     return (
                       <tr key={row.key}>
-                        <td>{riskAnalysis?.benchmarks?.[row.key] ?? row.label}</td>
+                        <td title={fullName ?? undefined}>{row.label}</td>
                         <td className="mono sep-col">{current ? formatNumber(current.upside_capture, 1) : "--"}</td>
                         <td className="mono">{proposed ? formatNumber(proposed.upside_capture, 1) : "--"}</td>
                         <td className="mono sep-col">{current ? formatNumber(current.downside_capture, 1) : "--"}</td>

@@ -37,9 +37,15 @@ CATEGORICAL_COLS = {'MSCI Region', 'MSCI Country', 'Region', 'Country',
 # is a set, so iterating it directly gives an order that shuffles between server
 # restarts (string hashing is salted per process). Anything in the set but missing
 # here is appended alphabetically.
-CATEGORICAL_ORDER = ['Region', 'Country', 'Market Development',
-                     'MSCI Region', 'MSCI Country',
-                     'GICS Sector', 'GICS Industry']
+#
+# GICS Sector leads deliberately: the UI defaults to the first entry, and Sector
+# is the one categorical column present in every FactSet export vintage. Region /
+# Country only exist in newer files (older ones carry MSCI Region / MSCI Country),
+# so defaulting to Region would open the panel on an all-"Unclassified" table for
+# anyone still on an older exposures workbook.
+CATEGORICAL_ORDER = ['GICS Sector', 'GICS Industry',
+                     'Region', 'Country', 'Market Development',
+                     'MSCI Region', 'MSCI Country']
 
 CONTINUOUS_COLS = [
     'Market Capitalization',

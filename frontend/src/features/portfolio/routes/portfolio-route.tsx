@@ -11,7 +11,6 @@ import { OptimizerPanel } from "@/features/optimize/components/optimizer-panel";
 import { AddManagerModal } from "../components/add-manager-modal";
 import { ClientManageModal } from "../components/client-manage-modal";
 import { ClientRedemptionSection } from "../components/client-redemption-section";
-import { DiverseOwnershipSection } from "../components/diverse-ownership-section";
 import { PortfolioAnalyticsSections } from "../components/portfolio-analytics-sections";
 import { PortfolioTable } from "../components/portfolio-table";
 import { PresetBar } from "../components/preset-bar";
@@ -61,6 +60,7 @@ export function PortfolioRoute() {
     setExposureSelection,
     setSelectedClient,
     stats,
+    status,
     updateManagerProposedWeight,
   } = usePortfolioScreen();
 
@@ -310,11 +310,10 @@ export function PortfolioRoute() {
         selectedExposureCategorical={selectedExposureCategorical}
         selectedExposureContinuous={selectedExposureContinuous}
         stats={stats}
+        client={selectedClient}
+        portfolioManagers={managers}
+        hasExposures={Boolean(status?.has_exposures)}
       />
-
-      {portfolio && (
-        <DiverseOwnershipSection client={selectedClient} managers={managers} />
-      )}
 
       <AddManagerModal
         existingManagers={managers}

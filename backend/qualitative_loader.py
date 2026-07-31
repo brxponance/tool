@@ -69,6 +69,45 @@ def _norm_hdr(s):
     return re.sub(r'\s+', ' ', s).strip()
 
 
+def _norm_name(s):
+    """Normalise a firm/strategy name for prefix matching: lower-cased,
+    punctuation flattened to spaces, whitespace collapsed."""
+    s = str(s or '').lower().strip()
+    s = re.sub(r'[^a-z0-9]+', ' ', s)
+    return re.sub(r'\s+', ' ', s).strip()
+
+
+def match_firm(strategy_name, qd):
+    """Return (firm_name, firm_record) for a strategy via PREFIX match, or
+    (None, None).
+
+    A strategy belongs to a firm when its normalised name equals, or begins with,
+    the firm's normalised name at a whole-token boundary — so firm "Arga" claims
+    "Arga ISC" and "Arga xUS" but never "Argatroban". When several firms could
+    match, the LONGEST firm name wins, so a specific "Arga Global" entry beats
+    the generic "Arga".
+
+    This is the fallback for firm-level workbooks that carry no per-strategy
+    rows (the newer one-row-per-firm format). The layered format still resolves
+    through the exact strategy keys first — see _qual_lookup.
+    """
+    if not qd or not qd.get('firms'):
+        return None, None
+    sn = _norm_name(strategy_name)
+    if not sn:
+        return None, None
+    best = None
+    best_len = -1
+    for firm, rec in qd['firms'].items():
+        fn = _norm_name(firm)
+        if not fn:
+            continue
+        if sn == fn or sn.startswith(fn + ' '):
+            if len(fn) > best_len:
+                best, best_len = (firm, rec), len(fn)
+    return best if best else (None, None)
+
+
 def _to_float(v):
     if v is None:
         return None

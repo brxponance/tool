@@ -821,6 +821,11 @@ def optimize_redemption(
         'uncovered_weight':  uncovered_remaining,
         'vg_lo':             lo,
         'vg_hi':             hi,
+        # Echo the actual constraint the solver used so the UI can label the
+        # panel from the response instead of hardcoding a number that can drift
+        # out of step with REDEMPTION_VG_TOL / _CAP.
+        'vg_tol':            vg_tol,
+        'vg_cap':            vg_cap,
     }
 
     status = 'ok'

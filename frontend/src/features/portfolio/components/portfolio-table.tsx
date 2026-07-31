@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 
 import { useConfirm } from "@/components/layout/confirm-dialog";
 import { formatDollars, formatNumber, formatPercent } from "@/lib/utils";
@@ -34,6 +34,112 @@ type PortfolioTableProps = {
 
 function proposedWeightLabel(manager: PortfolioManager) {
   return (manager.proposed_weight * 100).toFixed(1);
+}
+
+// Firm AUM arrives in $mm — show billions once it crosses 1,000.
+function firmMoney(value: number | null | undefined) {
+  if (value == null) return null;
+  return value >= 1000 ? `$${(value / 1000).toFixed(1)}B` : `$${Math.round(value)}M`;
+}
+
+const dash = <span style={{ color: "var(--text3)" }}>—</span>;
+
+function QualField({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <div
+        style={{
+          color: "var(--text3)",
+          fontSize: 9,
+          textTransform: "uppercase",
+          letterSpacing: ".05em",
+        }}
+      >
+        {label}
+      </div>
+      <div style={{ marginTop: 2 }}>{children}</div>
+    </div>
+  );
+}
+
+// Firm/strategy strip revealed by the chevron on a manager row. Rolls up
+// sibling strategies at the same firm so concentration with one firm is
+// visible even when it's spread across several mandates.
+function QualDetailRow({
+  manager,
+  managers,
+  colSpanAll,
+}: {
+  manager: PortfolioManager;
+  managers: PortfolioManager[];
+  colSpanAll: number;
+}) {
+  const siblings = managers.filter((m) => m.q_firm && m.q_firm === manager.q_firm);
+  const others = siblings
+    .map((m) => m.matched_name)
+    .filter((name) => name !== manager.matched_name);
+  const firmCur = siblings.reduce((sum, m) => sum + (m.current_weight || 0), 0);
+  const firmProp = siblings.reduce((sum, m) => sum + (m.proposed_weight || 0), 0);
+
+  const aum = firmMoney(manager.q_firm_aum);
+  const pct = manager.q_diverse_pct;
+
+  return (
+    <tr style={{ background: "var(--surface2)" }}>
+      <td />
+      <td colSpan={colSpanAll - 1} style={{ padding: "10px 14px" }}>
+        <div
+          style={{
+            display: "flex",
+            gap: 22,
+            flexWrap: "wrap",
+            alignItems: "flex-start",
+            fontFamily: "var(--mono)",
+            fontSize: 11,
+          }}
+        >
+          <QualField label="Firm">
+            <span style={{ fontWeight: 600 }}>{manager.q_firm}</span>
+          </QualField>
+          <QualField label="Firm AUM">{aum ?? dash}</QualField>
+          <QualField label="Diverse/Woman %">
+            {pct == null ? (
+              dash
+            ) : pct === 0 ? (
+              <span style={{ color: "var(--text3)" }}>0%</span>
+            ) : (
+              <span style={{ color: pct >= 50 ? "var(--green)" : "var(--amber)", fontWeight: 600 }}>
+                {Math.round(pct)}%
+              </span>
+            )}
+          </QualField>
+          <QualField label="Ownership">{manager.q_ownership || dash}</QualField>
+          {siblings.length > 1 ? (
+            <QualField label="Total held w/ firm">
+              <span style={{ color: "var(--amber)", fontWeight: 600 }}>
+                {formatPercent(firmCur)} cur · {formatPercent(firmProp)} prop
+              </span>
+            </QualField>
+          ) : null}
+          {others.length ? (
+            <div style={{ flex: 1, minWidth: 160 }}>
+              <div
+                style={{
+                  color: "var(--text3)",
+                  fontSize: 9,
+                  textTransform: "uppercase",
+                  letterSpacing: ".05em",
+                }}
+              >
+                Other strategies at firm
+              </div>
+              <div style={{ marginTop: 2, color: "var(--text2)" }}>{others.join(" · ")}</div>
+            </div>
+          ) : null}
+        </div>
+      </td>
+    </tr>
+  );
 }
 
 function draftWeightsFor(managers: PortfolioManager[]) {
@@ -233,6 +339,8 @@ export function PortfolioTable({
 }: PortfolioTableProps) {
   const [draftWeights, setDraftWeights] = useState<Record<string, string>>(() => draftWeightsFor(managers));
   const [editingPlaceholder, setEditingPlaceholder] = useState<PortfolioManager | null>(null);
+  // Manager keys whose firm/strategy detail strip is expanded.
+  const [openQualRows, setOpenQualRows] = useState<Set<string>>(() => new Set());
   const { confirm, dialog } = useConfirm();
 
   useEffect(() => {
@@ -340,9 +448,14 @@ export function PortfolioTable({
               const nsClass = nsZ == null ? "" : nsZ > 0 ? "skill-pos" : nsZ < 0 ? "skill-neg" : "";
 
               const isPlaceholder = manager.is_placeholder === true;
+              // Only offer the expander when a firm actually matched — an empty
+              // strip would be worse than no chevron.
+              const hasQual = Boolean(manager.q_firm);
+              const qualOpen = hasQual && openQualRows.has(managerKey);
 
               return (
-                <tr key={managerKey}>
+                <Fragment key={managerKey}>
+                <tr>
                   <td>
                     {isPlaceholder ? (
                       <span
@@ -360,6 +473,36 @@ export function PortfolioTable({
                     )}
                   </td>
                   <td style={{ fontWeight: 500 }}>
+                    {hasQual ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setOpenQualRows((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(managerKey)) next.delete(managerKey);
+                            else next.add(managerKey);
+                            return next;
+                          })
+                        }
+                        title="Firm & strategy detail"
+                        aria-expanded={qualOpen}
+                        aria-label={`${qualOpen ? "Hide" : "Show"} firm detail for ${manager.matched_name}`}
+                        style={{
+                          cursor: "pointer",
+                          color: "var(--text3)",
+                          marginRight: 6,
+                          userSelect: "none",
+                          display: "inline-block",
+                          width: 10,
+                          background: "none",
+                          border: "none",
+                          padding: 0,
+                          fontSize: 10,
+                        }}
+                      >
+                        {qualOpen ? "▾" : "▸"}
+                      </button>
+                    ) : null}
                     {manager.matched_name}
                     {isPlaceholder && (
                       <button
@@ -472,6 +615,14 @@ export function PortfolioTable({
                     </button>
                   </td>
                 </tr>
+                {qualOpen ? (
+                  <QualDetailRow
+                    manager={manager}
+                    managers={managers}
+                    colSpanAll={colSpanAll}
+                  />
+                ) : null}
+                </Fragment>
               );
             })}
             {managers.length ? (

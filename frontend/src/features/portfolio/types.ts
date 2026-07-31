@@ -431,6 +431,10 @@ export type RedemptionSummary = {
   uncovered_weight: number;
   vg_lo: number;
   vg_hi: number;
+  // The V-G constraint the solver actually applied (fractions, e.g. 0.01 / 0.07).
+  // Echoed back so the UI never hardcodes a tolerance that could drift.
+  vg_tol?: number;
+  vg_cap?: number;
 };
 
 export type RedemptionResponse = {

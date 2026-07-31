@@ -13,11 +13,15 @@ type ClientRedemptionSectionProps = {
   clientAum: number | null;
 };
 
-type Scope = "all" | "only" | "except";
-
 function managerKey(manager: PortfolioManager) {
   return `${manager.tab}::${manager.matched_name}`;
 }
+
+// Default V-G constraint, used only for the pre-run description. Once a run
+// returns, the label switches to the tolerance the solver actually applied
+// (summary.vg_tol / vg_cap) so the two can't disagree.
+const DEFAULT_VG_TOL = 0.01;
+const DEFAULT_VG_CAP = 0.07;
 
 // Parse a user-typed dollar amount, tolerating "$", commas, and a trailing
 // B/M/K unit so "50m" and "50,000,000" both work.
@@ -33,14 +37,95 @@ function parseAmount(raw: string): number | null {
   return value * mult;
 }
 
+// One scope row: a label plus a chip per held manager. Kept as chips rather
+// than the reference's search-and-add list because a client book is a handful of
+// managers, so every option fits on screen and needs one click instead of three.
+function ScopePicker({
+  label,
+  hint,
+  managers,
+  selected,
+  disabled,
+  onToggle,
+  tone,
+}: {
+  label: string;
+  hint: string;
+  managers: PortfolioManager[];
+  selected: Set<string>;
+  disabled?: boolean;
+  onToggle: (key: string) => void;
+  tone: "accent" | "danger";
+}) {
+  const onColor = tone === "danger" ? "var(--danger, #c0392b)" : "var(--accent)";
+  return (
+    <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
+      <span
+        style={{
+          fontFamily: "var(--mono)",
+          fontSize: 9,
+          color: "var(--text2)",
+          textTransform: "uppercase",
+          letterSpacing: ".06em",
+          fontWeight: 600,
+          minWidth: 168,
+        }}
+      >
+        {label}
+      </span>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", flex: 1 }}>
+        {managers.map((manager) => {
+          const key = managerKey(manager);
+          const on = selected.has(key);
+          return (
+            <button
+              key={key}
+              type="button"
+              disabled={disabled}
+              onClick={() => onToggle(key)}
+              style={{
+                fontFamily: "var(--mono)",
+                fontSize: 10,
+                padding: "4px 9px",
+                borderRadius: 14,
+                border: `1px solid ${on ? onColor : "var(--border)"}`,
+                background: on ? onColor : "var(--surface)",
+                color: on ? "#fff" : "var(--text2)",
+                cursor: disabled ? "default" : "pointer",
+                opacity: disabled ? 0.5 : 1,
+              }}
+            >
+              {manager.matched_name}
+            </button>
+          );
+        })}
+        {!selected.size ? (
+          <span
+            style={{
+              fontFamily: "var(--mono)",
+              fontSize: 10,
+              color: "var(--text3)",
+              alignSelf: "center",
+            }}
+          >
+            {hint}
+          </span>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 export function ClientRedemptionSection({
   client,
   managers,
   clientAum,
 }: ClientRedemptionSectionProps) {
   const [amountText, setAmountText] = useState("");
-  const [scope, setScope] = useState<Scope>("all");
-  const [picked, setPicked] = useState<Set<string>>(new Set());
+  // Two independent scopes, both live at once — matching the reference tool.
+  // The backend gives `include` precedence when both are non-empty.
+  const [included, setIncluded] = useState<Set<string>>(new Set());
+  const [excluded, setExcluded] = useState<Set<string>>(new Set());
   const [result, setResult] = useState<RedemptionResponse | null>(null);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -53,34 +138,42 @@ export function ClientRedemptionSection({
   const amount = parseAmount(amountText);
   const canRun = client != null && clientAum != null && amount != null && amount > 0 && held.length > 0;
 
-  function togglePicked(key: string) {
-    setPicked((prev) => {
+  function toggle(
+    setter: React.Dispatch<React.SetStateAction<Set<string>>>,
+    other: React.Dispatch<React.SetStateAction<Set<string>>>,
+    key: string,
+  ) {
+    setter((prev) => {
       const next = new Set(prev);
-      if (next.has(key)) {
-        next.delete(key);
-      } else {
-        next.add(key);
-      }
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+    // A manager can't be both pulled-only-from and protected.
+    other((prev) => {
+      if (!prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.delete(key);
       return next;
     });
   }
+
+  const asEntries = (keys: Set<string>) =>
+    held.filter((m) => keys.has(managerKey(m))).map((m) => ({ name: m.matched_name, tab: m.tab }));
 
   async function run() {
     if (!canRun || client == null || amount == null) return;
     setRunning(true);
     setError(null);
     setResult(null);
-    const chosen = held
-      .filter((m) => picked.has(managerKey(m)))
-      .map((m) => ({ name: m.matched_name, tab: m.tab }));
     try {
       const res = await optimizeRedemption({
         client,
         clientAum,
         redemptionAmount: amount,
         managers,
-        include: scope === "only" ? chosen : [],
-        exclude: scope === "except" ? chosen : [],
+        include: asEntries(included),
+        exclude: asEntries(excluded),
       });
       setResult(res);
     } catch (err) {
@@ -122,7 +215,9 @@ export function ClientRedemptionSection({
             }}
           >
             Pulls from the lowest-edge managers first, holding 3-factor V-G within
-            ±1% of the current portfolio (and inside the ±7% cap).
+            ±{(((summary?.vg_tol ?? DEFAULT_VG_TOL) * 100).toFixed(0))}% of the current
+            portfolio (and inside the ±
+            {(((summary?.vg_cap ?? DEFAULT_VG_CAP) * 100).toFixed(0))}% cap).
           </div>
 
           <div className="flex items-center mb-16" style={{ gap: 10, flexWrap: "wrap" }}>
@@ -156,19 +251,6 @@ export function ClientRedemptionSection({
               </span>
             ) : null}
 
-            <div className="select-wrap" style={{ marginLeft: 8 }}>
-              <select
-                value={scope}
-                disabled={clientAum == null}
-                onChange={(event) => setScope(event.target.value as Scope)}
-                aria-label="Redemption scope"
-              >
-                <option value="all">Whole portfolio</option>
-                <option value="only">Only selected managers</option>
-                <option value="except">Everything except selected</option>
-              </select>
-            </div>
-
             <button
               type="button"
               className="btn btn-primary btn-sm"
@@ -179,39 +261,31 @@ export function ClientRedemptionSection({
             </button>
           </div>
 
-          {scope !== "all" ? (
-            <div className="mb-16" style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-              {held.map((manager) => {
-                const key = managerKey(manager);
-                const on = picked.has(key);
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    className={`btn btn-sm ${on ? "btn-primary" : "btn-outline"}`}
-                    onClick={() => togglePicked(key)}
-                    style={{ fontSize: 10 }}
-                  >
-                    {manager.matched_name}
-                  </button>
-                );
-              })}
-              {!picked.size ? (
-                <span
-                  style={{
-                    fontFamily: "var(--mono)",
-                    fontSize: 10,
-                    color: "var(--text3)",
-                    alignSelf: "center",
-                  }}
-                >
-                  {scope === "only"
-                    ? "Select at least one manager to redeem from."
-                    : "Select managers to protect from the redemption."}
-                </span>
-              ) : null}
-            </div>
-          ) : null}
+          <div className="mb-16" style={{ display: "grid", gap: 10 }}>
+            <ScopePicker
+              label="Pull only from"
+              hint="None — pull from the whole portfolio"
+              managers={held}
+              selected={included}
+              disabled={clientAum == null}
+              onToggle={(key) => toggle(setIncluded, setExcluded, key)}
+              tone="accent"
+            />
+            <ScopePicker
+              label="Exclude from redemption"
+              hint="None"
+              managers={held}
+              selected={excluded}
+              disabled={clientAum == null}
+              onToggle={(key) => toggle(setExcluded, setIncluded, key)}
+              tone="danger"
+            />
+            {included.size ? (
+              <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)" }}>
+                A “pull only from” selection takes precedence — the exclude list is ignored.
+              </span>
+            ) : null}
+          </div>
 
           {error ? <div className="alert alert-error">{error}</div> : null}
           {result && result.status === "error" ? (

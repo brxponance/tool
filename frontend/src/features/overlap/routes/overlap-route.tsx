@@ -1,30 +1,63 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-import { OverlapDetailTable } from "../components/overlap-detail-table";
-import { OverlapMatrix } from "../components/overlap-matrix";
-import { useOverlapScreen } from "../hooks/use-overlap-screen";
+import { getPortfolio, getPortfolioClients } from "@/features/portfolio/api/get-portfolio-screen-data";
+import type { PortfolioManager } from "@/features/portfolio/types";
 
+import { OverlapSection } from "../components/overlap-section";
+import type { OverlapManagerInput } from "../types";
+
+function toInputs(managers: PortfolioManager[]): OverlapManagerInput[] {
+  return managers.map((m) => ({
+    matched_name: m.matched_name,
+    weight_file_name: m.weight_file_name,
+    current_weight: m.current_weight ?? 0,
+    proposed_weight: m.proposed_weight ?? 0,
+  }));
+}
+
+// Standalone page for the overlap matrix. Deliberately thin: it only picks a
+// client and loads that client's managers, then renders the SAME OverlapSection
+// the Portfolio tab composes, so the two views can never drift apart.
 export function OverlapRoute() {
-  const {
-    clients,
-    selectedClient,
-    setSelectedClient,
-    weightState,
-    setWeightState,
-    matchBasis,
-    setMatchBasis,
-    matrix,
-    loading,
-    error,
-    detail,
-    openDetail,
-  } = useOverlapScreen();
+  const [clients, setClients] = useState<string[]>([]);
+  const [selectedClient, setSelectedClient] = useState<string | null>(null);
+  const [managers, setManagers] = useState<OverlapManagerInput[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const [metric, setMetric] = useState<"common_weight" | "jaccard">("common_weight");
+  useEffect(() => {
+    getPortfolioClients()
+      .then((d) => {
+        setClients(d.clients ?? []);
+        if ((d.clients ?? []).length && !selectedClient) {
+          setSelectedClient(d.clients[0]);
+        }
+      })
+      .catch((e: unknown) =>
+        setError(e instanceof Error ? e.message : "Could not load the client list."),
+      );
+    // one-shot on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  const hasMatrix = matrix && (matrix.managers?.length ?? 0) > 0 && (matrix.pairs?.length ?? 0) > 0;
+  useEffect(() => {
+    if (!selectedClient) {
+      setManagers([]);
+      return;
+    }
+    setLoading(true);
+    getPortfolio(selectedClient)
+      .then((p) => {
+        setManagers(toInputs(p.managers ?? []));
+        setError(null);
+      })
+      .catch((e: unknown) =>
+        setError(e instanceof Error ? e.message : "Could not load the portfolio."),
+      )
+      .finally(() => setLoading(false));
+  }, [selectedClient]);
 
   return (
     <div id="page-overlap">
@@ -44,80 +77,22 @@ export function OverlapRoute() {
             ))}
           </select>
         </div>
-
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)" }}>Weights:</span>
-          <div className="select-wrap">
-            <select value={weightState} onChange={(e) => setWeightState(e.target.value as "current" | "proposed")}>
-              <option value="current">Current</option>
-              <option value="proposed">Proposed</option>
-            </select>
-          </div>
-        </div>
-
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)" }}>Match by:</span>
-          <div className="select-wrap">
-            <select value={matchBasis} onChange={(e) => setMatchBasis(e.target.value as "sedol" | "issuer")}>
-              <option value="sedol">Exact security (SEDOL)</option>
-              <option value="issuer">Issuer (collapse share classes)</option>
-            </select>
-          </div>
-        </div>
-
         {loading ? (
-          <span style={{ color: "var(--text3)", fontFamily: "var(--mono)", fontSize: 10 }}>Computing…</span>
+          <span style={{ color: "var(--text3)", fontFamily: "var(--mono)", fontSize: 10 }}>
+            Loading portfolio…
+          </span>
         ) : null}
       </div>
 
       {error ? <div className="alert alert-error">{error}</div> : null}
 
-      {matrix?.note ? <div className="alert alert-warn">{matrix.note}</div> : null}
-
-      {matrix?.unmatched && matrix.unmatched.length ? (
-        <div className="alert alert-warn">
-          <strong>No exposure match:</strong> {matrix.unmatched.join(", ")}
+      {selectedClient && managers.length ? (
+        <OverlapSection client={selectedClient} managers={managers} />
+      ) : !loading ? (
+        <div style={{ padding: 24, textAlign: "center", color: "var(--text3)" }}>
+          Select a portfolio to see the holdings-overlap matrix.
         </div>
       ) : null}
-
-      <div className="panel mb-16">
-        <div className="panel-header">
-          <span className="panel-title">Holdings Overlap Matrix</span>
-          <span style={{ marginLeft: "auto", fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)" }}>
-            {matrix?.benchmark_name ? `Benchmark hint: ${matrix.benchmark_name}` : "Pairwise security overlap"}
-          </span>
-        </div>
-        <div className="panel-body" style={{ padding: 16 }}>
-          {hasMatrix ? (
-            <OverlapMatrix
-              data={matrix}
-              metric={metric}
-              onMetricChange={setMetric}
-              activePairKey={detail.key}
-              onCellClick={openDetail}
-            />
-          ) : (
-            <div style={{ padding: 24, textAlign: "center", color: "var(--text3)" }}>
-              {loading
-                ? "Computing overlap…"
-                : selectedClient
-                  ? "Fewer than two managers matched the exposures file, or no exposure data is loaded. Upload a FactSet exposures file on the Setup tab."
-                  : "Select a portfolio to see the holdings-overlap matrix."}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {detail.key && (
-        <div className="panel mb-16">
-          <div className="panel-header">
-            <span className="panel-title">Shared Holdings</span>
-          </div>
-          <div className="panel-body" style={{ padding: 0 }}>
-            <OverlapDetailTable data={detail.data} loading={detail.loading} error={detail.error} />
-          </div>
-        </div>
-      )}
     </div>
   );
 }

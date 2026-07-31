@@ -4259,9 +4259,12 @@ def _qual_lookup(name, weight_file_name=None):
     Cascade: exact → whitespace/case-normalised → fuzzy (WRatio ≥ 86).
     Returns None if no confident match or no qualitative data loaded."""
     qd = state.get('qualitative_data')
-    if not qd or not qd.get('strategies'):
+    if not qd:
         return None
-    strategies = qd['strategies']
+    strategies = qd.get('strategies') or {}
+    if not strategies:
+        # Firm-only workbook — go straight to the firm prefix match.
+        return _qual_firm_fallback(name, weight_file_name)
 
     for cand in (name, weight_file_name):
         if not cand:
@@ -4293,7 +4296,34 @@ def _qual_lookup(name, weight_file_name=None):
             best = m[0]
             break
     _QUAL_MATCH_CACHE[ck] = best
-    return strategies.get(best) if best else None
+    if best:
+        return strategies.get(best)
+    return _qual_firm_fallback(name, weight_file_name)
+
+
+def _qual_firm_fallback(name, weight_file_name=None):
+    """Firm-level prefix match, used when no strategy row matches.
+
+    Firm-only workbooks (the newer one-row-per-firm format) carry no strategy
+    rows at all, so the strategy cascade above can never hit and every manager
+    would render as unmatched. Fall back to matching the manager name against
+    firm names by prefix and synthesise a strategy-shaped record (no
+    strategy_aum, since the file doesn't carry one).
+    """
+    qd = state.get('qualitative_data')
+    if not qd or not qd.get('firms'):
+        return None
+    from qualitative_loader import match_firm
+    for cand in (name, weight_file_name):
+        if not cand:
+            continue
+        firm, rec = match_firm(cand, qd)
+        if rec:
+            return {'firm': firm, 'strategy_aum': None,
+                    'firm_aum': rec.get('firm_aum'),
+                    'ownership': rec.get('ownership'),
+                    'diverse_pct': rec.get('diverse_pct')}
+    return None
 
 
 def _qual_fields(name, weight_file_name=None):
@@ -4321,7 +4351,9 @@ def diverse_ownership():
     is >= threshold (default 50%), by weight and by firm count.
     """
     qd = state.get('qualitative_data')
-    if not qd or not qd.get('strategies'):
+    # Either shape counts as loaded: the layered workbook keys on strategies,
+    # the firm-only workbook has firms and resolves via prefix match.
+    if not qd or not (qd.get('strategies') or qd.get('firms')):
         return jsonify({'has_data': False})
     payload   = request.get_json(silent=True) or {}
     managers  = payload.get('managers', [])
@@ -4456,13 +4488,20 @@ def _auto_run_universe_on_startup():
 # (which does `from app import app`) and `python app.py`.
 _auto_run_universe_on_startup()
 
-# Warm the universe RETURNS in the background too. Distinct from the auto-run
-# above: that computes universe *clones* (and is skipped when results are
-# cached), whereas the raw return matrices are never cached and are what the
-# manager-struggle scenario reads. Warming here means the panel is usually
-# populated by the time anyone opens a portfolio, instead of missing on the
-# first /risk_analysis after every restart.
-_warm_universe_dfs()
+# NOTE: do NOT warm the universe returns at import time.
+#
+# It is tempting to call _warm_universe_dfs() here so the manager-struggle panel
+# is already populated when someone first opens a portfolio. Don't. Reading the
+# consolidated universe workbook is a ~21MB openpyxl parse — pure Python, so it
+# holds the GIL in long stretches — and on this task (0.5 vCPU) that starves the
+# gunicorn threads that have to answer the ALB health check. The service then
+# fails health checks, ECS replaces the task, and `aws ecs wait services-stable`
+# times out. See DEPLOYMENT.md: CPU saturation (not memory) is the documented
+# cause of this service's restart loops.
+#
+# The load is kicked off lazily by /risk_analysis instead (still off the request
+# path, see _warm_universe_dfs) — by then the task is healthy and serving, so the
+# same work costs nobody a deployment.
 
 
 if __name__ == '__main__':

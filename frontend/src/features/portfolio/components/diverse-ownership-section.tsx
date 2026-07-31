@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { getDiverseOwnership } from "../api/get-portfolio-screen-data";
 import type {
@@ -87,20 +87,40 @@ export function DiverseOwnershipSection({ client, managers }: Props) {
 
   const ready = Boolean(client) && managers.length > 0;
 
-  async function handleRun() {
-    if (!client) return;
-    setResult({ data: null, loading: true, error: null });
-    try {
-      const res = await getDiverseOwnership(managers, threshold);
-      setResult({ data: res, loading: false, error: null });
-    } catch (err) {
-      setResult({
-        data: null,
-        loading: false,
-        error: err instanceof Error ? err.message : "Could not compute diverse ownership.",
-      });
+  // Auto-compute whenever the client, any weight, or the threshold changes —
+  // the rollup is a headline number, so it should be on screen without the user
+  // asking for it (and it must track proposed-weight edits live).
+  const signature = managers
+    .map((m) => `${m.tab}::${m.matched_name}:${m.current_weight ?? 0}:${m.proposed_weight ?? 0}`)
+    .join("|");
+  const reqId = useRef(0);
+
+  useEffect(() => {
+    if (!ready) {
+      setResult({ data: null, loading: false, error: null });
+      return;
     }
-  }
+    const id = ++reqId.current;
+    setResult((prev) => ({ ...prev, loading: true }));
+    const timer = setTimeout(() => {
+      getDiverseOwnership(managers, threshold)
+        .then((res) => {
+          if (id !== reqId.current) return;
+          setResult({ data: res, loading: false, error: null });
+        })
+        .catch((err: unknown) => {
+          if (id !== reqId.current) return;
+          setResult({
+            data: null,
+            loading: false,
+            error: err instanceof Error ? err.message : "Could not compute diverse ownership.",
+          });
+        });
+    }, 500);
+    return () => clearTimeout(timer);
+    // managers captured via `signature`
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, signature, threshold, ready]);
 
   const data = result.data;
 
@@ -108,16 +128,16 @@ export function DiverseOwnershipSection({ client, managers }: Props) {
     <div className="contrib-section mb-16">
       <div className="panel">
         <div className="panel-header">
-          <span className="panel-title">Diverse / Woman-Owned Ownership</span>
+          <span className="panel-title">Diverse / Woman Owned</span>
           <span
             style={{
-              marginLeft: "auto",
               fontFamily: "var(--mono)",
               fontSize: 10,
               color: "var(--text3)",
+              marginLeft: 8,
             }}
           >
-            Portfolio weight held with firms at or above the diversity threshold
+            Majority-owned (≥{data?.threshold ?? threshold}%)
           </span>
         </div>
         <div className="panel-body" style={{ padding: 16 }}>
@@ -143,14 +163,11 @@ export function DiverseOwnershipSection({ client, managers }: Props) {
               />
               <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)" }}>% diverse/female</span>
             </div>
-            <button
-              type="button"
-              className="btn btn-primary btn-sm"
-              disabled={!ready || result.loading}
-              onClick={() => void handleRun()}
-            >
-              {result.loading ? "Computing…" : "Compute"}
-            </button>
+            {result.loading && (
+              <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)" }}>
+                Computing…
+              </span>
+            )}
             {!ready && (
               <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text3)" }}>
                 Select a client first.
