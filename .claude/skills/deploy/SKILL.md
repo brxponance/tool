@@ -1,12 +1,16 @@
 ---
 name: deploy
-description: Deploy the PC Tool to production (AWS ECS) and verify it came up healthy. Use when the user asks to deploy, ship, release, push to production, or says the live site needs updating. Also use to check whether the last deploy succeeded or to diagnose a failed/red deploy.
+description: Commit and push to GitHub and deploy the PC Tool to production (AWS ECS), then verify it came up healthy. Use when the user asks to deploy, ship, release, push, push to GitHub, push to production, or says the live site needs updating. Also use to check whether the last deploy succeeded or to diagnose a failed/red deploy.
 ---
 
-# Deploy the PC Tool
+# Push to GitHub and deploy the PC Tool
 
-Ships the current `main` branch to production and confirms it is actually serving.
-Written so someone with no AWS knowledge can run it and get a trustworthy answer.
+Gets local work onto `main` and into production, then confirms it is actually
+serving. Written so someone with no AWS knowledge can run it and get a
+trustworthy answer.
+
+Pushing to `main` **is** deploying — there is no separate release step. Treat a
+push as a production action.
 
 **Live URL:** http://pc-tool-alb-149658130.us-east-1.elb.amazonaws.com
 
@@ -22,18 +26,46 @@ DSN secret pc-tool/database-url        repo  brxponance/tool
 Deploys run through GitHub Actions (`.github/workflows/deploy.yml`): build both
 images → push to ECR → force an ECS redeploy → wait for stability. ~6–8 minutes.
 
-## Step 1 — Make sure the work is committed and pushed
+## Step 1 — Commit and push
 
 A deploy ships what is on `origin/main`, not what is on disk.
 
 ```bash
-git status --short          # must be clean (or intentionally so)
-git log --oneline origin/main..HEAD   # must be empty
+git status --short                     # what's uncommitted
+git log --oneline origin/main..HEAD    # local commits not yet pushed
 ```
 
-If there are unpushed commits, ask the user before pushing — pushing triggers a
-real production deploy. If the tree is dirty, show them what's uncommitted and
-ask; never quietly commit on their behalf.
+**Before committing anything, verify it builds.** Pushing a broken build wastes a
+full deploy cycle:
+
+```bash
+cd frontend && npx tsc --noEmit && npx next build
+cd backend && ./venv/Scripts/python.exe -c "import app; print('backend imports OK')"
+```
+
+Then commit only what belongs to this change — read the diff first, and leave
+unrelated work-in-progress files (e.g. someone's half-edited notes) alone:
+
+```bash
+git add <the files for this change>
+git commit -m "..."      # end the message with the Co-Authored-By trailer
+git push origin main
+```
+
+Rules for this step:
+
+- **Confirm with the user before pushing** unless they've clearly just asked you
+  to push/deploy. A push is a live production deploy.
+- **Never blanket `git add -A`** without reading `git status` — this repo often has
+  unrelated dirty files.
+- If the tree is dirty with things unrelated to the change, list them and ask.
+- If everything is already pushed and they just want production refreshed, skip to
+  Step 2 and force a redeploy.
+
+> A push only triggers the workflow when files under `backend/**`, `frontend/**`,
+> or `.github/workflows/deploy.yml` change. Docs-only pushes (README, DEPLOYMENT,
+> `.claude/`) deliberately do **not** deploy — say so, rather than letting the user
+> wait for a run that will never appear.
 
 ## Step 2 — Trigger the deploy
 

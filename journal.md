@@ -249,3 +249,129 @@ names (factor returns = `Equity_factor_returns_-03-2026.xlsx`).
   task IP.
 - **Optional CPU bump** — 0.5 vCPU makes clones slow; raise if server-side recompute
   becomes routine.
+
+## 2026-07-31 — Ported the new clone_tool drop; fixed the deploy outage; made deploys self-service
+
+A new `clone_tool/` snapshot landed (7/30). Ported everything new out of it into
+`backend/` + `frontend/`, found two real bugs while doing it, fixed a production
+outage that had nothing to do with the port, and removed the manual steps around
+deploying.
+
+### 1. Comparing the drop
+`git diff` against the last `clone_tool` commit was useless as a baseline — our
+tool had already been ported past it, so the diff mixed done and not-done work.
+What worked: diffing `clone_tool/*.py` against `backend/*.py` **with CRLF
+normalised** (without `--strip-trailing-cr` every file looks 100% changed), then
+driving both apps with Playwright side by side and comparing the DOM.
+
+Caution for next time: a **function-name** diff is not enough. Two of the most
+important changes were *inside* existing functions and it missed both (see §3).
+
+### 2. What was ported
+- **Portfolio tab:** client total AUM (banner + per-manager AUM columns),
+  redemption optimizer (`optimize_redemption` LP), active-manager-struggle
+  scenario, Market Development exposure grouping, `/ideal_factor_complement`,
+  excluded managers in the optimizer.
+- **Gap fixes found by the side-by-side:** holdings-overlap rebuilt to the
+  reference design (count+weight cells, Strategy/Client-scaled, Current+Proposed
+  matrices sharing one colour scale, top-pair chips, drill-down) and mounted on
+  the Portfolio tab; diverse rollup now auto-computes instead of needing a
+  Compute click; qualitative chevron on manager rows; FactSet risk header rows
+  were inverted with no colspans; Scenario Analysis used full index strings and
+  printed a portfolio-level max drawdown on a sleeve that doesn't exist.
+- **Word memo:** `docx_export.py` + `build_memo_exposures` + `/export_portfolio_docx`
+  + a Print Memo Report button. Real editable tables, not screenshots.
+- **Reports:** `pdf_export.py`, `/export_report_pdf`, `/export_dispersion_xlsx`,
+  `/export_returns_xlsx`, `report_performance`, and three export cards. The
+  Quarterly PDF renders one report per selected client (verified 3 clients →
+  3.02× the single-client file size).
+- **FactSet alias crosswalk:** `load_factset_aliases` / `resolve_factset_to_clone`
+  / `factset_candidates_by_manager` / `strip_factset_decoration` /
+  `is_benchmark_name` / `clone_exists`, wired into the exposures and
+  security-risk matching paths. `load_client_returns` enables `basis='actual'`.
+- Refactored the two risk-exposure routes into thin routes over `*_core`
+  functions so the memo reuses them. Verified `route output == core output`.
+
+Deliberately not ported: `qualitative_loader.py`'s format change (it drops
+per-strategy AUM) — we kept our layered parser and added `match_firm` as a
+prefix-match fallback instead, so both workbook shapes work.
+
+### 3. Two bugs the sweep caught (both hidden inside existing functions)
+- **`skill_engine` recency cap.** Norm-skill was scored at each manager's own last
+  reporting month. When the eVestment universe lags the buy-list, that compares a
+  manager against buy-list peers only — or, on a thin tab like `US` with two
+  names, produces **no score at all**. Now capped at the latest month with an
+  adequate universe peer set.
+- **Placeholder misclassification.** We used bare `fuzzy_match` with no benchmark
+  filter and no alias resolution. On the 6/30 FactSet exposures file that
+  misflagged **53 of 69** names as placeholders (benchmark rows like
+  `MSCI EAFE NR USD` became fake managers; `CALSTRS - CASTLEARK EAFE+Canada`
+  couldn't resolve). Now 8. Latent on the 3/31 files — it would have bitten the
+  moment the newer exports were loaded.
+
+### 4. The deploy outage — RDS was rotating the password
+Deploys were failing at `aws ecs wait services-stable` with `Max attempts
+exceeded`; 150 failed tasks. **I first blamed my own change and was wrong** — the
+logs showed the backend never reaches app import. It dies in the entrypoint:
+
+```
+FATAL: password authentication failed for user "postgres"
+[entrypoint] server not ready (30/30) → exit 1
+```
+
+Root cause: RDS had **"Manage master credentials in Secrets Manager"** enabled,
+rotating the master password **every 7 days**. It rotated 7/30 09:36; the app's
+`pc-tool/database-url` still held the 7/16 password. Nothing broke immediately
+because a *running* container never re-reads the password — it only surfaced when
+a deploy forced a new task ~30 hours later. **The deploy was the messenger, not
+the cause.**
+
+Fix: rebuilt the DSN from the live password (URL-encoded — it contains `[`, which
+URL parsers read as an IPv6 host; 28 chars → 40 encoded), then **turned rotation
+off** and set a static password. That also *deleted* the `rds!db-220cca1f-…`
+secret, so DEPLOYMENT.md §5's retrieval command no longer worked — corrected.
+`services-stable` now passes in 2m37s.
+
+Lesson worth keeping: **read the logs before blaming the last change.**
+
+### 5. One regression I introduced and reverted
+I had put `_warm_universe_dfs()` at module scope in `app.py`. That's a 21 MB
+openpyxl parse (~24s, ~39 MB of DataFrames) holding the GIL on a 0.5 vCPU task —
+it starves the gunicorn threads answering the ALB health check, the documented
+killer for this service (§14). Moved off the import path; it's kicked lazily from
+`/risk_analysis`. **Never add blocking work to module scope in `backend/app.py`.**
+
+### 6. Deploys are now self-service
+- **No post-deploy step.** `INPUT_PARSER_VERSION` is stamped into the cache;
+  on boot a mismatch triggers a one-time background re-read of the input
+  workbooks. Bump it whenever parsing changes. (New DEPLOYMENT.md §16.)
+- **Preflight** step (~10s, before the build): checks the DSN secret parses and
+  warns if password rotation gets re-enabled.
+- **"Explain the failure"** step (`if: failure()`): dumps deployment state, ECS
+  events, stopped-task exit codes and the last 80 log lines into the job output.
+  The waiter's `Max attempts exceeded` is useless on its own.
+- **README rewritten** — it claimed the backend lives in `clone_tool/`. It does
+  not; that's the vendored reference copy. Anyone onboarding would have edited the
+  wrong tree. Now documents the data, the database and how to start it.
+- **Skills added:** `deploy` (commit + push + deploy + verify), `start`
+  (backend/frontend locally), `pull` (sync + reinstall + migrate).
+
+### Gotchas worth remembering
+- Git Bash mangles `/ecs/pc-tool` into a Windows path → prefix `MSYS_NO_PATHCONV=1`.
+  `aws logs tail` also crashes on Next.js's `▲` → add `PYTHONUTF8=1`.
+- `next start` here needs `output: standalone` handling, and `BACKEND_INTERNAL_URL`
+  isn't picked up by it — easiest local test is to run the backend on :3001.
+- The clone tool's `Map` sheet means two different things across vintages
+  (FactSet crosswalk vs a manager/region table). Our loader ignores the old one.
+- The clone's redemption UI says "±2%" while its constant is `0.01` (±1%). Ours is
+  self-consistent at ±1% and now reads the tolerance from the response.
+
+### Still open
+- **HTTPS / auth** — unchanged from the 7/20 entry; ALB is HTTP-only and open.
+- **Two features are inert until newer files are loaded:** the alias crosswalk
+  needs a `Map` sheet with `Factset Name | Returns Name | Tab`, and the
+  "Actual track record" report blocks need a `Client` sheet. No workbook we have
+  contains the latter.
+- **`sslmode`** is still `prefer`, so libpq silently falls back to plaintext.
+  Pinning `require` would make failures legible; left out to change one variable
+  at a time during the outage.
