@@ -15,6 +15,164 @@ from clone_engine import (clone_fun, FACTOR_CATEGORIES, STYLE_BUCKET_MAP,
 PEER_TABS = ['EAFE', 'ACWI', 'ISC', 'EM', 'US', 'USSC']
 
 
+# --- FactSet-name resolution ------------------------------------------------
+# FactSet risk/exposures uploads name a manager as
+#   '<CLIENT/ACCOUNT> - <FactSet strategy name> vs. <benchmark>'
+# e.g. 'CALSTRS - CASTLEARK EAFE+Canada', 'XPNPVPSL-Princeton Value Partners
+# vs. Russell 1000 Value'. These are ambiguous to match heuristically, so the
+# buy-list returns workbook carries an authoritative crosswalk on a 'Map' sheet
+# (columns: Factset Name | Returns Name | Tab). load_factset_aliases reads it
+# into {normalized_factset_name: (tab, returns_name)}; the 'Returns Name' is an
+# approximate label that _clone_key_for resolves to the actual clone key within
+# the given tab. The '... vs. <benchmark>' suffix may or may not be present on a
+# given upload row, so we index both the full and benchmark-stripped forms.
+
+_BENCH_SUFFIX_RE = re.compile(r'\s+vs\.?\s+.*$', re.IGNORECASE)
+_ACCT_PREFIX_RE  = re.compile(r'^([A-Za-z0-9/&.]+)\s*-\s*(.+)$')
+_DATEISH_RE      = re.compile(r'\b(\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{4}-\d{2}-\d{2})\b')
+# Names that are benchmarks, not managers — never valid placeholders.
+_BENCHMARK_RE = re.compile(
+    r'^\s*(MSCI|RUSSELL|S&P|BLOOMBERG|BBG|FTSE|DOW\s+JONES|NASDAQ|'
+    r'.*\bCUSTOM\s+INDEX\b|DEFAULT)\b', re.IGNORECASE)
+
+
+def _norm_name(s):
+    """Lowercase + whitespace-collapsed key for exact name comparison."""
+    return re.sub(r'\s+', ' ', str(s or '').strip()).lower()
+
+
+def is_benchmark_name(name):
+    """True if `name` is a benchmark row (MSCI/Russell/etc. or a bare
+    '... vs. DEFAULT' with no manager), which should never be a placeholder."""
+    base = _BENCH_SUFFIX_RE.sub('', str(name or '')).strip()
+    return bool(_BENCHMARK_RE.match(base))
+
+
+def strip_factset_decoration(name):
+    """Reduce a FactSet upload name to its invariant strategy name by removing
+    the client/account prefix and the 'vs. <benchmark>' suffix. Safe: it only
+    removes decoration, never manager-identifying tokens."""
+    s = str(name or '').strip()
+    s = _BENCH_SUFFIX_RE.sub('', s).strip()          # drop ' vs. <benchmark>'
+    if ' - ' in s:                                    # 'CALSTRS - CASTLEARK ...'
+        s = s.split(' - ')[-1].strip()
+    m = _ACCT_PREFIX_RE.match(s)                      # 'XPN..-', 'MD-', 'STLOUIS-'
+    if m:
+        pre = m.group(1)
+        if pre.isupper() or re.match(r'^XPN', pre, re.I) or pre in ('MD', 'Microsoft'):
+            s = m.group(2).strip()
+    s = s.replace('_', ' ')                            # 'QTRON_EAFE_3-31-26'
+    s = _DATEISH_RE.sub('', s)
+    s = re.sub(r'\bWORLD\s*(EX|X)\s*US(A)?\b', 'xUS', s, flags=re.IGNORECASE)
+    return re.sub(r'\s+', ' ', s).strip()
+
+
+def _factset_lookup(name, factset_aliases):
+    """Resolve a (possibly decorated) FactSet name to (tab, returns_name) via the
+    authoritative Map alias, or None. Tries the name as-given and with the
+    'vs. <benchmark>' suffix stripped, so it matches whether or not the upload
+    row carried the benchmark clause."""
+    if not factset_aliases:
+        return None
+    for cand in (_norm_name(name), _norm_name(_BENCH_SUFFIX_RE.sub('', str(name or '')))):
+        hit = factset_aliases.get(cand)
+        if hit:
+            return hit
+    return None
+
+
+def _clone_key_for(returns_name, tab, clone_results, universe_clone_results=None):
+    """Resolve an approximate Map 'Returns Name' to the actual buy-list clone
+    key, as (tab, key), or (None, None) if none matches.
+
+    The Map lives in the buy-list workbook and its Returns Names are buy-list
+    managers, so we resolve ONLY against clone_results (never the large universe
+    set, which would let a stray first-token collision win). Strategy:
+      1. In the Map's `tab`: exact (case-insensitive) → else the best match among
+         names sharing the first token → else best token_sort_ratio >= 82.
+      2. Otherwise an EXACT (case-insensitive) match in any other tab (tolerates
+         a wrong Tab cell, e.g. 'Huber Global' tagged EAFE but cloned in ACWI) —
+         but NOT loose fuzzy, so a product with no clone (e.g. 'IMC Global') is
+         not falsely attached to a same-firm clone.
+    """
+    rn = _norm_name(returns_name)
+    cr = clone_results or {}
+    if not rn or not cr:
+        return None, None
+
+    def keys_in(tabs):
+        for tb in tabs:
+            for k in (cr.get(tb) or {}):
+                yield tb, k
+
+    # 1a. exact (ci) in the declared tab
+    for tb, k in keys_in([tab]):
+        if _norm_name(k) == rn:
+            return tb, k
+    # 1b. within the declared tab, prefer shared-first-token, else fuzzy>=82
+    rn_first = rn.split()[0] if rn.split() else ''
+    best = None            # (score, tab, key)
+    best_ft = None         # best among first-token-sharing candidates
+    for tb, k in keys_in([tab]):
+        nk = _norm_name(k)
+        score = fuzz.token_sort_ratio(rn, nk)
+        if rn_first and nk.split()[:1] == [rn_first]:
+            if best_ft is None or score > best_ft[0]:
+                best_ft = (score, tb, k)
+        if best is None or score > best[0]:
+            best = (score, tb, k)
+    if best_ft is not None:
+        return best_ft[1], best_ft[2]
+    if best is not None and best[0] >= 82:
+        return best[1], best[2]
+    # 2. exact (ci) in any other tab
+    for tb, k in keys_in([t for t in PEER_TABS if t != tab]):
+        if _norm_name(k) == rn:
+            return tb, k
+    return None, None
+
+
+def resolve_factset_to_clone(name, factset_aliases, clone_results,
+                             universe_clone_results=None):
+    """Public: map a FactSet risk/exposures name to the return/clone it belongs
+    to via the Map crosswalk, as (tab, clone_key), or (None, None). Lets the
+    exposures/risk engines attach a FactSet-named row to the right return
+    profile instead of fuzzy-guessing."""
+    alias = _factset_lookup(name, factset_aliases)
+    if alias is None:
+        return None, None
+    tab, returns_name = alias
+    return _clone_key_for(returns_name, tab, clone_results, universe_clone_results)
+
+
+def factset_candidates_by_manager(candidate_names, factset_aliases, clone_results,
+                                  universe_clone_results=None):
+    """Group FactSet risk/exposures row names by the return manager they belong
+    to (via the Map), so a held manager can be narrowed to just its own rows
+    before the caller's client/benchmark tiebreak picks the right one.
+
+    Returns {normalized_manager_identity: [candidate_name, ...]} where each
+    identity key is both the resolved clone key and the Map 'Returns Name'
+    (so a lookup by either the held manager's clone key or its returns-name
+    hits). Multiple candidates per manager are expected — one per client — and
+    are left for the caller to disambiguate. Empty when no Map is loaded, so
+    callers fall back to their existing matching."""
+    index = {}
+    for cand in candidate_names or []:
+        alias = _factset_lookup(cand, factset_aliases)
+        if not alias:
+            continue
+        tab, returns_name = alias
+        keys = {_norm_name(returns_name)}
+        _kt, ck = _clone_key_for(returns_name, tab, clone_results, universe_clone_results)
+        if ck:
+            keys.add(_norm_name(ck))
+        for k in keys:
+            if k:
+                index.setdefault(k, []).append(cand)
+    return index
+
+
 def _input_hash(*parts):
     """Stable fingerprint of the inputs that feed a single clone_fun call.
     Used by the determinism diagnostic to tell file drift apart from
@@ -253,6 +411,113 @@ def load_manager_returns(filepath):
         result[peer_tab] = df
     wb.close()
     return result
+
+
+def load_factset_aliases(filepath):
+    """Read the 'Map' crosswalk sheet from a manager-returns workbook.
+
+    The Map sheet has a header row containing the labels 'Factset Name',
+    'Returns Name' and 'Tab' (case-insensitive; column A is usually blank), then
+    one row per FactSet strategy:
+        Factset Name                                   | Returns Name    | Tab
+        'CALSTRS - CASTLEARK EAFE+Canada vs. MSCI …'   | 'CastleArk …'   | 'EAFE'
+    Benchmark rows (e.g. 'MSCI World vs. DEFAULT') have no Returns Name/Tab and
+    are skipped (they're handled by is_benchmark_name).
+
+    Returns {normalized_factset_name: (tab, returns_name)}, indexing both the
+    full name and its benchmark-stripped form so an upload row matches whether or
+    not it carries the '... vs. <benchmark>' clause. 'Returns Name' is an
+    approximate label resolved to the real clone key later by _clone_key_for.
+    Empty when the workbook has no usable Map sheet (legacy files unaffected)."""
+    wb = load_workbook(filepath, read_only=True)
+    aliases = {}
+    try:
+        sheet = next((s for s in wb.sheetnames if s.strip().lower() == 'map'), None)
+        if sheet is None:
+            return aliases
+        rows = list(wb[sheet].iter_rows(values_only=True))
+
+        # Locate header + the Factset/Returns/Tab column indices.
+        fs_i = rn_i = tab_i = None
+        start = 0
+        for r_idx, row in enumerate(rows):
+            cells = {j: _norm_name(v) for j, v in enumerate(row) if v is not None}
+            hdr = {v: j for j, v in cells.items()}
+            if 'factset name' in hdr:
+                fs_i  = hdr.get('factset name')
+                rn_i  = hdr.get('returns name')
+                tab_i = hdr.get('tab')
+                start = r_idx + 1
+                break
+        if fs_i is None:
+            return aliases
+
+        for row in rows[start:]:
+            def cell(i):
+                return str(row[i]).strip() if (i is not None and i < len(row)
+                                               and row[i] is not None) else ''
+            fs = cell(fs_i)
+            rn = cell(rn_i)
+            tab = cell(tab_i).upper()
+            if not fs or not rn or tab not in PEER_TABS:
+                continue  # blank or a benchmark row (no Returns Name/Tab)
+            for key in (_norm_name(fs), _norm_name(_BENCH_SUFFIX_RE.sub('', fs))):
+                if key:
+                    aliases.setdefault(key, (tab, rn))
+    finally:
+        wb.close()
+    return aliases
+
+
+def load_client_returns(filepath):
+    """Load actual client track records from a 'Client' sheet in the buy-list
+    manager-returns workbook.
+
+    Same layout as the manager sheets: header row = client names (matching the
+    weights-file client names), column A = month date, values = decimal monthly
+    returns. Sheet name matched case-insensitively ('Client' or 'Clients').
+    Dates are normalized to month-end so they align with factor_df.
+
+    Returns a DataFrame indexed by month-end date (descending), one column per
+    client — or None when the workbook has no such sheet.
+    """
+    wb = load_workbook(filepath, read_only=True)
+    target = None
+    for sheet_name in wb.sheetnames:
+        if str(sheet_name).strip().lower() in ('client', 'clients'):
+            target = sheet_name
+            break
+    if target is None:
+        wb.close()
+        return None
+
+    ws = wb[target]
+    rows = list(ws.iter_rows(values_only=True))
+    wb.close()
+    if not rows:
+        return None
+    clients = [str(c).strip() if c else None for c in rows[0][1:]]
+    clients = [c for c in clients if c]
+    if not clients:
+        return None
+    data_rows = []
+    for row in rows[1:]:
+        if row[0] is None:
+            continue
+        try:
+            date = pd.to_datetime(row[0]) + pd.offsets.MonthEnd(0)
+        except Exception:
+            continue
+        def sfc(v):
+            if v is None: return np.nan
+            try: return float(v)
+            except (TypeError, ValueError): return np.nan
+        values = [sfc(v) for v in row[1:len(clients)+1]]
+        data_rows.append([date] + values)
+    if not data_rows:
+        return None
+    df = pd.DataFrame(data_rows, columns=['Date'] + clients)
+    df = df[~df['Date'].duplicated(keep='first')]
 
 
 def load_universe_returns(filepath, peer_tab):

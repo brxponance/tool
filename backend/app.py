@@ -9,7 +9,8 @@ from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
 from data_loader import (load_factor_returns, load_manager_returns, load_weights,
                          run_cloning, build_portfolio_view, fuzzy_match,
-                         diagnose_clone_determinism, CANONICAL_BENCHMARKS)
+                         diagnose_clone_determinism, CANONICAL_BENCHMARKS,
+                         load_factset_aliases, load_client_returns)
 from s3_storage import save_uploaded_file, resolve_path, is_enabled as s3_enabled
 
 # Optional Postgres-backed client management. When the DB is reachable it is
@@ -46,6 +47,17 @@ os.makedirs(os.path.dirname(app.config['CACHE_FILE']), exist_ok=True)
 state = {
     'clone_results': None, 'manager_dfs': None, 'weights': None,
     'client_benchmarks': {},
+    # Actual client track records from an optional 'Client' sheet in the
+    # manager-returns workbook (month-end desc × client columns). Lazily loaded
+    # by _get_client_returns; None until then, and None when no such sheet
+    # exists. Powers the 'actual' basis of the report/complement blocks.
+    'client_returns': None,
+    # {normalized_factset_name: (tab, established_manager_name)} parsed from the
+    # optional 'Map' crosswalk sheet in the manager-returns workbook. Lets the
+    # exposures/risk engines attach a FactSet-named row to the right return
+    # profile instead of fuzzy-guessing. Rebuilt from the returns file on every
+    # clone run / cache load (not persisted). Empty for workbooks with no Map.
+    'factset_aliases': {},
     # {client_name: total AUM in raw dollars or None} — optional COLUMN C of
     # each client-header row in the weights workbook. Drives the "Client Total
     # AUM" banner, the per-manager AUM columns, and redemption sizing.
@@ -377,6 +389,8 @@ def load_cache():
         mgr_path = state['files'].get('manager_returns')
         if mgr_path and os.path.exists(mgr_path):
             state['manager_dfs'] = load_manager_returns(mgr_path)
+            # Not persisted in the pickle — rebuild from the workbook each boot.
+            state['factset_aliases'] = load_factset_aliases(mgr_path)
 
         factor_path = state['files'].get('factor_returns')
         if factor_path and os.path.exists(factor_path):
@@ -730,6 +744,7 @@ def run():
             except Exception as e:
                 print(f"Determinism diagnostic skipped: {e}")
             state['manager_dfs']   = load_manager_returns(state['files']['manager_returns'])
+            state['factset_aliases'] = load_factset_aliases(state['files']['manager_returns'])
             if 'weights' in state['files']:
                 w, b, caum = load_weights(state['files']['weights'])
                 # Client total AUM only ever comes from the workbook (there is
@@ -2368,16 +2383,22 @@ def compute_security_risk_exposures():
     frontend's renderRiskExposures() works unchanged, with an extra
     'sleeve_info' key carrying coverage % and country flags.
     """
-    if not state.get('security_risk_data'):
-        return jsonify({'error': 'No security risk data loaded. Upload a '
-                                 'Security-Level Risk DNA file on the Setup tab.'})
-    payload     = request.get_json(silent=True) or {}
-    managers    = payload.get('managers', [])
-    client_name = payload.get('client_name')
-    sleeve      = payload.get('sleeve')   # None | 'US' | 'Non-US' | 'EM'
-    bench_name  = payload.get('bench')    # exact column name from file
-    if not managers:
+    payload = request.get_json(silent=True) or {}
+    if not payload.get('managers'):
         return jsonify({'error': 'No managers provided.'})
+    return jsonify(compute_security_risk_exposures_core(
+        payload.get('managers', []), payload.get('client_name'),
+        sleeve=payload.get('sleeve'), bench_name=payload.get('bench')))
+
+
+def compute_security_risk_exposures_core(managers, client_name, sleeve=None,
+                                         bench_name=None):
+    """Core of /compute_security_risk_exposures — returns a plain dict rather
+    than a Response, so the Word-memo export can reuse it directly.
+    sleeve: None|'US'|'Non-US'|'EM'."""
+    if not state.get('security_risk_data'):
+        return {'error': 'No security risk data loaded. Upload a '
+                         'Security-Level Risk DNA file on the Setup tab.'}
 
     # Use security_risk_data as-is, but if the security file has no
     # embedded 'Risk Summary' sheet (so available_benchmarks is empty),
@@ -2430,11 +2451,14 @@ def compute_security_risk_exposures():
             benchmark_name=bench_name,
             sleeve=sleeve,
             has_em_sleeve=has_em_sleeve,
+            factset_aliases=state.get('factset_aliases') or {},
+            clone_results=state.get('clone_results'),
+            universe_clone_results=state.get('universe_clone_results'),
         )
-        return jsonify(result)
+        return result
     except Exception as e:
         import traceback
-        return jsonify({'error': str(e), 'detail': traceback.format_exc()})
+        return {'error': str(e), 'detail': traceback.format_exc()}
 
 
 @app.route('/compute_risk_exposures', methods=['POST'])
@@ -2465,21 +2489,27 @@ def compute_risk_exposures():
     meaningful active number for the rest — matching the old endpoint's
     behaviour.
     """
-    if not state['risk_data']:
-        return jsonify({'error': 'No risk data loaded'})
+    data = request.json or {}
+    return jsonify(compute_risk_exposures_core(
+        data.get('managers', []), data.get('client_name')))
 
-    data        = request.json or {}
-    managers    = data.get('managers', [])
-    client_name = data.get('client_name')
-    rd          = state['risk_data']
+
+def compute_risk_exposures_core(managers, client_name, benchmark_name=None):
+    """Core of /compute_risk_exposures — returns a plain dict rather than a
+    Response, so the Word-memo export can reuse it directly. `benchmark_name`
+    overrides the benchmark resolved from the weights file."""
+    if not state['risk_data']:
+        return {'error': 'No risk data loaded'}
+
+    rd = state['risk_data']
 
     # Backwards compat: if the loaded cache is from the OLD parser (which
     # returned {'managers': [...], 'style_factors': {factor: [list]}}),
     # refuse to run rather than produce garbage. User needs to re-upload.
     if 'manager_names' not in rd:
-        return jsonify({'error': 'Risk summary cache is in the old format. '
-                                 'Re-upload the Risk Summary file to use the '
-                                 'new bottom-up computation.'})
+        return {'error': 'Risk summary cache is in the old format. '
+                         'Re-upload the Risk Summary file to use the '
+                         'new bottom-up computation.'}
 
     mgr_cols   = rd.get('manager_names', [])
     bench_cols = rd.get('benchmark_names', [])
@@ -2614,7 +2644,7 @@ def compute_risk_exposures():
 
     bench_lookup = {_bench_norm(b): b for b in bench_cols}
 
-    client_bench_str = (data.get('benchmark_name')
+    client_bench_str = (benchmark_name
                         or (state.get('client_benchmarks') or {}).get(client_name or ''))
     matched_bench_col = None
     if client_bench_str:
@@ -2708,7 +2738,7 @@ def compute_risk_exposures():
         'fallback_absolute': bool(client_bench_str and not matched_bench_col),
     }
 
-    return jsonify({
+    return {
         'factors':     STYLE_FACTORS,
         'current':     current,
         'proposed':    proposed,
@@ -2716,7 +2746,45 @@ def compute_risk_exposures():
         'unmatched':   unmatched,
         'rd_managers': mgr_cols,
         'benchmark':   benchmark_info,
-    })
+    }
+
+
+# ── Actual client track records ('Client' sheet of the returns workbook) ──
+def _get_client_returns():
+    """Lazy-load actual client track records from the 'Client' sheet of the
+    manager-returns workbook (same idiom as factor_df). Returns a DataFrame
+    (month-end desc × client columns) or None when the sheet doesn't exist.
+    Invalidated on manager-returns re-upload."""
+    if state.get('client_returns') is None:
+        path = state['files'].get('manager_returns')
+        if path and os.path.exists(path):
+            try:
+                state['client_returns'] = load_client_returns(path)
+            except Exception as e:  # noqa: BLE001
+                print(f"Client returns sheet load failed: {e}")
+                state['client_returns'] = None
+    return state.get('client_returns')
+
+
+def _client_returns_series(client_name):
+    """Actual track record for one client as a pd.Series (month-end desc), or
+    None. Exact column match first, then case/whitespace-insensitive."""
+    df = _get_client_returns()
+    if df is None or client_name is None:
+        return None
+    col = None
+    if client_name in df.columns:
+        col = client_name
+    else:
+        key = str(client_name).strip().lower()
+        for c in df.columns:
+            if str(c).strip().lower() == key:
+                col = c
+                break
+    if col is None:
+        return None
+    s = df[col].dropna()
+    return s if len(s) else None
 
 
 # ── Risk analysis endpoint (Scenario / Marginal Contribution / Regime) ────
@@ -3141,16 +3209,17 @@ def ideal_factor_complement():
 
     basis = str(payload.get('basis') or '').strip().lower()
     if basis == 'actual':
-        # The 'actual' basis measures underperformance against the client's real
-        # track record (the 'Client' sheet of the returns workbook). That loader
-        # is not ported yet — fail loudly rather than silently substituting the
-        # backtested basis, which would look identical but mean something else.
-        return jsonify({'error': "The 'actual' basis needs the client track-record "
-                                 "loader, which is not available in this build. "
-                                 "Use the backtested basis."})
-    weights_dict = {pm['matched_name']: pm['proposed_weight'] for pm in proposed_managers}
-    port_rets = portfolio_return_series(ret_mtx, weights_dict)
-    excess    = (port_rets - bench_core).dropna()
+        # Underperformance months from the client's ACTUAL track record (the
+        # 'Client' sheet), not the backtested proposed portfolio.
+        actual_s = _client_returns_series(client_name)
+        if actual_s is None:
+            return jsonify({'error': 'Client track record not loaded — add a '
+                                     '"Client" sheet to the manager returns workbook.'})
+        excess = (actual_s - bench_core).dropna()
+    else:
+        weights_dict = {pm['matched_name']: pm['proposed_weight'] for pm in proposed_managers}
+        port_rets = portfolio_return_series(ret_mtx, weights_dict)
+        excess    = (port_rets - bench_core).dropna()
     under_idx = excess[excess < 0].index
     if len(under_idx) < MIN_OVERLAP:
         return jsonify({
@@ -3957,6 +4026,9 @@ def portfolio_exposures():
         managers, state['exposures_data'], grouping,
         benchmark_name=bmk_name,
         sub_grouping=sub_grouping,
+        factset_aliases=state.get('factset_aliases') or {},
+        clone_results=state.get('clone_results'),
+        universe_clone_results=state.get('universe_clone_results'),
     )
     return jsonify(result)
 
@@ -4452,6 +4524,156 @@ def export_portfolio_pptx():
     return resp
 
 
+# ─────────────────────────────────────────────────────────────────────────
+#  Editable Word rebalance memo (Portfolio tab)
+# ─────────────────────────────────────────────────────────────────────────
+@app.route('/export_portfolio_docx', methods=['POST'])
+def export_portfolio_docx():
+    """Build the editable Word (.docx) rebalance memo for the current portfolio.
+
+    Request JSON:
+      { client_name, managers:[{matched_name, weight_file_name, tab,
+        current_weight, proposed_weight}], images:{market_cycle: <dataURL>} }
+
+    Unlike the PPTX export — which pastes screenshots — everything here is real
+    editable text: characteristics, region/sector weights, active share, the
+    active-style risk table and the firm write-ups are all computed server-side
+    from the loaded FactSet/qualitative files. Only the market-cycle chart
+    arrives as an image, because it has no tabular equivalent.
+    """
+    import base64, re as _re
+    from datetime import date
+    from flask import Response
+    from docx_export import build_portfolio_docx
+    from data_loader import resolve_peer_group
+    from qualitative_loader import match_firm
+
+    payload  = request.get_json(silent=True) or {}
+    client   = payload.get('client_name') or 'Portfolio'
+    managers = payload.get('managers') or []
+    images   = payload.get('images') or {}
+
+    if not managers:
+        return jsonify({'status': 'error',
+                        'error': 'No managers provided — select a client first.'}), 400
+
+    def _fpct(x):
+        return f"{(float(x or 0) * 100):.1f}%"
+
+    # ── Manager Allocation rows (held or proposed), sorted by weight ───────
+    mgr_rows, tot_cur, tot_tgt = [], 0.0, 0.0
+    for m in sorted(managers, key=lambda m: (-(m.get('current_weight') or 0),
+                                             -(m.get('proposed_weight') or 0))):
+        cw = float(m.get('current_weight') or 0)
+        pw = float(m.get('proposed_weight') or 0)
+        if cw <= 0 and pw <= 0:
+            continue
+        tot_cur += cw; tot_tgt += pw
+        if cw <= 0 and pw > 0:      action = 'New'
+        elif cw > 0 and pw <= 0:    action = 'Terminate'
+        elif pw > cw + 1e-9:        action = 'Increase'
+        elif pw < cw - 1e-9:        action = 'Decrease'
+        else:                       action = 'No Change'
+        mgr_rows.append({'name': m.get('matched_name') or m.get('weight_file_name') or '?',
+                         'current': _fpct(cw),
+                         'change':  f"{(pw - cw) * 100:+.1f}%",
+                         'target':  _fpct(pw),
+                         'action':  action})
+    totals = {'current': _fpct(tot_cur),
+              'change':  f"{(tot_tgt - tot_cur) * 100:+.1f}%",
+              'target':  _fpct(tot_tgt)}
+
+    # ── New managers (proposed>0 & current==0) → firm write-up ─────────────
+    qd = state.get('qualitative_data')
+    new_managers = []
+    for m in managers:
+        cw = float(m.get('current_weight') or 0)
+        pw = float(m.get('proposed_weight') or 0)
+        if pw > 0 and cw <= 0:
+            nm = m.get('matched_name') or m.get('weight_file_name') or '?'
+            desc = None
+            if qd:
+                _, rec = match_firm(nm, qd)
+                if rec:
+                    desc = rec.get('description')
+            new_managers.append({'name': nm, 'description': desc})
+
+    # ── Benchmark + ACWI-ex-US dev/EM split flag ───────────────────────────
+    bench_str  = (state.get('client_benchmarks') or {}).get(client)
+    want_split = (resolve_peer_group(bench_str) == 'ACWI_xUS') if bench_str else False
+
+    # ── Exposures (characteristics / region / sector / active share) ───────
+    exposures = None
+    try:
+        if state.get('exposures_data'):
+            from exposures_engine import build_memo_exposures
+            exposures = build_memo_exposures(
+                managers, state['exposures_data'],
+                client_benchmark=bench_str,
+                want_split=want_split,
+                factset_aliases=state.get('factset_aliases') or {},
+                clone_results=state.get('clone_results'),
+                universe_clone_results=state.get('universe_clone_results'))
+    except Exception as e:  # noqa: BLE001 — a memo without exposures still ships
+        print(f"[docx] exposures section skipped: {e}")
+        exposures = None
+
+    # ── FactSet active-style risk table ────────────────────────────────────
+    # Mirror the on-screen panel: prefer the security-level file when present
+    # (it drives the panel), else fall back to the Risk Summary file.
+    risk = None
+    try:
+        if state.get('security_risk_data'):
+            risk = compute_security_risk_exposures_core(managers, client)
+            if risk and risk.get('error'):
+                risk = None
+        if risk is None and state.get('risk_data'):
+            risk = compute_risk_exposures_core(managers, client, benchmark_name=bench_str)
+            if risk and risk.get('error'):
+                risk = None
+    except Exception as e:  # noqa: BLE001
+        print(f"[docx] risk section skipped: {e}")
+        risk = None
+
+    # ── Market-cycle chart PNG (html2canvas data URL → bytes) ──────────────
+    mc_png = None
+    durl = images.get('market_cycle')
+    if durl:
+        try:
+            mc_png = base64.b64decode(_re.sub(r'^data:image/\w+;base64,', '', durl))
+        except Exception:
+            mc_png = None
+
+    ctx = {
+        'client_name':      client,
+        'date':             date.today().strftime('%B %d, %Y'),
+        'benchmark':        (exposures or {}).get('benchmark_matched') or bench_str,
+        'manager_rows':     mgr_rows,
+        'totals':           totals,
+        'new_managers':     new_managers,
+        'market_cycle_png': mc_png,
+        'exposures':        exposures,
+        'risk':             risk,
+    }
+
+    try:
+        data = build_portfolio_docx(ctx)
+    except Exception as e:
+        import traceback
+        return jsonify({'status': 'error', 'error': str(e),
+                        'trace': traceback.format_exc()}), 500
+
+    safe  = ''.join(ch for ch in client.replace(' ', '_') if ch.isalnum() or ch in '_-')
+    fname = f"{safe}_Rebalance_Memo_{date.today().isoformat()}.docx"
+    resp = Response(
+        data,
+        mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    )
+    resp.headers['Content-Disposition'] = f'attachment; filename="{fname}"'
+    resp.headers['Content-Length'] = str(len(data))
+    return resp
+
+
 def _auto_run_universe_on_startup():
     """If a universe file is staged on disk but its clones haven't been run yet,
     kick off the universe clone automatically in the background at startup — so
@@ -4502,6 +4724,862 @@ _auto_run_universe_on_startup()
 # The load is kicked off lazily by /risk_analysis instead (still off the request
 # path, see _warm_universe_dfs) — by then the task is healthy and serving, so the
 # same work costs nobody a deployment.
+
+
+
+@app.route('/report_performance', methods=['POST'])
+def report_performance():
+    """Portfolio-level performance blocks for the Quarterly Portfolio Report.
+
+    Request JSON: { "client_name": "MD" }
+
+    Returns {as_of, peer_benchmark, benchmark_name, backtested, actual} where
+    backtested/actual each carry {name, inception_date, periods, calendar,
+    quarterly_excess} in the shapes the report renderers consume:
+      periods.{mrq,t1y,t3y,t5y,t10y,si} -> {port, bmk[, clone]} (null if the
+        window is too short); mrq cumulative, others annualized.
+      calendar -> last 5 COMPLETE years [{year, port, bmk[, clone]}], newest first.
+      quarterly_excess -> [{qtr:'Q<n> YYYY', port, bmk[, clone]}] for the
+        calendar years + current partial year (renderer derives the excess).
+
+    'backtested' = the client's CURRENT-weight portfolio backtest (fixed
+    weights, monthly rebalance, full history with a 60-month floor, clone
+    backfill) plus the static-clone counterpart series ('Portfolio Clone').
+    'actual' = the client's real track record from the 'Client' sheet of the
+    manager-returns workbook; {error} when the sheet/client is absent.
+    """
+    import numpy as np
+    import pandas as pd
+    from risk_engine import (build_return_matrix, extend_with_beta_replication,
+                             portfolio_return_series, build_benchmark_series,
+                             PEER_BENCHMARKS, CLIENT_BENCHMARK_OVERRIDE)
+    from data_loader import (load_factor_returns, resolve_peer_group,
+                             build_portfolio_view)
+
+    payload = request.get_json(silent=True) or {}
+    client_name = payload.get('client_name')
+    if not client_name:
+        return jsonify({'error': 'client_name required.'})
+    if not state['clone_results']:
+        return jsonify({'error': 'Run the clone engine first.'})
+    if not state.get('weights') or client_name not in state['weights']:
+        return jsonify({'error': f'Client "{client_name}" not found in weights file.'})
+    if state.get('factor_df') is None:
+        if 'factor_returns' not in state['files']:
+            return jsonify({'error': 'Factor returns file missing.'})
+        state['factor_df'] = load_factor_returns(state['files']['factor_returns'])
+    factor_df = state['factor_df']
+
+    # ── Benchmark peer group (standard resolution chain) ──────────────────
+    bench_str = (state.get('client_benchmarks') or {}).get(client_name)
+    peer_benchmark = resolve_peer_group(bench_str) if bench_str else None
+    if not peer_benchmark and client_name in CLIENT_BENCHMARK_OVERRIDE:
+        peer_benchmark = CLIENT_BENCHMARK_OVERRIDE[client_name]
+
+    # ── Current-weight manager list ────────────────────────────────────────
+    view = build_portfolio_view(client_name, state['weights'][client_name],
+                                state['clone_results'], state['manager_dfs'],
+                                universe_clone_results=state.get('universe_clone_results'),
+                                placeholder_buckets=state.get('placeholder_buckets') or {})
+    mgrs, weights = [], {}
+    for m in view.get('managers', []):
+        if m.get('is_placeholder'):
+            continue
+        w = float(m.get('current_weight') or 0)
+        if w <= 0:
+            continue
+        mgrs.append({'matched_name': m['matched_name'], 'tab': m['tab']})
+        weights[m['matched_name']] = w
+    if not mgrs:
+        return jsonify({'error': 'No non-placeholder managers with weight.'})
+    if not peer_benchmark:
+        tabw = {}
+        for m in mgrs:
+            tabw[m['tab']] = tabw.get(m['tab'], 0) + weights[m['matched_name']]
+        peer_benchmark = max(tabw, key=tabw.get)
+
+    MIN_MONTHS = 60
+
+    # ── Backtested portfolio series (5-yr floor + clone backfill) ─────────
+    ret_mtx = build_return_matrix(mgrs, state['clone_results'])
+    if ret_mtx.empty:
+        return jsonify({'error': 'No return data for managers.'})
+    most_recent  = ret_mtx.index.max()
+    earliest_mgr = ret_mtx.index.min()
+    fmonths = factor_df.index[factor_df.index <= most_recent].sort_values(ascending=False)
+    if len(fmonths) < MIN_MONTHS:
+        return jsonify({'error': f'Only {len(fmonths)} months of factor history; '
+                                 f'need at least {MIN_MONTHS} (5 years).'})
+    window_start = min(earliest_mgr, fmonths[MIN_MONTHS - 1])
+    target_index = factor_df.index[(factor_df.index >= window_start) &
+                                   (factor_df.index <= most_recent)]
+    ret_mtx = ret_mtx.reindex(target_index)
+    ret_mtx = extend_with_beta_replication(ret_mtx, mgrs, state['clone_results'], factor_df)
+    port = portfolio_return_series(ret_mtx, weights).dropna()
+
+    # Clone counterpart: the same weights over each manager's static-clone
+    # series (beta replication fills pre-inception months, matching the
+    # backtest convention).
+    clone_cols = []
+    for m in mgrs:
+        d = state['clone_results'].get(m['tab'], {}).get(m['matched_name'], {})
+        dates = d.get('dates') or []
+        cvals = d.get('static_clone_full') or []
+        n = min(len(dates), len(cvals))
+        if n == 0:
+            continue
+        vals = [float(v) if v is not None and not (isinstance(v, float) and np.isnan(v)) else np.nan
+                for v in cvals[:n]]
+        idx = pd.DatetimeIndex(pd.to_datetime(dates[:n]))
+        s = pd.Series(vals, index=idx, name=m['matched_name'], dtype=float)
+        s = s[~s.index.duplicated(keep='first')]
+        clone_cols.append(s)
+    clone_series = None
+    if clone_cols:
+        clone_mtx = (pd.concat(clone_cols, axis=1)
+                     .sort_index(ascending=False).reindex(target_index))
+        clone_mtx = extend_with_beta_replication(clone_mtx, mgrs,
+                                                 state['clone_results'], factor_df)
+        clone_series = portfolio_return_series(clone_mtx, weights).dropna()
+
+    bench_df = build_benchmark_series(peer_benchmark, factor_df, target_index)
+    if bench_df is None or 'core' not in bench_df.columns:
+        return jsonify({'error': f'Benchmark series unavailable for peer group {peer_benchmark}.'})
+    bench_core = bench_df['core'].dropna()
+    bench_name = (PEER_BENCHMARKS.get(peer_benchmark) or {}).get('core')
+
+    # ── Aggregation helpers ────────────────────────────────────────────────
+    def _cum(s):
+        return float((1.0 + s).prod() - 1.0)
+
+    def _ann(s):
+        n = len(s)
+        if n == 0:
+            return None
+        c = _cum(s)
+        return float((1.0 + c) ** (12.0 / n) - 1.0) if n >= 12 else c
+
+    def _perf_block(port_s, bmk_s, clone_s, name):
+        frames = {'port': port_s, 'bmk': bmk_s}
+        if clone_s is not None:
+            frames['clone'] = clone_s
+        df = pd.DataFrame(frames).dropna().sort_index(ascending=True)
+        if len(df) < 3:
+            return None
+        periods = {}
+        for key, n, ann in [('mrq', 3, False), ('t1y', 12, True), ('t3y', 36, True),
+                            ('t5y', 60, True), ('t10y', 120, True)]:
+            if len(df) >= n:
+                sub = df.iloc[-n:]
+                periods[key] = {k: (_ann(sub[k]) if ann else _cum(sub[k])) for k in frames}
+            else:
+                periods[key] = None
+        periods['si'] = {k: _ann(df[k]) for k in frames}
+
+        cal = []
+        for y in sorted({d.year for d in df.index}):
+            sub = df[df.index.year == y]
+            if len(sub) == 12:
+                cal.append({'year': str(y), **{k: _cum(sub[k]) for k in frames}})
+        cal = cal[-5:][::-1]   # 5 most recent complete years, newest first
+
+        q_years = {int(c['year']) for c in cal}
+        q_years.add(int(df.index.max().year))   # current (possibly partial) year
+        qrows = []
+        for (y, q), sub in df.groupby([df.index.year, df.index.quarter]):
+            if y not in q_years:
+                continue
+            qrows.append({'_y': int(y), '_q': int(q), 'qtr': f'Q{int(q)} {int(y)}',
+                          **{k: _cum(sub[k]) for k in frames}})
+        qrows.sort(key=lambda r: (-r['_y'], -r['_q']))
+        for r_ in qrows:
+            r_.pop('_y'); r_.pop('_q')
+
+        return {'name': name,
+                'inception_date': df.index.min().strftime('%Y-%m-%d'),
+                'periods': periods, 'calendar': cal, 'quarterly_excess': qrows}
+
+    backtested = _perf_block(port, bench_core, clone_series,
+                             'Current Portfolio (Backtested)')
+
+    actual_series = _client_returns_series(client_name)
+    if actual_series is not None:
+        bench_full = build_benchmark_series(peer_benchmark, factor_df,
+                                            factor_df.index)['core'].dropna()
+        actual = _perf_block(actual_series, bench_full, None, 'Client Track Record')
+        if actual is None:
+            actual = {'error': 'Client track record has fewer than 3 usable months.'}
+    else:
+        actual = {'error': 'Client track record not loaded — add a "Client" sheet '
+                           'to the manager returns workbook.'}
+
+    return jsonify({
+        'as_of': factor_df.index.max().strftime('%Y-%m-%d'),
+        'peer_benchmark': peer_benchmark,
+        'benchmark_name': bench_name,
+        'backtested': backtested if backtested else {'error': 'Backtest could not be built.'},
+        'actual': actual,
+    })
+
+
+@app.route('/export_report_pdf', methods=['POST'])
+def export_report_pdf():
+    """Assemble the 'Quarterly Portfolio Report' PDF from page screenshots the
+    frontend captured with html2canvas. Mirrors /export_portfolio_pptx but emits
+    application/pdf (one captured page per PDF page).
+
+    Request JSON: { "images": ["data:image/png;base64,...", ...] }
+    """
+    from pdf_export import build_report_pdf
+    from flask import Response
+    from datetime import date
+
+    payload = request.get_json(silent=True) or {}
+    images = payload.get('images') or []
+    if not images or not any(images):
+        return jsonify({'status': 'error',
+                        'error': 'No report page screenshots provided — open the '
+                                 'Reports tab and let it render, then try again.'}), 400
+    try:
+        data = build_report_pdf(images, payload.get('meta'))
+    except Exception as e:
+        import traceback
+        return jsonify({'status': 'error', 'error': str(e),
+                        'trace': traceback.format_exc()}), 500
+
+    fname = f"Quarterly_Portfolio_Report_{date.today().isoformat()}.pdf"
+    resp = Response(data, mimetype='application/pdf')
+    resp.headers['Content-Disposition'] = f'attachment; filename="{fname}"'
+    resp.headers['Content-Length'] = str(len(data))
+    return resp
+
+
+@app.route('/export_dispersion_xlsx')
+def export_dispersion_xlsx():
+    """Backtest EVERY client portfolio at CURRENT weights (fixed-weight monthly
+    rebalance, 5-year floor, clone-backfilled) and return an Excel workbook with
+    the monthly return streams plus per-month cross-sectional dispersion stats.
+
+    Each client uses its own full available history (>= 60 months); short-track
+    managers are backfilled with their clone returns. Clients are aligned by
+    calendar month (ragged — older months only for longer-history clients).
+    """
+    import io as _io
+    import pandas as pd
+    from flask import Response
+    from datetime import date
+    from risk_engine import (build_return_matrix, extend_with_beta_replication,
+                             portfolio_return_series)
+    from data_loader import load_factor_returns, build_portfolio_view
+
+    if not state['clone_results']:
+        return jsonify({'error': 'Run the clone engine first.'}), 400
+    if not state.get('weights'):
+        return jsonify({'error': 'Upload a weights file first.'}), 400
+    if state.get('factor_df') is None and 'factor_returns' in state['files']:
+        state['factor_df'] = load_factor_returns(state['files']['factor_returns'])
+    factor_df = state.get('factor_df')
+    if factor_df is None:
+        return jsonify({'error': 'Factor returns file missing.'}), 400
+
+    MIN_MONTHS = 60
+    series_by_client = {}
+    summary_rows = []
+    skipped = []
+
+    for client in state['weights']:
+        try:
+            view = build_portfolio_view(
+                client, state['weights'][client], state['clone_results'],
+                state['manager_dfs'],
+                universe_clone_results=state.get('universe_clone_results'),
+                placeholder_buckets=state.get('placeholder_buckets') or {})
+        except Exception as e:
+            skipped.append(f"{client}: portfolio build failed ({e})")
+            continue
+
+        mgrs, weights = [], {}
+        for m in view.get('managers', []):
+            if m.get('is_placeholder'):
+                continue
+            w = float(m.get('current_weight') or 0)
+            if w <= 0:
+                continue
+            mgrs.append({'matched_name': m['matched_name'], 'tab': m['tab']})
+            weights[m['matched_name']] = w
+        if not mgrs:
+            skipped.append(f"{client}: no non-placeholder managers with weight")
+            continue
+
+        ret_mtx = build_return_matrix(mgrs, state['clone_results'])
+        if ret_mtx.empty:
+            skipped.append(f"{client}: no return data")
+            continue
+        most_recent  = ret_mtx.index.max()
+        earliest_mgr = ret_mtx.index.min()
+        fmonths = factor_df.index[factor_df.index <= most_recent].sort_values(ascending=False)
+        if len(fmonths) < MIN_MONTHS:
+            skipped.append(f"{client}: <{MIN_MONTHS} months of factor history")
+            continue
+        window_start = min(earliest_mgr, fmonths[MIN_MONTHS - 1])
+        target_index = factor_df.index[(factor_df.index >= window_start) &
+                                       (factor_df.index <= most_recent)]
+        ret_mtx = ret_mtx.reindex(target_index)
+        ret_mtx = extend_with_beta_replication(ret_mtx, mgrs, state['clone_results'], factor_df)
+        port = portfolio_return_series(ret_mtx, weights).dropna()
+        if port.empty:
+            skipped.append(f"{client}: empty return series")
+            continue
+
+        series_by_client[client] = port
+        p_asc = port.sort_index()
+        n = int(len(p_asc))
+        cum = float((1.0 + p_asc).prod() - 1.0)
+        ann = float((1.0 + cum) ** (12.0 / n) - 1.0) if n > 0 else None
+        summary_rows.append({
+            'Client': client,
+            'Benchmark': (state.get('client_benchmarks') or {}).get(client) or '',
+            'Start': p_asc.index.min().strftime('%Y-%m'),
+            'End': p_asc.index.max().strftime('%Y-%m'),
+            'Months': n,
+            'Cumulative': cum,
+            'Annualized': ann,
+        })
+
+    if not series_by_client:
+        return jsonify({'error': 'No client produced a backtest. '
+                                 + ('; '.join(skipped) if skipped else '')}), 400
+
+    # Client portfolios grouped by sub-asset class. Stats are computed WITHIN
+    # each group. Order here is the display order.
+    GROUPS = [
+        ('Global',                 ['Microsoft', 'STL']),
+        ('International Small Cap', ['ATL Health', 'CIT', 'MD']),
+        ('ACWI ex-US',             ['COB', 'NYSTRS', 'NYC']),
+        ('EAFE',                   ['CALSTRS', 'IMRF', 'MASS PRIM', 'NYSCRF']),
+    ]
+    present = set(series_by_client)
+    ordered_groups, used = [], set()
+    for label, members in GROUPS:
+        ms = [m for m in members if m in present]
+        if ms:
+            ordered_groups.append((label, ms))
+            used.update(ms)
+    leftovers = [c for c in sorted(present) if c not in used]
+    if leftovers:
+        ordered_groups.append(('Other', leftovers))
+
+    # Union month index, MOST RECENT FIRST.
+    mat = pd.DataFrame(series_by_client).sort_index(ascending=False)
+    # Per-group cross-sectional stats (within group), per month.
+    group_stats = {}
+    for label, ms in ordered_groups:
+        sub = mat[ms]
+        group_stats[label] = {
+            'High':   sub.max(axis=1),
+            'Low':    sub.min(axis=1),
+            'Median': sub.median(axis=1),
+            'Spread': sub.max(axis=1) - sub.min(axis=1),
+        }
+
+    import statistics as _stats
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, Border, Side
+    PCT = '0.00%'
+    bold = Font(bold=True)
+    center = Alignment(horizontal='center')
+
+    # ── Monthly Returns sheet (grouped columns, 2 header rows) ────────────
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Monthly Returns'
+    ws.cell(row=2, column=1, value='Month').font = bold
+    colidx = 2
+    group_cols = []   # (label, [(client, col)], {stat: col})
+    for label, ms in ordered_groups:
+        start = colidx
+        client_cols = []
+        for c in ms:
+            ws.cell(row=2, column=colidx, value=c).font = bold
+            client_cols.append((c, colidx))
+            colidx += 1
+        stat_cols = {}
+        for stat in ('High', 'Low', 'Median', 'Spread'):
+            ws.cell(row=2, column=colidx, value=stat).font = bold
+            stat_cols[stat] = colidx
+            colidx += 1
+        end = colidx - 1
+        band = ws.cell(row=1, column=start, value=label)
+        band.font = bold
+        band.alignment = center
+        ws.merge_cells(start_row=1, start_column=start, end_row=1, end_column=end)
+        group_cols.append((label, client_cols, stat_cols))
+    last_col = colidx - 1
+
+    r = 3
+    for dt in mat.index:
+        ws.cell(row=r, column=1, value=dt.strftime('%Y-%m-%d'))
+        for label, client_cols, stat_cols in group_cols:
+            for c, ci in client_cols:
+                v = mat.at[dt, c]
+                ws.cell(row=r, column=ci, value=None if pd.isna(v) else float(v))
+            for stat, ci in stat_cols.items():
+                v = group_stats[label][stat].at[dt]
+                ws.cell(row=r, column=ci, value=None if pd.isna(v) else float(v))
+        r += 1
+    for rr in range(3, r):
+        for cc in range(2, last_col + 1):
+            ws.cell(row=rr, column=cc).number_format = PCT
+    # Bold vertical divider between peer groupings: thick left border on the
+    # first column of each group after the first, down every row.
+    thick_left = Border(left=Side(style='thick'))
+    n_rows = r - 1
+    for gi, (label, client_cols, stat_cols) in enumerate(group_cols):
+        if gi == 0:
+            continue
+        first_col = client_cols[0][1]
+        for rr in range(1, n_rows + 1):
+            ws.cell(row=rr, column=first_col).border = thick_left
+    ws.freeze_panes = 'B3'
+
+    # ── Summary sheet (grouped sections + within-group dispersion) ────────
+    ws2 = wb.create_sheet('Summary')
+    by_client = {row['Client']: row for row in summary_rows}
+    headers = ['Client', 'Benchmark', 'Start', 'End', 'Months', 'Cumulative', 'Annualized']
+    rr = 1
+    for label, ms in ordered_groups:
+        ws2.cell(row=rr, column=1, value=label).font = bold
+        rr += 1
+        for cix, h in enumerate(headers, start=1):
+            ws2.cell(row=rr, column=cix, value=h).font = bold
+        rr += 1
+        cum_vals, ann_vals = [], []
+        for c in ms:
+            s = by_client.get(c)
+            if not s:
+                continue
+            ws2.cell(row=rr, column=1, value=c)
+            ws2.cell(row=rr, column=2, value=s['Benchmark'])
+            ws2.cell(row=rr, column=3, value=s['Start'])
+            ws2.cell(row=rr, column=4, value=s['End'])
+            ws2.cell(row=rr, column=5, value=s['Months'])
+            ws2.cell(row=rr, column=6, value=s['Cumulative']).number_format = PCT
+            ws2.cell(row=rr, column=7, value=s['Annualized']).number_format = PCT
+            cum_vals.append(s['Cumulative'])
+            if s['Annualized'] is not None:
+                ann_vals.append(s['Annualized'])
+            rr += 1
+        # Within-group dispersion of cumulative & annualized returns.
+        stat_defs = [
+            ('High',   lambda xs: max(xs)),
+            ('Low',    lambda xs: min(xs)),
+            ('Median', lambda xs: _stats.median(xs)),
+            ('Spread', lambda xs: max(xs) - min(xs)),
+        ]
+        for name, fn in stat_defs:
+            ws2.cell(row=rr, column=1, value=f'Group {name}').font = bold
+            if cum_vals:
+                ws2.cell(row=rr, column=6, value=fn(cum_vals)).number_format = PCT
+            if ann_vals:
+                ws2.cell(row=rr, column=7, value=fn(ann_vals)).number_format = PCT
+            rr += 1
+        rr += 1  # blank spacer between groups
+    if skipped:
+        ws2.cell(row=rr, column=1, value='Skipped clients (no usable/backfillable managers):').font = bold
+        rr += 1
+        for msg in skipped:
+            ws2.cell(row=rr, column=1, value=msg)
+            rr += 1
+    ws2.freeze_panes = 'A1'
+
+    # ═══ Positioning tabs — style-risk consistency across portfolios ══════
+    # Independent pass over ALL clients (not gated by return history): for each
+    # client, its FactSet style exposures ACTIVE vs benchmark, per region sleeve,
+    # plus portfolio 3F V-G and holdings. Grouped like the return report.
+    from security_risk_engine import (get_sleeve_options, compute_exposures,
+                                      STYLE_FACTORS)
+    from openpyxl.formatting.rule import ColorScaleRule
+    from openpyxl.utils import get_column_letter
+
+    sec = state.get('security_risk_data') or {}
+    risk = state.get('risk_data') or {}
+    available = sec.get('available_benchmarks') or list(risk.get('benchmark_names', []))
+    FACTORS = sec.get('factors') or STYLE_FACTORS
+    have_risk = bool(sec.get('managers'))
+
+    pos, pos_skipped = {}, []
+    for client in state['weights']:
+        try:
+            pview = build_portfolio_view(
+                client, state['weights'][client], state['clone_results'],
+                state['manager_dfs'],
+                universe_clone_results=state.get('universe_clone_results'),
+                placeholder_buckets=state.get('placeholder_buckets') or {})
+        except Exception as e:
+            pos_skipped.append(f"{client}: portfolio build failed ({e})")
+            continue
+        mrows, payload, wsum, vgw = [], [], 0.0, 0.0
+        for m in pview.get('managers', []):
+            if m.get('is_placeholder'):
+                continue
+            w = float(m.get('current_weight') or 0)
+            if w <= 0:
+                continue
+            mrows.append({'name': m.get('matched_name') or m.get('weight_file_name'), 'weight': w})
+            payload.append({'weight_file_name': m.get('weight_file_name'),
+                            'matched_name': m.get('matched_name'),
+                            'current_weight': w, 'proposed_weight': w})
+            wsum += w
+            vgw += w * float(m.get('vg_3factor') or 0)
+        if not payload:
+            pos_skipped.append(f"{client}: no non-placeholder managers with weight")
+            continue
+        bench_str = (state.get('client_benchmarks') or {}).get(client) or ''
+        sleeves, note = [], []
+        if have_risk:
+            opts = get_sleeve_options(bench_str, available)
+            has_em = any(o.get('sleeve') == 'EM' for o in opts)
+            for o in opts:
+                try:
+                    res = compute_exposures(payload, sec, o.get('bench'), o.get('sleeve'), has_em,
+                                            factset_aliases=state.get('factset_aliases') or {},
+                                            clone_results=state.get('clone_results'),
+                                            universe_clone_results=state.get('universe_clone_results'))
+                except Exception:
+                    continue
+                bm = res.get('benchmark') or {}
+                sinfo = res.get('sleeve_info') or {}
+                sleeves.append({
+                    'sleeve': o.get('sleeve'),   # None (Full) | 'US' | 'Non-US' | 'EM'
+                    'label': o.get('label'),
+                    'bench': bm.get('matched_column') or o.get('bench') or '',
+                    'wt': sinfo.get('sleeve_wt'),
+                    'active': res.get('current') or {},
+                    'fallback': bool(bm.get('fallback_absolute')),
+                    'unmatched': res.get('unmatched') or [],
+                })
+            if sleeves:
+                if sleeves[0]['unmatched']:
+                    note.append(f"{len(sleeves[0]['unmatched'])} mgr(s) not in risk file")
+                if sleeves[0]['fallback']:
+                    note.append('benchmark absolute (no match)')
+            else:
+                note.append('no risk-file coverage')
+        else:
+            note.append('Security-Level Risk file not loaded')
+        pos[client] = {'benchmark': bench_str,
+                       'vg3': (vgw / wsum) if wsum else None,
+                       'sleeves': sleeves, 'managers': mrows, 'note': '; '.join(note)}
+
+    # Group positioning clients with the same GROUPS map.
+    ppresent = set(pos)
+    pordered, pused = [], set()
+    for label, members in GROUPS:
+        ms = [m for m in members if m in ppresent]
+        if ms:
+            pordered.append((label, ms))
+            pused.update(ms)
+    pleft = [c for c in sorted(ppresent) if c not in pused]
+    if pleft:
+        pordered.append(('Other', pleft))
+
+    # ── Sheet "Positioning" ───────────────────────────────────────────────
+    wsP = wb.create_sheet('Positioning')
+    base_cols = ['Client', 'Level', 'Benchmark', 'Wt%', '3F V-G']
+    header = base_cols + list(FACTORS)
+    fac0 = len(base_cols) + 1  # 1-indexed first factor column
+    for cix, h in enumerate(header, start=1):
+        c = wsP.cell(row=1, column=cix, value=h)
+        c.font = bold
+        if cix >= 4:
+            c.alignment = center
+
+    def _pnum(row, col, v, fmt='0.00'):
+        cell = wsP.cell(row=row, column=col)
+        cell.value = None if v is None else float(v)
+        cell.number_format = fmt
+        return cell
+
+    def _heatmap(col_start_row, col_end_row):
+        """3-color scale (red↔white↔green centered at 0) per factor column over a row range."""
+        if col_end_row < col_start_row:
+            return
+        for fi in range(len(FACTORS)):
+            col = get_column_letter(fac0 + fi)
+            wsP.conditional_formatting.add(
+                f'{col}{col_start_row}:{col}{col_end_row}',
+                ColorScaleRule(start_type='num', start_value=-0.5, start_color='F8696B',
+                               mid_type='num', mid_value=0, mid_color='FFFFFF',
+                               end_type='num', end_value=0.5, end_color='63BE7B'))
+
+    def _sleeve_of(client, sc):
+        """Return the client's sleeve dict whose constant == sc, or None."""
+        for s in pos[client]['sleeves']:
+            if s.get('sleeve') == sc:
+                return s
+        return None
+
+    SLEEVE_ORDER = ['US', 'Non-US', 'EM']
+    rr = 2
+    for label, ms in pordered:
+        # Group banner
+        bc = wsP.cell(row=rr, column=1, value=label)
+        bc.font = bold; bc.alignment = center
+        wsP.merge_cells(start_row=rr, start_column=1, end_row=rr, end_column=len(header))
+        rr += 1
+
+        # ── Full-portfolio cluster: one row per client (all adjacent) ──────
+        full_start = rr
+        for client in ms:
+            p = pos[client]
+            full = _sleeve_of(client, None)  # the Full-Portfolio sleeve (constant None)
+            wsP.cell(row=rr, column=1, value=client)
+            wsP.cell(row=rr, column=2, value='Full Portfolio')
+            wsP.cell(row=rr, column=3, value=p['benchmark'])
+            _pnum(rr, 5, p['vg3'], '0.00%')
+            if full:
+                _pnum(rr, 4, full['wt'], '0.0%')
+                for fi, f in enumerate(FACTORS):
+                    _pnum(rr, fac0 + fi, full['active'].get(f))
+            else:
+                wsP.cell(row=rr, column=fac0,
+                         value=(p['note'] or 'No risk coverage')).font = Font(italic=True, size=9)
+            rr += 1
+        _heatmap(full_start, rr - 1)
+
+        # ── Regional clusters: one per sleeve constant, clients stacked ────
+        for sc in SLEEVE_ORDER:
+            members_with = [c for c in ms if _sleeve_of(c, sc) is not None]
+            if not members_with:
+                continue
+            rr += 1  # blank row before each cluster
+            first = _sleeve_of(members_with[0], sc)
+            sub = wsP.cell(row=rr, column=2, value=f"{first['label']}")
+            sub.font = bold
+            rr += 1
+            cl_start = rr
+            for client in members_with:
+                s = _sleeve_of(client, sc)
+                wsP.cell(row=rr, column=1, value=client)
+                wsP.cell(row=rr, column=2, value=s['label'])
+                wsP.cell(row=rr, column=3, value=s['bench'])
+                _pnum(rr, 4, s['wt'], '0.0%')
+                for fi, f in enumerate(FACTORS):
+                    _pnum(rr, fac0 + fi, s['active'].get(f))
+                rr += 1
+            _heatmap(cl_start, rr - 1)
+
+        rr += 1  # spacer between groups
+    wsP.freeze_panes = 'F2'
+
+    # Column widths so Level / Benchmark / factor headers are fully visible.
+    for col_letter, w in [('A', 18), ('B', 34), ('C', 26), ('D', 7), ('E', 9)]:
+        wsP.column_dimensions[col_letter].width = w
+    for fi in range(len(FACTORS)):
+        wsP.column_dimensions[get_column_letter(fac0 + fi)].width = 13.5
+
+    # ── Sheet "Holdings" ──────────────────────────────────────────────────
+    wsH = wb.create_sheet('Holdings')
+    hcols = ['Client', 'Benchmark', '3F V-G', 'Manager', 'Current Wt']
+    for cix, h in enumerate(hcols, start=1):
+        wsH.cell(row=1, column=cix, value=h).font = bold
+    rr = 2
+    for label, ms in pordered:
+        bc = wsH.cell(row=rr, column=1, value=label)
+        bc.font = bold; bc.alignment = center
+        wsH.merge_cells(start_row=rr, start_column=1, end_row=rr, end_column=len(hcols))
+        rr += 1
+        for client in ms:
+            p = pos[client]
+            wsH.cell(row=rr, column=1, value=client).font = bold
+            wsH.cell(row=rr, column=2, value=p['benchmark'])
+            if p['vg3'] is not None:
+                cc = wsH.cell(row=rr, column=3, value=float(p['vg3'])); cc.number_format = '0.00%'
+            rr += 1
+            for mrow in p['managers']:
+                wsH.cell(row=rr, column=4, value=mrow['name'])
+                cc = wsH.cell(row=rr, column=5, value=float(mrow['weight'])); cc.number_format = '0.00%'
+                rr += 1
+        rr += 1
+    if pos_skipped:
+        wsH.cell(row=rr, column=1, value='Skipped clients:').font = bold
+        rr += 1
+        for msg in pos_skipped:
+            wsH.cell(row=rr, column=1, value=msg)
+            rr += 1
+    for col_letter, w in [('A', 16), ('B', 24), ('C', 9), ('D', 30), ('E', 11)]:
+        wsH.column_dimensions[col_letter].width = w
+    wsH.freeze_panes = 'A2'
+
+    buf = _io.BytesIO()
+    wb.save(buf)
+    data = buf.getvalue()
+    fname = f"Dispersion_Report_{date.today().isoformat()}.xlsx"
+    resp = Response(
+        data,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+    resp.headers['Content-Disposition'] = f'attachment; filename="{fname}"'
+    resp.headers['Content-Length'] = str(len(data))
+    return resp
+
+
+@app.route('/export_returns_xlsx')
+def export_returns_xlsx():
+    """Excel workbook of buy-list manager monthly returns (Tab 1) and their
+    full-factor clone returns (Tab 2), grouped by sub-asset class.
+
+    Query: ?sections=EAFE,ACWI,ISC,EM,US,USSC  (peer-tab codes; default = all
+    present). Both sheets are built from the SAME section/manager/spacer column
+    plan and the SAME union date index, so Tab 2 lines up column-for-column and
+    row-for-row with Tab 1 for easy manager-vs-clone comparison.
+    """
+    import io as _io
+    from flask import Response
+    from datetime import date, datetime
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    cr = state.get('clone_results') or {}
+    if not cr:
+        return jsonify({'error': 'Run the clone engine first.'}), 400
+
+    # Optional filter: only "funded" managers — those held (current_weight > 0)
+    # in at least one client portfolio. Computed the same way the dispersion
+    # export identifies held managers (build_portfolio_view per client).
+    funded_only = (request.args.get('funded') or '').strip().lower() in ('1', 'true', 'yes')
+    funded_keys = None   # set of (tab, matched_name)
+    if funded_only:
+        from data_loader import build_portfolio_view
+        funded_keys = set()
+        for client in (state.get('weights') or {}):
+            try:
+                view = build_portfolio_view(
+                    client, state['weights'][client], cr, state.get('manager_dfs'),
+                    universe_clone_results=state.get('universe_clone_results'),
+                    placeholder_buckets=state.get('placeholder_buckets') or {})
+            except Exception:
+                continue
+            for m in view.get('managers', []):
+                if m.get('is_placeholder'):
+                    continue
+                if float(m.get('current_weight') or 0) > 0:
+                    funded_keys.add((m.get('tab'), m.get('matched_name')))
+
+    # Fixed display order + labels for the sub-asset-class sections.
+    SECTION_ORDER = [('EAFE', 'EAFE'), ('ACWI', 'Global'), ('ISC', 'ISC'),
+                     ('EM', 'EM'), ('US', 'US'), ('USSC', 'US SC')]
+    req = (request.args.get('sections') or '').strip()
+    requested = {s.strip().upper() for s in req.split(',') if s.strip()} if req else None
+
+    # Ordered section list: only tabs that exist with managers AND were requested
+    # (or all, when no ?sections= is given). When funded_only, keep just held mgrs.
+    sections = []   # (tab, label, [manager names])
+    for tab, label in SECTION_ORDER:
+        mgrs = cr.get(tab) or {}
+        if not mgrs:
+            continue
+        if requested is not None and tab.upper() not in requested:
+            continue
+        names = sorted(mgrs.keys())
+        if funded_keys is not None:
+            names = [n for n in names if (tab, n) in funded_keys]
+        if not names:
+            continue
+        sections.append((tab, label, names))
+    if not sections:
+        msg = ('No funded managers found for the selected sections.' if funded_only
+               else 'No managers found for the selected sections.')
+        return jsonify({'error': msg}), 400
+
+    # Union date index across all selected managers, MOST RECENT FIRST.
+    # 'YYYY-MM-DD' zero-padded strings sort lexicographically = chronologically.
+    all_dates = set()
+    for tab, label, names in sections:
+        for nm in names:
+            all_dates.update(cr[tab][nm].get('dates') or [])
+    dates_sorted = sorted(all_dates, reverse=True)
+
+    def value_map(rec, key):
+        return {d: v for d, v in zip(rec.get('dates') or [], rec.get(key) or [])}
+
+    PCT = '0.00%'
+    bold = Font(bold=True)
+    center = Alignment(horizontal='center')
+    band_fill = PatternFill('solid', fgColor='1F4E79')
+    band_font = Font(bold=True, color='FFFFFF')
+    thick_left = Border(left=Side(style='thick'))
+
+    def build_sheet(ws, series_key):
+        ws.cell(row=2, column=1, value='Date').font = bold
+        ws.column_dimensions['A'].width = 12
+        col = 2
+        group_cols = []   # per section: (start, end, [(name, col)])
+        for gi, (tab, label, names) in enumerate(sections):
+            if gi > 0:
+                ws.column_dimensions[get_column_letter(col)].width = 3  # spacer
+                col += 1
+            start = col
+            mgr_cols = []
+            for nm in names:
+                c = ws.cell(row=2, column=col, value=nm)
+                c.font = bold; c.alignment = center
+                ws.column_dimensions[get_column_letter(col)].width = 14
+                mgr_cols.append((nm, col))
+                col += 1
+            end = col - 1
+            band = ws.cell(row=1, column=start, value=label)
+            band.font = band_font; band.alignment = center; band.fill = band_fill
+            if end > start:
+                ws.merge_cells(start_row=1, start_column=start, end_row=1, end_column=end)
+                for cc in range(start, end + 1):
+                    ws.cell(row=1, column=cc).fill = band_fill
+            group_cols.append((start, end, mgr_cols))
+
+        # date -> value maps, keyed by (tab, manager)
+        maps = {(tab, nm): value_map(cr[tab][nm], series_key)
+                for tab, label, names in sections for nm in names}
+        flat = [(tab, nm, c)
+                for (tab, label, names), (s, e, mc) in zip(sections, group_cols)
+                for (nm, c) in mc]
+
+        r = 3
+        for d in dates_sorted:
+            dc = ws.cell(row=r, column=1, value=datetime.strptime(d, '%Y-%m-%d'))
+            dc.number_format = 'yyyy-mm-dd'
+            for tab, nm, c in flat:
+                v = maps[(tab, nm)].get(d)
+                cell = ws.cell(row=r, column=c, value=None if v is None else float(v))
+                cell.number_format = PCT
+            r += 1
+
+        # Thick vertical divider before each section after the first.
+        for gi, (start, end, mgr_cols) in enumerate(group_cols):
+            if gi == 0:
+                continue
+            fc = mgr_cols[0][1]
+            for rr in range(1, r):
+                ws.cell(row=rr, column=fc).border = thick_left
+        ws.freeze_panes = 'B3'
+
+    wb = Workbook()
+    ws1 = wb.active
+    ws1.title = 'Manager Returns'
+    build_sheet(ws1, 'manager_returns')
+    build_sheet(wb.create_sheet('Clone Returns'), 'static_clone_full')
+
+    buf = _io.BytesIO()
+    wb.save(buf)
+    data = buf.getvalue()
+    fname = f"Returns_Download_{date.today().isoformat()}.xlsx"
+    resp = Response(
+        data,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+    resp.headers['Content-Disposition'] = f'attachment; filename="{fname}"'
+    resp.headers['Content-Length'] = str(len(data))
+    return resp
 
 
 if __name__ == '__main__':

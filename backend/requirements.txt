@@ -10,6 +10,8 @@ osqp>=0.6.0
 # PowerPoint export (/export_portfolio_pptx)
 python-pptx>=0.6.21
 lxml>=4.9.0
+# Editable Word rebalance memo (/export_portfolio_docx)
+python-docx>=1.1.0
 # AWS deployment dependencies (optional — only used when S3_BUCKET env var is set)
 boto3>=1.28.0
 flask-cors>=4.0.0

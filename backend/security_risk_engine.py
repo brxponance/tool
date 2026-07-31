@@ -384,6 +384,9 @@ def compute_exposures(
     benchmark_name: Optional[str],
     sleeve: Optional[str] = None,
     has_em_sleeve: Optional[bool] = None,
+    factset_aliases: Optional[dict] = None,
+    clone_results: Optional[dict] = None,
+    universe_clone_results: Optional[dict] = None,
 ) -> dict:
     """Compute current + proposed active style exposures.
 
@@ -405,6 +408,16 @@ def compute_exposures(
         has_em_sleeve = (sleeve == SLEEVE_EM)
     has_em     = has_em_sleeve
     sec_names  = list(mgr_data.keys())
+
+    # Map crosswalk: narrow each held manager to its own security-risk rows (via
+    # the authoritative FactSet-name Map) before _match_mgr's token tiebreak.
+    # Empty without a Map, so matching is unchanged for legacy workbooks.
+    _by_mgr = {}
+    _dl_norm = None
+    if factset_aliases:
+        from data_loader import factset_candidates_by_manager, _norm_name as _dl_norm
+        _by_mgr = factset_candidates_by_manager(
+            sec_names, factset_aliases, clone_results, universe_clone_results)
 
     def compute_side(weight_key: str):
         totals      = {f: 0.0 for f in factors}
@@ -433,7 +446,13 @@ def compute_exposures(
             match_input = (m.get('weight_file_name')
                            or m.get('matched_name')
                            or m.get('name', ''))
-            mgr_key = _match_mgr(match_input, sec_names)
+            pool = sec_names
+            if _by_mgr:
+                subset = (_by_mgr.get(_dl_norm(m.get('matched_name')))
+                          or _by_mgr.get(_dl_norm(match_input)))
+                if subset:
+                    pool = subset
+            mgr_key = _match_mgr(match_input, pool)
             if mgr_key is None:
                 unmatched.append(m.get('matched_name') or m.get('name', '?'))
                 continue

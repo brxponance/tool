@@ -11,6 +11,7 @@ import { OptimizerPanel } from "@/features/optimize/components/optimizer-panel";
 import { AddManagerModal } from "../components/add-manager-modal";
 import { ClientManageModal } from "../components/client-manage-modal";
 import { ClientRedemptionSection } from "../components/client-redemption-section";
+import { MemoExportButton } from "../components/memo-export-button";
 import { PortfolioAnalyticsSections } from "../components/portfolio-analytics-sections";
 import { PortfolioTable } from "../components/portfolio-table";
 import { PresetBar } from "../components/preset-bar";
@@ -160,6 +161,11 @@ export function PortfolioRoute() {
         >
           + Add Manager
         </button>
+        <MemoExportButton
+          client={selectedClient}
+          managers={managers}
+          disabled={loadingPortfolio}
+        />
         {loadingPortfolio ? (
           <span style={{ color: "var(--text3)", fontFamily: "var(--mono)", fontSize: 10 }}>
             Refreshing...

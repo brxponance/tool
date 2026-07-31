@@ -11,6 +11,7 @@ import {
   ReportQtrExcess,
 } from "../components/report-page3";
 import { PptxExportButton } from "../components/pptx-export-button";
+import { ReportExportCards } from "../components/report-export-cards";
 import { useReportScreen } from "../hooks/use-report-screen";
 import { buildReportView } from "../lib/build-report-view";
 
@@ -57,8 +58,8 @@ export function ReportRoute() {
             <div className="rpt-subtitle">
               Select a client to load real data. Sections without uploaded
               source files fall back to demo content. Page-3 &ldquo;Actual&rdquo; sections
-              are omitted — they require a client-track-record file the tool
-              doesn&apos;t accept yet (only &ldquo;Backtested&rdquo; is shown).
+              need actual client track records — add a &ldquo;Client&rdquo; sheet to the
+              manager-returns workbook; without one, only &ldquo;Backtested&rdquo; is shown.
             </div>
           </div>
           <div className="rpt-actions">
@@ -96,6 +97,8 @@ export function ReportRoute() {
           </div>
         </div>
       </div>
+
+      <ReportExportCards client={selectedClient} />
 
       {loading && (
         <div
