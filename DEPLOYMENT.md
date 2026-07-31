@@ -6,6 +6,56 @@
 
 ---
 
+## 0. How to deploy (start here — no AWS knowledge needed)
+
+**The app is live at:** http://pc-tool-alb-149658130.us-east-1.elb.amazonaws.com
+
+### Deploying: pick one
+
+**Option A — click a button (no git, no terminal)**
+
+1. Go to **https://github.com/brxponance/tool/actions**
+2. Click **"Build and Deploy to ECS"** in the left sidebar
+3. Click **"Run workflow"** → green **"Run workflow"** button
+4. Wait ~6–8 minutes. Green tick = live.
+
+**Option B — push code**
+
+```bash
+git add -A && git commit -m "your change" && git push origin main
+```
+
+Deploys automatically. Same pipeline, same result.
+
+That's the whole process. **There are no manual steps afterwards** — no AWS
+console, no cache clearing, no "Reload Inputs" click. The app re-reads its input
+files by itself when a deploy changes how they're parsed (see §16).
+
+### If the green tick doesn't appear
+
+The workflow diagnoses itself. Open the failed run and expand the
+**"Explain the failure"** step — it prints the deployment state, the recent ECS
+events, why the container stopped (with exit codes), and the last 80 log lines,
+plus the likely cause. You don't need AWS access to read it.
+
+There's also a **"Preflight"** step that runs first and fails in ~10 seconds if
+the database secret is missing or if password rotation has been switched back on
+(see §5) — so you find out before waiting through a build.
+
+### What a deploy does and doesn't touch
+
+| Deploying **does** | Deploying **does not** |
+|---|---|
+| Ship new code (both containers) | Delete or change uploaded data files |
+| Re-read input files if the parser changed | Re-run the 5–15 min universe clone |
+| Restart the app (~1 min of the old version still serving) | Change client rosters or saved portfolios |
+
+> **One caveat for a brand-new environment.** Deploying ships *code*, not *data*.
+> A fresh AWS account still needs the source workbooks uploaded once via the
+> Setup tab, and the first universe clone takes 5–15 minutes. See §7 and §15.
+
+---
+
 ## 1. What this app is
 
 A portfolio-analysis tool with two parts:
@@ -88,6 +138,20 @@ No CloudShell, no manual Docker builds. A deploy takes ~5–8 minutes.
 > itself change. You can also run it manually: Actions tab → "Build and Deploy
 > to ECS" → "Run workflow".
 
+The workflow has two steps that exist purely to keep this diagnosable by someone
+without AWS access:
+
+- **Preflight** (runs first, ~10s) — verifies the `pc-tool/database-url` secret
+  exists and parses, and warns if RDS-managed password rotation has been
+  re-enabled. Prints the DSN with the password masked. Fails fast rather than
+  wasting a build.
+- **Explain the failure** (`if: failure()`) — on any failure, dumps the
+  deployment state, recent ECS events, stopped-task exit codes and the last 80
+  log lines into the job output, followed by the likely cause. This exists
+  because the stabilization waiter's only error message is
+  `Waiter ServicesStable failed: Max attempts exceeded`, which is useless on
+  its own.
+
 ---
 
 ## 5. Credentials & secrets — where everything lives
@@ -96,20 +160,61 @@ No CloudShell, no manual Docker builds. A deploy takes ~5–8 minutes.
 
 | Secret | Where it lives | Purpose |
 |---|---|---|
-| RDS master password | AWS Secrets Manager: `rds!db-220cca1f-...` | DB master (`postgres`) password |
-| Full `DATABASE_URL` | AWS Secrets Manager: `pc-tool/database-url` | Injected into the backend container at runtime |
+| Full `DATABASE_URL` (incl. password) | AWS Secrets Manager: `pc-tool/database-url` | Injected into the backend container at runtime. **The only copy of the DB password.** |
 | GitHub → AWS deploy auth | GitHub OIDC + IAM role `pc-tool-gh-deploy` | Lets Actions push to ECR + redeploy ECS (no long-lived keys) |
 | `AWS_DEPLOY_ROLE_ARN` | GitHub repo secret | `arn:aws:iam::872709212513:role/pc-tool-gh-deploy` |
 
-Retrieve the DB password if ever needed:
+Read the current DSN (password included — treat the output as a secret):
 ```bash
-aws secretsmanager get-secret-value \
-  --secret-id 'arn:aws:secretsmanager:us-east-1:872709212513:secret:rds!db-220cca1f-3c4a-483d-a491-9db3aeca5ad0-SuoyWk' \
+aws secretsmanager get-secret-value --secret-id pc-tool/database-url \
   --region us-east-1 --query SecretString --output text
 ```
 
-`DATABASE_URL` format (password is URL-encoded):
+`DATABASE_URL` format (password **must** be URL-encoded):
 `postgresql://postgres:<url-encoded-pw>@xponance-db.c6jsaqkqwyk4.us-east-1.rds.amazonaws.com:5432/pc_tool`
+
+### Database password (read this before changing it)
+
+**Password rotation is deliberately OFF** (disabled 2026-07-31). The master
+password is static and lives in exactly one place: `pc-tool/database-url`.
+
+Why it matters: RDS used to manage the master password in its own
+`rds!db-220cca1f-…` secret and **rotate it every 7 days**. `pc-tool/database-url`
+was never updated to match, so the moment it first rotated the app could no
+longer authenticate. Nothing broke immediately — a *running* container only needs
+the password at startup — so it stayed invisible for ~30 hours until the next
+deploy forced a new task, which then crashlooped: 30 connection retries, `exit 1`,
+150 failed tasks, and `aws ecs wait services-stable` timing out with the unhelpful
+`Max attempts exceeded`.
+
+Turning management off also **deleted** that `rds!…` secret. There is no second
+copy of the password anywhere.
+
+**To change the password**, do both steps or the app will break:
+
+```bash
+# 1. Set it on the instance
+aws rds modify-db-instance --db-instance-identifier xponance-db \
+  --master-user-password 'NEW_PASSWORD' --apply-immediately --region us-east-1
+
+# 2. Update the DSN to match — URL-ENCODE the password.
+#    Characters like [ ] < > @ : / ? # % $ ( ) MUST be percent-encoded.
+#    A raw '[' makes URL parsers read the password as an IPv6 host.
+python -c "from urllib.parse import quote; print(quote('NEW_PASSWORD', safe=''))"
+
+aws secretsmanager put-secret-value --secret-id pc-tool/database-url \
+  --secret-string 'postgresql://postgres:<ENCODED>@xponance-db.c6jsaqkqwyk4.us-east-1.rds.amazonaws.com:5432/pc_tool' \
+  --region us-east-1
+
+# 3. Redeploy so tasks pick up the new secret
+aws ecs update-service --cluster pc-tool-cluster --service pc-tool \
+  --force-new-deployment --region us-east-1
+```
+
+> **Do not re-enable "Manage master credentials in AWS Secrets Manager"** on the
+> RDS instance unless you also make the app read that secret directly. It will
+> rotate the password and silently break the next deploy. The workflow's
+> Preflight step warns if someone turns it back on.
 
 ---
 
@@ -420,6 +525,50 @@ The universe clone runs the clone math for **1,634 managers** (ACWI) — minutes
 CPU. Results are cached in the pickle; a fresh task pulls the cache and skips the
 clone. If the cache lacks universe results, `_auto_run_universe_on_startup` re-runs
 it. To avoid that on the server, keep a computed `results.pkl` in `state/`.
+
+---
+
+## 16. Automatic input refresh (why there's no "Reload Inputs" step)
+
+The cache stores *parsed* input files. So when a deploy changes **how** a file is
+parsed, the cached data is stale even though the file itself hasn't changed — and
+the app would keep serving the old interpretation until someone clicked "Reload
+Inputs" in the UI. That manual step is now gone.
+
+**How it works.** `backend/app.py` carries a constant:
+
+```python
+INPUT_PARSER_VERSION = 2
+```
+
+`save_cache()` stamps it into the pickle. On boot `load_cache()` compares the
+stamp; if it differs, the app re-reads the weights / risk / exposures /
+qualitative files **once, on a background thread**, then re-saves the cache with
+the new stamp. Subsequent boots see a matching stamp and do nothing.
+
+**If you change how an input file is parsed, bump `INPUT_PARSER_VERSION`.** That
+one-line change is what makes the refresh happen automatically on the next deploy.
+Current history:
+
+| Version | What changed |
+|---|---|
+| 1 | Pre-versioning caches (no stamp) |
+| 2 | Exposures parse gained `Region`/`Country` as categoricals and a derived `Market Development`; weights parse gained client total AUM |
+
+**Why a background thread, not inline at startup.** Re-reading the FactSet
+exposures workbook is a heavy `openpyxl` parse that holds the GIL. Doing it inline
+would starve the gunicorn threads answering the ALB health check on a 0.5 vCPU
+task — the exact failure mode in §14 that caused the earlier restart loops. Same
+reasoning as `_warm_universe_dfs`. Failures are logged and swallowed: a stale
+cache still serves, and Reload Inputs still works by hand.
+
+Log lines to look for on boot:
+
+```
+cache written by parser v1, current is v2 — inputs will refresh in background.
+[inputs] cache predates the current parser — refreshing…
+[inputs] refreshed: {'weights': 'ok', 'risk': 'ok', 'exposures': 'ok', ...}
+```
 
 
 #tool-url

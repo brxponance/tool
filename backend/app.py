@@ -45,6 +45,19 @@ if _frontend_url:
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(os.path.dirname(app.config['CACHE_FILE']), exist_ok=True)
 
+# Bump this whenever a change to how INPUT FILES are parsed means a cache
+# written by older code is no longer trustworthy — e.g. a new column becomes
+# meaningful, or a derived field is added at parse time.
+#
+# On boot, load_cache compares this to the stamp in the pickle. If they differ,
+# the app re-reads its input files ONCE, in the background, and re-saves — so a
+# deploy needs no manual "Reload Inputs" click.
+#
+#   1 = pre-versioning caches (no stamp)
+#   2 = exposures parse gained Region/Country as categoricals + derived
+#       'Market Development'; weights parse gained client total AUM
+INPUT_PARSER_VERSION = 2
+
 state = {
     'clone_results': None, 'manager_dfs': None, 'weights': None,
     'client_benchmarks': {},
@@ -110,6 +123,8 @@ def save_cache():
                 'placeholder_buckets':     state.get('placeholder_buckets') or {},
                 'qualitative_data':        state.get('qualitative_data'),
                 'mc_universe_cache':       state.get('mc_universe_cache') or {},
+                # Which parser wrote this cache — see INPUT_PARSER_VERSION.
+                'input_parser_version':    INPUT_PARSER_VERSION,
             }, f)
         print("Cache saved.")
         # Also push the cache to S3 so it survives container/instance
@@ -401,6 +416,14 @@ def load_cache():
         missing = [k for k in (cached_files or {}) if k not in resolved]
         tail = f" (dropped unresolved paths: {missing})" if missing else ""
         print(f"Cache loaded — {n_mgrs} managers.{tail}")
+        # Was this cache written by an older parser? If so the input files need
+        # re-reading (see INPUT_PARSER_VERSION). Recorded here, acted on after
+        # startup so the health check isn't blocked by the re-parse.
+        cached_ver = data.get('input_parser_version') or 1
+        if cached_ver != INPUT_PARSER_VERSION:
+            state['inputs_stale'] = True
+            print(f"  cache written by parser v{cached_ver}, current is "
+                  f"v{INPUT_PARSER_VERSION} — inputs will refresh in background.")
         # Roll any non-style residual into Core so buckets sum to 100%
         absorb_regional_into_core(state.get('clone_results'))
         absorb_regional_into_core(state.get('universe_clone_results'))
@@ -818,6 +841,12 @@ def reload_inputs():
 
     Returns a status dict indicating which inputs were refreshed.
     """
+    return jsonify(_reload_inputs_core())
+
+
+def _reload_inputs_core():
+    """Core of /reload_inputs — returns a plain dict rather than a Response, so
+    the startup auto-refresh (see _auto_reload_stale_inputs) can reuse it."""
     status = {'weights': 'skipped', 'risk': 'skipped', 'exposures': 'skipped',
               'qualitative': 'skipped'}
     errors = {}
@@ -867,12 +896,12 @@ def reload_inputs():
             errors['qualitative'] = str(e)
 
     save_cache()
-    return jsonify({
+    return {
         'status':     'ok',
         'refreshed':  status,
         'errors':     errors,
         'clients':    list((state.get('weights') or {}).keys()),
-    })
+    }
 
 @app.route('/clear_cache', methods=['POST'])
 def clear_cache():
@@ -4717,9 +4746,40 @@ def _auto_run_universe_on_startup():
         print(f"  universe auto-run skipped due to error: {e}")
 
 
+def _auto_reload_stale_inputs():
+    """Re-read the input files once, in the background, when the cache on disk
+    was written by an older parser (see INPUT_PARSER_VERSION).
+
+    This is what removes the manual "Reload Inputs" click after a deploy that
+    changes how a file is parsed. It runs on a worker thread for the same reason
+    the universe warm does: re-reading the FactSet exposures workbook is a heavy
+    openpyxl parse that holds the GIL, and blocking startup with it would starve
+    the ALB health check on a 0.5 vCPU task (see DEPLOYMENT.md §14).
+
+    Failures are swallowed and logged — a stale cache still serves; the user can
+    always hit Reload Inputs by hand.
+    """
+    if not state.get('inputs_stale'):
+        return
+
+    def worker():
+        try:
+            print("[inputs] cache predates the current parser — refreshing…", flush=True)
+            result = _reload_inputs_core()
+            state['inputs_stale'] = False
+            print(f"[inputs] refreshed: {result.get('refreshed')}"
+                  f"{' errors=' + str(result.get('errors')) if result.get('errors') else ''}",
+                  flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"[inputs] auto-refresh failed (cache left as-is): {e}", flush=True)
+
+    threading.Thread(target=worker, daemon=True, name='inputs-auto-refresh').start()
+
+
 # Fire the auto-run at import time so it happens under both `python run.py`
 # (which does `from app import app`) and `python app.py`.
 _auto_run_universe_on_startup()
+_auto_reload_stale_inputs()
 
 # NOTE: do NOT warm the universe returns at import time.
 #

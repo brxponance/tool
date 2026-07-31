@@ -38,6 +38,46 @@ jobs:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      # ── Fail fast, before spending 8 minutes on a build ─────────────────
+      # The runner can't reach RDS (it's in a private subnet), so this can't
+      # test the password directly. It checks what it CAN: that the DSN secret
+      # exists and points at the right database, and that RDS-managed rotation
+      # hasn't been switched back on — rotation silently invalidates the DSN
+      # every 7 days and is what broke this pipeline before.
+      - name: Preflight
+        run: |
+          set -e
+          echo "Checking the database secret…"
+          DSN=$(aws secretsmanager get-secret-value \
+                  --secret-id pc-tool/database-url \
+                  --region "$AWS_REGION" \
+                  --query SecretString --output text 2>/dev/null || echo "")
+          if [ -z "$DSN" ]; then
+            echo "::error::Secret pc-tool/database-url is missing or unreadable."
+            echo "See DEPLOYMENT.md § Database password."
+            exit 1
+          fi
+          # Print only the shape — never the password.
+          echo "$DSN" | sed -E 's#(//[^:]+:)[^@]*(@)#\1***\2#'
+          echo "$DSN" | grep -q '^postgres' \
+            || { echo "::error::DSN does not start with postgres://"; exit 1; }
+          echo "$DSN" | grep -q 'rds.amazonaws.com' \
+            || echo "::warning::DSN host is not an RDS endpoint — is this intentional?"
+
+          echo "Checking RDS password rotation…"
+          MANAGED=$(aws rds describe-db-instances \
+                      --db-instance-identifier xponance-db --region "$AWS_REGION" \
+                      --query 'DBInstances[0].MasterUserSecret.SecretArn' \
+                      --output text 2>/dev/null || echo "None")
+          if [ "$MANAGED" != "None" ] && [ -n "$MANAGED" ]; then
+            echo "::warning::RDS-managed master password is ENABLED, which rotates"
+            echo "the password on a schedule and will break this deploy when it does."
+            echo "Secret: $MANAGED"
+            echo "Turn it off, or keep pc-tool/database-url in sync. See DEPLOYMENT.md."
+          else
+            echo "OK — password is static, no rotation to break the deploy."
+          fi
+
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
@@ -61,9 +101,71 @@ jobs:
             --query 'service.serviceName' --output text
 
       - name: Wait for service to stabilize
+        id: wait
         run: |
           aws ecs wait services-stable \
             --cluster "$CLUSTER" \
             --services "$SERVICE" \
             --region "$AWS_REGION"
           echo "Deployment stable."
+
+      # ── Why this exists ────────────────────────────────────────────────
+      # When the waiter above fails it only ever says "Max attempts exceeded",
+      # which tells you nothing about the cause. Digging it out by hand means
+      # ECS events + stopped-task exit codes + CloudWatch logs. This step does
+      # that automatically so the reason is visible right here in the job log —
+      # no AWS console needed, no expertise required.
+      - name: Explain the failure
+        if: failure()
+        run: |
+          echo "::group::Deployment state"
+          aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
+            --region "$AWS_REGION" \
+            --query 'services[0].deployments[].{status:status,rollout:rolloutState,running:runningCount,failed:failedTasks,reason:rolloutStateReason}' \
+            --output table || true
+          echo "::endgroup::"
+
+          echo "::group::Recent service events"
+          aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
+            --region "$AWS_REGION" \
+            --query 'services[0].events[:8].[createdAt,message]' --output text || true
+          echo "::endgroup::"
+
+          echo "::group::Why the last tasks stopped (exit codes)"
+          STOPPED=$(aws ecs list-tasks --cluster "$CLUSTER" --service-name "$SERVICE" \
+            --desired-status STOPPED --region "$AWS_REGION" \
+            --query 'taskArns[:3]' --output text || true)
+          if [ -n "$STOPPED" ]; then
+            aws ecs describe-tasks --cluster "$CLUSTER" --tasks $STOPPED \
+              --region "$AWS_REGION" \
+              --query 'tasks[].{stopped:stoppedReason,code:stopCode,containers:containers[].{name:name,exit:exitCode,reason:reason}}' \
+              --output json || true
+          else
+            echo "No stopped tasks found."
+          fi
+          echo "::endgroup::"
+
+          echo "::group::Last 80 log lines"
+          aws logs tail /ecs/pc-tool --region "$AWS_REGION" --since 15m 2>/dev/null \
+            | tail -80 || echo "Could not read /ecs/pc-tool."
+          echo "::endgroup::"
+
+          cat <<'HINT'
+          ────────────────────────────────────────────────────────────────
+          Common causes, in the order they actually happen:
+
+          1. "password authentication failed for user postgres"
+             The DSN in Secrets Manager (pc-tool/database-url) no longer
+             matches the RDS master password. The container retries 30× then
+             exits 1, so the service never stabilizes.
+             Fix: DEPLOYMENT.md § "Database password".
+
+          2. "Task failed ELB health checks"
+             The container is slow to boot or pegging the 0.5 vCPU. Check the
+             log group above for a traceback.
+             Fix: DEPLOYMENT.md §14 (health check + grace period).
+
+          3. Image pull / ECR auth errors
+             Re-run the workflow; usually transient.
+          ────────────────────────────────────────────────────────────────
+          HINT
