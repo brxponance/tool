@@ -50,7 +50,15 @@ export function ReportRoute() {
   const reportErr = report?.error;
 
   return (
-    <div id="page-reports">
+    // The two data-* attributes are the render-settled signal the multi-client
+    // PDF export polls: it switches client, waits for `client` to match and
+    // `loading` to clear, then captures. Reading the DOM avoids stale closures
+    // inside the export's async loop.
+    <div
+      id="page-reports"
+      data-report-client={selectedClient ?? ""}
+      data-report-loading={loading ? "1" : "0"}
+    >
       <div className="rpt-controls">
         <div className="rpt-title-row">
           <div>
@@ -98,7 +106,11 @@ export function ReportRoute() {
         </div>
       </div>
 
-      <ReportExportCards client={selectedClient} />
+      <ReportExportCards
+        client={selectedClient}
+        clients={clients}
+        onSelectClient={selectClient}
+      />
 
       {loading && (
         <div

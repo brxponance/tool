@@ -10,7 +10,8 @@ from werkzeug.utils import secure_filename
 from data_loader import (load_factor_returns, load_manager_returns, load_weights,
                          run_cloning, build_portfolio_view, fuzzy_match,
                          diagnose_clone_determinism, CANONICAL_BENCHMARKS,
-                         load_factset_aliases, load_client_returns)
+                         load_factset_aliases, load_client_returns,
+                         clone_exists, is_benchmark_name)
 from s3_storage import save_uploaded_file, resolve_path, is_enabled as s3_enabled
 
 # Optional Postgres-backed client management. When the DB is reachable it is
@@ -1805,12 +1806,22 @@ def _enumerate_placeholder_candidates():
         for n in mgr_weights.keys():
             candidates.add(n)
     mgr_dfs = state.get('manager_dfs') or {}
+    clone_results = state.get('clone_results')
+    ucr = state.get('universe_clone_results')
+    factset_aliases = state.get('factset_aliases') or {}
     placeholders = set()
     for name in candidates:
-        t, m = fuzzy_match(name, mgr_dfs)
-        cr_tab = (state.get('clone_results') or {}).get(t, {}) if t else {}
-        ucr_tab = (state.get('universe_clone_results') or {}).get(t, {}) if t else {}
-        if not (m and (m in cr_tab or m in ucr_tab)):
+        # Benchmark rows (MSCI/Russell/… or a bare '... vs. DEFAULT') come from
+        # the risk/exposures files and are not managers — never placeholders.
+        if is_benchmark_name(name):
+            continue
+        # Placeholder only when NO clone exists for this manager. clone_exists
+        # consults the authoritative FactSet-name aliases first, so decorated
+        # names like 'CALSTRS - CASTLEARK EAFE+Canada' resolve to the
+        # established manager and its clone; only genuinely clone-less managers
+        # (e.g. < 3 yrs of returns) remain placeholders.
+        if not clone_exists(name, mgr_dfs, clone_results, ucr,
+                            factset_aliases=factset_aliases):
             placeholders.add(name)
     return placeholders
 

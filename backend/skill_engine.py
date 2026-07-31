@@ -217,8 +217,20 @@ def _compute_snapshot(t_end, names, excess, inception_idx, last_idx,
 def compute_norm_skill_latest(clone_results, universe_clone_results, tab,
                                exclude=None, target_managers=None):
     """
-    Compute each manager's Normalized Skill Z-score using their OWN most
-    recent reporting month.
+    Compute each manager's Normalized Skill Z-score at its most recent
+    reporting month — but capped at the latest month that still has a proper
+    universe peer set.
+
+    Recency cap: the peer distribution is drawn from the (buy-list + universe)
+    panel, and the eVestment universe file often lags the buy-list returns
+    (e.g. buy-list through June, universe only through May). Scoring a buy-list
+    manager at June would then compare it against buy-list peers only — or, on
+    a thin tab like US with just two buy-list names, leave it with fewer than
+    the 5-peer minimum and produce NO score at all. So when the tab has a
+    universe, each manager's snapshot month is capped at the latest month with
+    an adequate universe peer set, and the manager is scored on its track
+    record ENDING at that month (going back to inception). Tabs with no
+    universe fall back to each manager's own last reporting month.
 
     `target_managers`: optional set of names to compute Z-scores for. When
     None (the default), restricts to buy-list manager names — the only
@@ -261,27 +273,46 @@ def compute_norm_skill_latest(clone_results, universe_clone_results, tab,
     else:
         target_set = set(target_managers)
 
-    # For efficiency: group managers by their last_idx, then compute one
-    # snapshot per unique last_idx value. With target filtering, we only
-    # need snapshots whose t matches a target manager's last_idx.
+    # Recency cap: find the latest month that still has an adequate UNIVERSE
+    # peer set (inception ≥36 months before t AND still reporting at t). When
+    # the universe lags the buy-list, this is the universe file's as-of month
+    # (e.g. May), so buy-list managers get scored against the full universe as
+    # of that month instead of against buy-list peers only (or nothing).
+    # Tabs with no universe leave reference_end None → no cap.
+    uni_idx = [i for i, n in enumerate(names) if n not in buy_names]
+    reference_end = None
+    if uni_idx:
+        inc_u  = np.array([inception_idx[names[i]] for i in uni_idx])
+        last_u = np.array([last_idx[names[i]]       for i in uni_idx])
+        for t in range(T - 1, MIN_HISTORY - 2, -1):
+            if np.count_nonzero((inc_u <= t - MIN_HISTORY + 1) & (last_u >= t)) >= 5:
+                reference_end = t
+                break
+
+    # Snapshot month per manager: its own last reporting month, capped at
+    # reference_end. Group by that month so we compute one snapshot each.
     if target_set is None:
-        unique_last = sorted(set(last_idx[n] for n in names
-                                 if last_idx[n] >= MIN_HISTORY - 1))
+        candidates = [n for n in names if last_idx[n] >= MIN_HISTORY - 1]
     else:
-        unique_last = sorted(set(last_idx[n] for n in target_set
-                                 if n in last_idx and last_idx[n] >= MIN_HISTORY - 1))
+        candidates = [n for n in target_set
+                      if n in last_idx and last_idx[n] >= MIN_HISTORY - 1]
+
+    snap_for = {}   # manager -> snapshot month index
+    for n in candidates:
+        t_star = last_idx[n]
+        if reference_end is not None and t_star > reference_end:
+            t_star = reference_end
+        if t_star >= MIN_HISTORY - 1:
+            snap_for[n] = t_star
 
     result = {}
-    for t in unique_last:
+    for t in sorted(set(snap_for.values())):
         snap = _compute_snapshot(t, names, excess, inception_idx, last_idx,
                                   target_set=target_set)
         last_month = master_dates[t]
         for nm, d in snap.items():
-            # Only record this snapshot's value for managers whose OWN last
-            # reporting month is exactly t (so each manager's score is based
-            # on their most recent data, not some later snapshot they couldn't
-            # participate in).
-            if last_idx[nm] != t:
+            # Record only managers whose chosen snapshot month is exactly t.
+            if snap_for.get(nm) != t:
                 continue
             result[nm] = {
                 'z':          d['z'],

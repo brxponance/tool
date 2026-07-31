@@ -15,6 +15,26 @@ from clone_engine import (clone_fun, FACTOR_CATEGORIES, STYLE_BUCKET_MAP,
 PEER_TABS = ['EAFE', 'ACWI', 'ISC', 'EM', 'US', 'USSC']
 
 
+def resolve_manager_lookup(manager_dfs, clone_results, universe_clone_results=None):
+    """Return a usable {tab: manager-names} lookup for fuzzy_match.
+
+    Defensive fallback: if manager_dfs didn't get reloaded from disk (cache
+    paths no longer resolve after a zip deploy / an old cache was loaded without
+    re-running), synthesize the lookup from clone_results + universe_clone_results
+    keys so fuzzy_match still works. Every manager in those results was originally
+    loaded from manager_dfs, so the name space is identical. Values are lists of
+    names; fuzzy_match handles both the {tab: DataFrame} and {tab: [names]} forms.
+    Returns manager_dfs unchanged when it's already populated."""
+    if manager_dfs:
+        return manager_dfs
+    merged_keys = {}
+    for tab, td in (clone_results or {}).items():
+        merged_keys.setdefault(tab, set()).update(td.keys())
+    for tab, td in (universe_clone_results or {}).items():
+        merged_keys.setdefault(tab, set()).update(td.keys())
+    return {tab: list(names) for tab, names in merged_keys.items()}
+
+
 # --- FactSet-name resolution ------------------------------------------------
 # FactSet risk/exposures uploads name a manager as
 #   '<CLIENT/ACCOUNT> - <FactSet strategy name> vs. <benchmark>'
@@ -1783,3 +1803,43 @@ def compute_manager_period_returns(mgr_returns, clone_returns, benchmark_returns
             'si':  si_ret(rets),
         }
     return result
+
+
+
+def clone_exists(name, manager_dfs, clone_results, universe_clone_results=None,
+                 factset_aliases=None):
+    """True if a clone (buy-list or universe) exists for `name`.
+
+    Resolution order:
+      1. Authoritative Map alias — if `name` matches a FactSet name on the Map
+         sheet, its Returns Name is resolved to the buy-list clone key. The alias
+         is definitive, so a mapped product with no clone correctly stays a
+         placeholder (no fuzzy fallback).
+      2. Fuzzy fallback for names NOT on the Map — strip the client/account
+         prefix and 'vs. <benchmark>' suffix (so a manager under a client prefix
+         the Map doesn't list, e.g. 'CALSTRS - Ballina …', still resolves), then
+         fuzzy_match and look the result up in the clone stores (exact then
+         case-insensitive, any tab). Returns False when nothing matches, so
+         genuinely clone-less managers stay placeholders.
+
+    Self-heals an empty manager_dfs from the clone-result keys (same fallback as
+    build_portfolio_view), so callers with a stale/empty manager_dfs still resolve
+    names correctly instead of flagging every manager as a placeholder."""
+    alias = _factset_lookup(name, factset_aliases)
+    if alias is not None:
+        tab, returns_name = alias
+        key_tab, key = _clone_key_for(returns_name, tab, clone_results, universe_clone_results)
+        return key is not None
+
+    manager_dfs = resolve_manager_lookup(manager_dfs, clone_results, universe_clone_results)
+    t, m = fuzzy_match(strip_factset_decoration(name), manager_dfs)
+    if not m:
+        return False
+    m_norm = _norm_name(m)
+    for store in (clone_results or {}, universe_clone_results or {}):
+        tabs = ([t] + [x for x in store if x != t]) if t else list(store)
+        for tab in tabs:
+            td = store.get(tab) or {}
+            if m in td or any(_norm_name(k) == m_norm for k in td):
+                return True
+    return False

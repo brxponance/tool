@@ -83,12 +83,60 @@ function Card({
   );
 }
 
-export function ReportExportCards({ client }: { client: string | null }) {
+// Poll the route's data-* attributes until the report has settled on `target`.
+// Resolves false on timeout so one slow client can't wedge the whole export.
+async function waitForRender(target: string, timeoutMs = 90000) {
+  const started = Date.now();
+  // Give React a beat to register the client change before we start checking,
+  // otherwise the previous client's already-settled state looks like success.
+  await new Promise((r) => setTimeout(r, 400));
+  while (Date.now() - started < timeoutMs) {
+    const el = document.getElementById("page-reports");
+    if (
+      el?.getAttribute("data-report-client") === target &&
+      el?.getAttribute("data-report-loading") === "0"
+    ) {
+      // Settled — let the last paint land before html2canvas reads the DOM.
+      await new Promise((r) => setTimeout(r, 1200));
+      return true;
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  return false;
+}
+
+export function ReportExportCards({
+  client,
+  clients,
+  onSelectClient,
+}: {
+  client: string | null;
+  clients: string[];
+  onSelectClient: (client: string) => void;
+}) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const [pdfClients, setPdfClients] = useState<Set<string>>(() => new Set());
   const [sections, setSections] = useState<Set<string>>(
     () => new Set(RETURN_SECTIONS.map((s) => s.code)),
   );
+
+  // Empty selection means "just the client currently on screen".
+  const effectivePdfClients = pdfClients.size
+    ? clients.filter((c) => pdfClients.has(c))
+    : client
+      ? [client]
+      : [];
+
+  function togglePdfClient(name: string) {
+    setPdfClients((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  }
 
   function toggleSection(code: string) {
     setSections((prev) => {
@@ -101,6 +149,7 @@ export function ReportExportCards({ client }: { client: string | null }) {
 
   async function guard(label: string, fn: () => Promise<void>) {
     setError(null);
+    setNote(null);
     setBusy(label);
     try {
       await fn();
@@ -111,30 +160,67 @@ export function ReportExportCards({ client }: { client: string | null }) {
     }
   }
 
-  // Capture the rendered report panels and POST them to /export_report_pdf.
+  // Capture the rendered report for every selected client, in order, into one
+  // PDF. Each client is switched in, waited on, then captured — so the PDF is
+  // one report per client rather than one report total.
   async function downloadPdf() {
     const html2canvas = (await import("html2canvas")).default;
+    const targets = effectivePdfClients;
+    if (!targets.length) throw new Error("Select at least one client.");
+
+    const original = client;
     const images: string[] = [];
-    for (const target of PPTX_CAPTURE_TARGETS) {
-      const el = document.getElementById(target.id);
-      if (!el) continue;
-      try {
-        const canvas = await html2canvas(el, {
-          scale: 2,
-          backgroundColor: "#ffffff",
-          logging: false,
-          useCORS: true,
-        });
-        images.push(canvas.toDataURL("image/png"));
-      } catch {
-        // a failed capture just drops that page
+    const skipped: string[] = [];
+
+    const capturePages = async () => {
+      for (const target of PPTX_CAPTURE_TARGETS) {
+        const el = document.getElementById(target.id);
+        if (!el) continue;
+        try {
+          const canvas = await html2canvas(el, {
+            scale: 2,
+            backgroundColor: "#ffffff",
+            logging: false,
+            useCORS: true,
+          });
+          images.push(canvas.toDataURL("image/png"));
+        } catch {
+          // a failed capture just drops that page
+        }
+      }
+    };
+
+    try {
+      for (let i = 0; i < targets.length; i += 1) {
+        const name = targets[i];
+        setBusy(`Rendering ${i + 1}/${targets.length}: ${name}…`);
+        if (name !== document.getElementById("page-reports")?.getAttribute("data-report-client")) {
+          onSelectClient(name);
+          const ok = await waitForRender(name);
+          if (!ok) {
+            skipped.push(name);
+            continue;
+          }
+        }
+        setBusy(`Capturing ${i + 1}/${targets.length}: ${name}…`);
+        await capturePages();
+      }
+    } finally {
+      // Put the view back where the user left it.
+      if (original && original !== targets[targets.length - 1]) {
+        onSelectClient(original);
       }
     }
+
     if (!images.length) {
       throw new Error(
-        "Nothing to capture — select a client and let the report finish rendering.",
+        "Nothing to capture — let the report finish rendering, then try again.",
       );
     }
+    if (skipped.length) {
+      setNote(`Timed out and skipped: ${skipped.join(", ")}`);
+    }
+    setBusy("Building PDF…");
     const response = await fetch(`${BACKEND_PROXY_BASE}/export_report_pdf`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -171,17 +257,70 @@ export function ReportExportCards({ client }: { client: string | null }) {
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "stretch" }}>
         <Card
           title="Quarterly Portfolio Report"
-          blurb="The report below, captured page by page and assembled as a PDF. Select a client and let it finish rendering first — sections without loaded source files are captured as shown."
+          blurb="One report per selected client, captured page by page into a single PDF. Each client is rendered in turn, so this takes a few seconds each. Sections without loaded source files are captured as shown."
         >
-          <div style={{ marginTop: "auto" }}>
+          <div
+            style={{
+              maxHeight: 132,
+              overflowY: "auto",
+              border: "1px solid var(--border)",
+              borderRadius: 3,
+              padding: 4,
+            }}
+          >
+            {clients.map((name) => {
+              const on = pdfClients.size ? pdfClients.has(name) : name === client;
+              return (
+                <button
+                  key={name}
+                  type="button"
+                  onClick={() => togglePdfClient(name)}
+                  disabled={busy !== null}
+                  style={{
+                    display: "block",
+                    width: "100%",
+                    textAlign: "left",
+                    fontFamily: "var(--mono)",
+                    fontSize: 11,
+                    padding: "3px 6px",
+                    border: "none",
+                    borderRadius: 2,
+                    cursor: busy ? "default" : "pointer",
+                    background: on ? "rgba(0,119,204,.10)" : "transparent",
+                    color: on ? "var(--accent)" : "var(--text2)",
+                  }}
+                >
+                  {on ? "✓ " : "  "}
+                  {name}
+                </button>
+              );
+            })}
+          </div>
+          <div
+            style={{ fontFamily: "var(--mono)", fontSize: 9, color: "var(--text3)" }}
+          >
+            {pdfClients.size
+              ? `${pdfClients.size} selected`
+              : "None selected — exports the client on screen"}
+          </div>
+          <div style={{ marginTop: "auto", display: "flex", gap: 8, alignItems: "center" }}>
             <button
               type="button"
               className="btn btn-primary btn-sm"
-              disabled={!client || busy !== null}
-              onClick={() => void guard("Capturing…", downloadPdf)}
+              disabled={busy !== null || effectivePdfClients.length === 0}
+              onClick={() => void guard("Rendering…", downloadPdf)}
             >
-              {busy === "Capturing…" ? "Capturing…" : "Download PDF"}
+              Download PDF
             </button>
+            {/* Only the PDF phases belong in this card's status line — the two
+                Excel cards share the same `busy` flag. */}
+            {busy && /^(Rendering|Capturing|Building PDF)/.test(busy) ? (
+              <span
+                style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)" }}
+              >
+                {busy}
+              </span>
+            ) : null}
           </div>
         </Card>
 
@@ -284,6 +423,11 @@ export function ReportExportCards({ client }: { client: string | null }) {
       {error ? (
         <div className="alert alert-error" style={{ marginTop: 10 }}>
           {error}
+        </div>
+      ) : null}
+      {note ? (
+        <div className="alert alert-warn" style={{ marginTop: 10 }}>
+          {note}
         </div>
       ) : null}
     </div>
