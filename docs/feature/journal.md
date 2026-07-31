@@ -4,6 +4,23 @@
 
 ---
 
+## Index
+
+_Newest first. Add new entries directly below this index._
+
+- [2026-04-29 - Validation pass and environment blockers for manager-finder](#2026-04-29---validation-pass-and-environment-blockers-for-manager-finder)
+- [2026-04-29 - Added manager recommendation panels to manager detail](#2026-04-29---added-manager-recommendation-panels-to-manager-detail)
+- [2026-04-29 - Added manager recommendation backend route and scoring helpers](#2026-04-29---added-manager-recommendation-backend-route-and-scoring-helpers)
+- [2026-04-29 - Scoped the first manager-finder release to same-tab manager detail](#2026-04-29---scoped-the-first-manager-finder-release-to-same-tab-manager-detail)
+- [2026-04-29 - Reviewed platform analytics and chose an augmentation strategy](#2026-04-29---reviewed-platform-analytics-and-chose-an-augmentation-strategy)
+- [2026-04-29 - Wired legacy portfolio analytics fan-out into the Next portfolio feature](#2026-04-29---wired-legacy-portfolio-analytics-fan-out-into-the-next-portfolio-feature)
+- [2026-04-29 - Rebuilt the Next portfolio page around the legacy HTML structure](#2026-04-29---rebuilt-the-next-portfolio-page-around-the-legacy-html-structure)
+- [2026-04-29 - Ported the setup workflow and legacy shell into the Next app](#2026-04-29---ported-the-setup-workflow-and-legacy-shell-into-the-next-app)
+- [2026-04-29 - Stabilized Flask startup and frontend proxy handoff for the new app](#2026-04-29---stabilized-flask-startup-and-frontend-proxy-handoff-for-the-new-app)
+- [2026-04-29 - Chose Flask plus Next.js with parity-first feature boundaries](#2026-04-29---chose-flask-plus-nextjs-with-parity-first-feature-boundaries)
+
+---
+
 ## 2026-04-29 - Validation pass and environment blockers for manager-finder
 
 ### Problem
@@ -183,7 +200,6 @@ The manager-finder path was selected as the first concrete implementation target
 
 ### Risk Assessment
 This entry records an architectural and product decision, not a code change by itself. The risk is mainly strategic: recommendation quality is bounded by the current analytics and by how well the product explains the ranking logic. That risk was accepted because replacing the core math would have been far riskier and less auditable.
-
 
 ## 2026-04-29 - Wired legacy portfolio analytics fan-out into the Next portfolio feature
 

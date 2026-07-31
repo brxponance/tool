@@ -1,126 +1,170 @@
 # Journal
 
-## 2026-07-07 — Moved project off OneDrive to C:\dev\pc_tool (canonical working copy)
-OneDrive's on-demand file hydration was intermittently failing reads of
-node_modules/.next files, which crashed `next build` AND `next dev` with
-`UNKNOWN: unknown error, read` (errno -4094), and even left some uploaded data
-files as unreadable dehydrated placeholders. Fixed by relocating:
-- Fresh `git clone` of origin (HEAD 5a0b69a) into **C:\dev\pc_tool** — this is
-  now the working copy. Reinstalled frontend deps and rebuilt the backend venv
-  there. Copied the gitignored data (backend/uploads/*.xlsx + cache/results.pkl)
-  so it boots fully loaded (139 managers, 12 portfolios, ISC universe).
-- Verified: `npm run dev` binds to **:3000** (no more accidental :3001
-  collision), backend on :3001, browser UI works end-to-end with 0 console
-  errors, and `next build` is fully green WITH the real type-check
-  ("Finished TypeScript in 7.1s", all 11 routes) — so the OneDrive path was the
-  entire cause.
-- Removed the `typescript.ignoreBuildErrors` workaround from next.config.ts
-  (commit e2e51b6, local only — not pushed). The old OneDrive copy and the
-  temporary `C:\Users\BryanRodas\pc_tool_fe` can be retired.
-- Run from now on: backend `cd C:\dev\pc_tool\backend; venv\Scripts\python.exe
-  run.py`; frontend `cd C:\dev\pc_tool\frontend; npm run dev` → open
-  http://localhost:3000.
+## Index
 
-## 2026-07-07 — Sync teammate's monolith features into backend + frontend
+_Newest first. Add new entries directly below this index._
 
-Ported everything the teammate added in `clone_tool/` (the monolithic HTML/Flask
-version) into the refactored `backend/` + `frontend/`, and built the frontend UI
-for each so the two are fully in sync. `clone_tool/` is now a strict subset of
-`backend/` (verified: zero clone-only routes remain; the 3 backend-only routes we
-added after forking — `/manager_recommendations`, `/portfolio_contribution_preview`,
-`/portfolio_report` — were preserved, so this was a selective merge, not a copy).
+- [2026-07-31 — Added root CLAUDE.md; journals now indexed and newest-first](#2026-07-31--added-root-claudemd-journals-now-indexed-and-newest-first)
+- [2026-07-31 — Ported the new clone_tool drop; fixed the deploy outage; made deploys self-service](#2026-07-31-ported-the-new-clone_tool-drop-fixed-the-deploy-outage-made-deploys-self-service)
+- [2026-07-20 — Fixed broken deploys + added a stable URL (ALB)](#2026-07-20-fixed-broken-deploys-added-a-stable-url-alb)
+- [2026-07-07 — Sync teammate's monolith features into backend + frontend](#2026-07-07-sync-teammates-monolith-features-into-backend-frontend)
+- [2026-07-07 — Moved project off OneDrive to C:\dev\pc_tool (canonical working copy)](#2026-07-07-moved-project-off-onedrive-to-cdevpc_tool-canonical-working-copy)
 
-### Backend (all in `backend/app.py` + 3 copied engines)
-- **New engines (byte-copied):** `overlap_engine.py`, `qualitative_loader.py`,
-  `pptx_export.py`. All other engines were already byte-identical between the two
-  trees — the entire delta lived in `app.py` + these 3 files.
-- **Holdings overlap:** routes `/holdings_overlap`, `/holdings_overlap_detail`,
-  helper `_resolve_overlap_benchmark`. Reuses existing `exposures_data` state and
-  `exposures_engine._fuzzy_match_manager`.
-- **Qualitative / diverse ownership:** routes `/upload_qualitative`,
-  `/diverse_ownership`; helpers `_qual_lookup`/`_qual_fields` + module-global
-  `_QUAL_MATCH_CACHE`; new `qualitative_data` state (saved/loaded in the cache
-  pickle); `_qual_fields` enrichment added to `/portfolio` and
-  `/peer_skill_summary`; `/reload_inputs` re-parses + clears the match cache;
-  `/status` now emits `has_qualitative` + firm/strategy counts (cleaner than the
-  monolith, which never had a dedicated flag).
-- **PowerPoint export:** route `/export_portfolio_pptx` (self-contained, stateless);
-  logo copied to `backend/static/assets/xponance_logo.png`; `python-pptx` + `lxml`
-  added to `requirements.txt` and installed in the venv.
-- **Market-cycle universe caching:** new `mc_universe_cache` state (persisted),
-  precompute hook at end of `/run_universe`, cache read in `/market_cycle` via
-  `_get_universe_state`, invalidation on new `factor_returns` upload.
-- **Shared-route fixes (kept from teammate):** `/compute_security_risk_exposures`
-  benchmark-splice fallback + `has_em_sleeve` (fixes a real bug where active
-  exposures silently degraded to absolute when benchmarks were in the 2nd file);
-  `/compute_risk_exposures` explicit `benchmark_name` override; `/sleeve_options`
-  fallback to `risk_data.benchmark_names`.
+---
 
-### Frontend (Next.js, matched existing inline-SVG/CSS conventions — no ECharts/AG
-Grid yet, per CLAUDE.md "add later")
-- **New "Overlap" tab:** `features/overlap/` (types, api, hook, `overlap-matrix`
-  heatmap, `overlap-detail-table`, route) + `app/(workspace)/overlap/page.tsx` +
-  nav entry in `lib/constants.ts`.
-- **Diverse Ownership panel:** `features/portfolio/components/diverse-ownership-section.tsx`
-  wired into the portfolio route; `getDiverseOwnership` API + types; `q_*` fields
-  added to `PortfolioManager`.
-- **Qualitative upload widget:** new slot in setup `UPLOAD_SLOTS` + `hasStagedFile`/
-  `fileLabel` cases; `has_qualitative`/counts added to `BackendStatus`.
-- **PowerPoint export:** `Export PowerPoint` button on the Report route;
-  `export-pptx.ts` captures the 5 report panels via **html2canvas** (new dep),
-  POSTs to `/export_portfolio_pptx`, downloads the `.pptx`. Patched the backend
-  proxy (`app/api/backend/[...path]/route.ts`) to forward `Content-Disposition`,
-  `Content-Length`, `X-Skipped-Slides` (it previously dropped all but content-type,
-  which would have broken the binary download filename/skip-list).
+## 2026-07-31 — Added root CLAUDE.md; journals now indexed and newest-first
 
-### Verification
-- Backend: all `.py` compile clean; app boots on the existing cache (139 managers —
-  additive state keys are backward-compatible with the old pickle); all 5 new routes
-  registered; `/holdings_overlap`, `/diverse_ownership`, `/export_portfolio_pptx`,
-  `/status` smoke-tested with graceful responses.
-- Frontend: `tsc --noEmit` clean (exit 0, run twice).
-- **Build caveat:** `next build` *compiles* successfully but the Turbopack
-  TypeScript worker intermittently crashes with `UNKNOWN: unknown error, read`
-  (errno -4094) — a known Windows + OneDrive filesystem flake reading a cached
-  file, NOT a code error (tsc independently passes). Moving the repo off the
-  OneDrive-synced path, or `next build` with the TS worker disabled, avoids it.
-  Confirmed: a clean copy at `C:\Users\BryanRodas\pc_tool_fe` (non-OneDrive)
-  builds fully green (all 11 routes prerendered incl. /overlap) and runs
-  `next dev` fine — OneDrive also breaks `next dev`, so run the frontend from
-  the non-OneDrive copy for now.
+Turned the three standing rules from `rules.md` into a root
+[CLAUDE.md](CLAUDE.md) so they load automatically instead of relying on someone
+noticing the file. Also restructured both journals to the requested format:
+an `## Index` at the top and **newest entries first**.
 
-### Playwright end-to-end pass (2026-07-07)
-Drove every feature in a real browser via Playwright MCP against the live app
-(backend :3001, frontend :3000 from the non-OneDrive copy). All passed:
-Setup qualitative widget shows "5 firms, 17 strategies loaded"; Overlap matrix
-+ cell drill-down (22 shared securities); Diverse Ownership computes
-current/proposed; **Export PowerPoint downloaded a valid 826 KB, 3-slide deck
-with 6 embedded images** (real html2canvas captures); 0 console errors.
-- **Bug found + fixed in the browser:** the Overlap matrix and detail table
-  double-scaled `common_weight`/`wi_*` (they arrive from the engine already in
-  percentage points, so ×100 gave "1297.4%"). Fixed `fmt()` in
-  `overlap-matrix.tsx` and `pct()` in `overlap-detail-table.tsx` to append `%`
-  without multiplying; jaccard stays ×100 (it is a 0–1 fraction). tsc clean.
+### The two journals
+There are two, with different scopes — worth knowing before writing to one:
+- `journal.md` — project-wide (default)
+- `docs/feature/journal.md` — manager-finder feature work
 
-### Auto-run universe clones on startup (2026-07-07)
-User wanted the Market Cycle chart populated without clicking "Run Universe
-Clones". Added `_auto_run_universe_on_startup()` in `backend/app.py`, called at
-import time (fires under both `run.py` and `python app.py`). Refactored the
-`/run_universe` worker into a reusable module-level `_start_universe_run()` that
-both the route and the startup hook call (route is now a thin wrapper).
-Guards: only runs when a universe file is staged AND readable on disk, factor
-returns are loaded, no universe clone results are already cached, and no run is
-in progress — so it fires once on first boot, then every later boot sees cached
-results and skips. Failures are swallowed so a bad auto-run never blocks server
-boot. Verified: staged the small ISC universe file, restarted, boot log showed
-"Auto-running universe clones on startup ... started (['ISC'])" and the server
-came up normally with the clone running in the background.
-- **OneDrive caveat that matters here:** `backend/uploads/*.xlsx` universe files
-  were dehydrated OneDrive placeholders (show a size but reads fail with OSError
-  22); the `clone_tool/uploads/` copies were readable. The auto-run guard checks
-  `os.path.exists`, which is true for placeholders — but the clone itself would
-  fail to read them. Off OneDrive this is a non-issue; on OneDrive, ensure the
-  staged universe file is "Always keep on this device".
+### A mistake worth recording
+My first pass reversed **both** files. `docs/feature/journal.md` was already
+newest-first, so I flipped it into oldest-first. The reversal logic keyed on entry
+dates, and every entry in that file is dated `2026-04-29` — with all dates equal,
+"is it ascending?" and "is it descending?" are both true, so the check silently
+took the wrong branch. Caught it by diffing against `git HEAD` (the last entry
+written, "Validation pass", had been at the top). Restored from git and added only
+the index.
+
+Fix applied to the tooling: when every entry shares one date the order is
+**ambiguous**, so don't guess — leave it alone and say so. Verified afterwards by
+comparing entry counts and body word counts against HEAD (+12 words each, exactly
+the index heading text, so no content was lost).
+
+Lesson: don't infer ordering from data that can't express it.
+
+## 2026-07-31 — Ported the new clone_tool drop; fixed the deploy outage; made deploys self-service
+
+A new `clone_tool/` snapshot landed (7/30). Ported everything new out of it into
+`backend/` + `frontend/`, found two real bugs while doing it, fixed a production
+outage that had nothing to do with the port, and removed the manual steps around
+deploying.
+
+### 1. Comparing the drop
+`git diff` against the last `clone_tool` commit was useless as a baseline — our
+tool had already been ported past it, so the diff mixed done and not-done work.
+What worked: diffing `clone_tool/*.py` against `backend/*.py` **with CRLF
+normalised** (without `--strip-trailing-cr` every file looks 100% changed), then
+driving both apps with Playwright side by side and comparing the DOM.
+
+Caution for next time: a **function-name** diff is not enough. Two of the most
+important changes were *inside* existing functions and it missed both (see §3).
+
+### 2. What was ported
+- **Portfolio tab:** client total AUM (banner + per-manager AUM columns),
+  redemption optimizer (`optimize_redemption` LP), active-manager-struggle
+  scenario, Market Development exposure grouping, `/ideal_factor_complement`,
+  excluded managers in the optimizer.
+- **Gap fixes found by the side-by-side:** holdings-overlap rebuilt to the
+  reference design (count+weight cells, Strategy/Client-scaled, Current+Proposed
+  matrices sharing one colour scale, top-pair chips, drill-down) and mounted on
+  the Portfolio tab; diverse rollup now auto-computes instead of needing a
+  Compute click; qualitative chevron on manager rows; FactSet risk header rows
+  were inverted with no colspans; Scenario Analysis used full index strings and
+  printed a portfolio-level max drawdown on a sleeve that doesn't exist.
+- **Word memo:** `docx_export.py` + `build_memo_exposures` + `/export_portfolio_docx`
+  + a Print Memo Report button. Real editable tables, not screenshots.
+- **Reports:** `pdf_export.py`, `/export_report_pdf`, `/export_dispersion_xlsx`,
+  `/export_returns_xlsx`, `report_performance`, and three export cards. The
+  Quarterly PDF renders one report per selected client (verified 3 clients →
+  3.02× the single-client file size).
+- **FactSet alias crosswalk:** `load_factset_aliases` / `resolve_factset_to_clone`
+  / `factset_candidates_by_manager` / `strip_factset_decoration` /
+  `is_benchmark_name` / `clone_exists`, wired into the exposures and
+  security-risk matching paths. `load_client_returns` enables `basis='actual'`.
+- Refactored the two risk-exposure routes into thin routes over `*_core`
+  functions so the memo reuses them. Verified `route output == core output`.
+
+Deliberately not ported: `qualitative_loader.py`'s format change (it drops
+per-strategy AUM) — we kept our layered parser and added `match_firm` as a
+prefix-match fallback instead, so both workbook shapes work.
+
+### 3. Two bugs the sweep caught (both hidden inside existing functions)
+- **`skill_engine` recency cap.** Norm-skill was scored at each manager's own last
+  reporting month. When the eVestment universe lags the buy-list, that compares a
+  manager against buy-list peers only — or, on a thin tab like `US` with two
+  names, produces **no score at all**. Now capped at the latest month with an
+  adequate universe peer set.
+- **Placeholder misclassification.** We used bare `fuzzy_match` with no benchmark
+  filter and no alias resolution. On the 6/30 FactSet exposures file that
+  misflagged **53 of 69** names as placeholders (benchmark rows like
+  `MSCI EAFE NR USD` became fake managers; `CALSTRS - CASTLEARK EAFE+Canada`
+  couldn't resolve). Now 8. Latent on the 3/31 files — it would have bitten the
+  moment the newer exports were loaded.
+
+### 4. The deploy outage — RDS was rotating the password
+Deploys were failing at `aws ecs wait services-stable` with `Max attempts
+exceeded`; 150 failed tasks. **I first blamed my own change and was wrong** — the
+logs showed the backend never reaches app import. It dies in the entrypoint:
+
+```
+FATAL: password authentication failed for user "postgres"
+[entrypoint] server not ready (30/30) → exit 1
+```
+
+Root cause: RDS had **"Manage master credentials in Secrets Manager"** enabled,
+rotating the master password **every 7 days**. It rotated 7/30 09:36; the app's
+`pc-tool/database-url` still held the 7/16 password. Nothing broke immediately
+because a *running* container never re-reads the password — it only surfaced when
+a deploy forced a new task ~30 hours later. **The deploy was the messenger, not
+the cause.**
+
+Fix: rebuilt the DSN from the live password (URL-encoded — it contains `[`, which
+URL parsers read as an IPv6 host; 28 chars → 40 encoded), then **turned rotation
+off** and set a static password. That also *deleted* the `rds!db-220cca1f-…`
+secret, so DEPLOYMENT.md §5's retrieval command no longer worked — corrected.
+`services-stable` now passes in 2m37s.
+
+Lesson worth keeping: **read the logs before blaming the last change.**
+
+### 5. One regression I introduced and reverted
+I had put `_warm_universe_dfs()` at module scope in `app.py`. That's a 21 MB
+openpyxl parse (~24s, ~39 MB of DataFrames) holding the GIL on a 0.5 vCPU task —
+it starves the gunicorn threads answering the ALB health check, the documented
+killer for this service (§14). Moved off the import path; it's kicked lazily from
+`/risk_analysis`. **Never add blocking work to module scope in `backend/app.py`.**
+
+### 6. Deploys are now self-service
+- **No post-deploy step.** `INPUT_PARSER_VERSION` is stamped into the cache;
+  on boot a mismatch triggers a one-time background re-read of the input
+  workbooks. Bump it whenever parsing changes. (New DEPLOYMENT.md §16.)
+- **Preflight** step (~10s, before the build): checks the DSN secret parses and
+  warns if password rotation gets re-enabled.
+- **"Explain the failure"** step (`if: failure()`): dumps deployment state, ECS
+  events, stopped-task exit codes and the last 80 log lines into the job output.
+  The waiter's `Max attempts exceeded` is useless on its own.
+- **README rewritten** — it claimed the backend lives in `clone_tool/`. It does
+  not; that's the vendored reference copy. Anyone onboarding would have edited the
+  wrong tree. Now documents the data, the database and how to start it.
+- **Skills added:** `deploy` (commit + push + deploy + verify), `start`
+  (backend/frontend locally), `pull` (sync + reinstall + migrate).
+
+### Gotchas worth remembering
+- Git Bash mangles `/ecs/pc-tool` into a Windows path → prefix `MSYS_NO_PATHCONV=1`.
+  `aws logs tail` also crashes on Next.js's `▲` → add `PYTHONUTF8=1`.
+- `next start` here needs `output: standalone` handling, and `BACKEND_INTERNAL_URL`
+  isn't picked up by it — easiest local test is to run the backend on :3001.
+- The clone tool's `Map` sheet means two different things across vintages
+  (FactSet crosswalk vs a manager/region table). Our loader ignores the old one.
+- The clone's redemption UI says "±2%" while its constant is `0.01` (±1%). Ours is
+  self-consistent at ±1% and now reads the tolerance from the response.
+
+### Still open
+- **HTTPS / auth** — unchanged from the 7/20 entry; ALB is HTTP-only and open.
+- **Two features are inert until newer files are loaded:** the alias crosswalk
+  needs a `Map` sheet with `Factset Name | Returns Name | Tab`, and the
+  "Actual track record" report blocks need a `Client` sheet. No workbook we have
+  contains the latter.
+- **`sslmode`** is still `prefer`, so libpq silently falls back to plaintext.
+  Pinning `require` would make failures legible; left out to change one variable
+  at a time during the outage.
 
 ## 2026-07-20 — Fixed broken deploys + added a stable URL (ALB)
 
@@ -250,128 +294,125 @@ names (factor returns = `Equity_factor_returns_-03-2026.xlsx`).
 - **Optional CPU bump** — 0.5 vCPU makes clones slow; raise if server-side recompute
   becomes routine.
 
-## 2026-07-31 — Ported the new clone_tool drop; fixed the deploy outage; made deploys self-service
+## 2026-07-07 — Sync teammate's monolith features into backend + frontend
 
-A new `clone_tool/` snapshot landed (7/30). Ported everything new out of it into
-`backend/` + `frontend/`, found two real bugs while doing it, fixed a production
-outage that had nothing to do with the port, and removed the manual steps around
-deploying.
+Ported everything the teammate added in `clone_tool/` (the monolithic HTML/Flask
+version) into the refactored `backend/` + `frontend/`, and built the frontend UI
+for each so the two are fully in sync. `clone_tool/` is now a strict subset of
+`backend/` (verified: zero clone-only routes remain; the 3 backend-only routes we
+added after forking — `/manager_recommendations`, `/portfolio_contribution_preview`,
+`/portfolio_report` — were preserved, so this was a selective merge, not a copy).
 
-### 1. Comparing the drop
-`git diff` against the last `clone_tool` commit was useless as a baseline — our
-tool had already been ported past it, so the diff mixed done and not-done work.
-What worked: diffing `clone_tool/*.py` against `backend/*.py` **with CRLF
-normalised** (without `--strip-trailing-cr` every file looks 100% changed), then
-driving both apps with Playwright side by side and comparing the DOM.
+### Backend (all in `backend/app.py` + 3 copied engines)
+- **New engines (byte-copied):** `overlap_engine.py`, `qualitative_loader.py`,
+  `pptx_export.py`. All other engines were already byte-identical between the two
+  trees — the entire delta lived in `app.py` + these 3 files.
+- **Holdings overlap:** routes `/holdings_overlap`, `/holdings_overlap_detail`,
+  helper `_resolve_overlap_benchmark`. Reuses existing `exposures_data` state and
+  `exposures_engine._fuzzy_match_manager`.
+- **Qualitative / diverse ownership:** routes `/upload_qualitative`,
+  `/diverse_ownership`; helpers `_qual_lookup`/`_qual_fields` + module-global
+  `_QUAL_MATCH_CACHE`; new `qualitative_data` state (saved/loaded in the cache
+  pickle); `_qual_fields` enrichment added to `/portfolio` and
+  `/peer_skill_summary`; `/reload_inputs` re-parses + clears the match cache;
+  `/status` now emits `has_qualitative` + firm/strategy counts (cleaner than the
+  monolith, which never had a dedicated flag).
+- **PowerPoint export:** route `/export_portfolio_pptx` (self-contained, stateless);
+  logo copied to `backend/static/assets/xponance_logo.png`; `python-pptx` + `lxml`
+  added to `requirements.txt` and installed in the venv.
+- **Market-cycle universe caching:** new `mc_universe_cache` state (persisted),
+  precompute hook at end of `/run_universe`, cache read in `/market_cycle` via
+  `_get_universe_state`, invalidation on new `factor_returns` upload.
+- **Shared-route fixes (kept from teammate):** `/compute_security_risk_exposures`
+  benchmark-splice fallback + `has_em_sleeve` (fixes a real bug where active
+  exposures silently degraded to absolute when benchmarks were in the 2nd file);
+  `/compute_risk_exposures` explicit `benchmark_name` override; `/sleeve_options`
+  fallback to `risk_data.benchmark_names`.
 
-Caution for next time: a **function-name** diff is not enough. Two of the most
-important changes were *inside* existing functions and it missed both (see §3).
+### Frontend (Next.js, matched existing inline-SVG/CSS conventions — no ECharts/AG
+Grid yet, per CLAUDE.md "add later")
+- **New "Overlap" tab:** `features/overlap/` (types, api, hook, `overlap-matrix`
+  heatmap, `overlap-detail-table`, route) + `app/(workspace)/overlap/page.tsx` +
+  nav entry in `lib/constants.ts`.
+- **Diverse Ownership panel:** `features/portfolio/components/diverse-ownership-section.tsx`
+  wired into the portfolio route; `getDiverseOwnership` API + types; `q_*` fields
+  added to `PortfolioManager`.
+- **Qualitative upload widget:** new slot in setup `UPLOAD_SLOTS` + `hasStagedFile`/
+  `fileLabel` cases; `has_qualitative`/counts added to `BackendStatus`.
+- **PowerPoint export:** `Export PowerPoint` button on the Report route;
+  `export-pptx.ts` captures the 5 report panels via **html2canvas** (new dep),
+  POSTs to `/export_portfolio_pptx`, downloads the `.pptx`. Patched the backend
+  proxy (`app/api/backend/[...path]/route.ts`) to forward `Content-Disposition`,
+  `Content-Length`, `X-Skipped-Slides` (it previously dropped all but content-type,
+  which would have broken the binary download filename/skip-list).
 
-### 2. What was ported
-- **Portfolio tab:** client total AUM (banner + per-manager AUM columns),
-  redemption optimizer (`optimize_redemption` LP), active-manager-struggle
-  scenario, Market Development exposure grouping, `/ideal_factor_complement`,
-  excluded managers in the optimizer.
-- **Gap fixes found by the side-by-side:** holdings-overlap rebuilt to the
-  reference design (count+weight cells, Strategy/Client-scaled, Current+Proposed
-  matrices sharing one colour scale, top-pair chips, drill-down) and mounted on
-  the Portfolio tab; diverse rollup now auto-computes instead of needing a
-  Compute click; qualitative chevron on manager rows; FactSet risk header rows
-  were inverted with no colspans; Scenario Analysis used full index strings and
-  printed a portfolio-level max drawdown on a sleeve that doesn't exist.
-- **Word memo:** `docx_export.py` + `build_memo_exposures` + `/export_portfolio_docx`
-  + a Print Memo Report button. Real editable tables, not screenshots.
-- **Reports:** `pdf_export.py`, `/export_report_pdf`, `/export_dispersion_xlsx`,
-  `/export_returns_xlsx`, `report_performance`, and three export cards. The
-  Quarterly PDF renders one report per selected client (verified 3 clients →
-  3.02× the single-client file size).
-- **FactSet alias crosswalk:** `load_factset_aliases` / `resolve_factset_to_clone`
-  / `factset_candidates_by_manager` / `strip_factset_decoration` /
-  `is_benchmark_name` / `clone_exists`, wired into the exposures and
-  security-risk matching paths. `load_client_returns` enables `basis='actual'`.
-- Refactored the two risk-exposure routes into thin routes over `*_core`
-  functions so the memo reuses them. Verified `route output == core output`.
+### Verification
+- Backend: all `.py` compile clean; app boots on the existing cache (139 managers —
+  additive state keys are backward-compatible with the old pickle); all 5 new routes
+  registered; `/holdings_overlap`, `/diverse_ownership`, `/export_portfolio_pptx`,
+  `/status` smoke-tested with graceful responses.
+- Frontend: `tsc --noEmit` clean (exit 0, run twice).
+- **Build caveat:** `next build` *compiles* successfully but the Turbopack
+  TypeScript worker intermittently crashes with `UNKNOWN: unknown error, read`
+  (errno -4094) — a known Windows + OneDrive filesystem flake reading a cached
+  file, NOT a code error (tsc independently passes). Moving the repo off the
+  OneDrive-synced path, or `next build` with the TS worker disabled, avoids it.
+  Confirmed: a clean copy at `C:\Users\BryanRodas\pc_tool_fe` (non-OneDrive)
+  builds fully green (all 11 routes prerendered incl. /overlap) and runs
+  `next dev` fine — OneDrive also breaks `next dev`, so run the frontend from
+  the non-OneDrive copy for now.
 
-Deliberately not ported: `qualitative_loader.py`'s format change (it drops
-per-strategy AUM) — we kept our layered parser and added `match_firm` as a
-prefix-match fallback instead, so both workbook shapes work.
+### Playwright end-to-end pass (2026-07-07)
+Drove every feature in a real browser via Playwright MCP against the live app
+(backend :3001, frontend :3000 from the non-OneDrive copy). All passed:
+Setup qualitative widget shows "5 firms, 17 strategies loaded"; Overlap matrix
++ cell drill-down (22 shared securities); Diverse Ownership computes
+current/proposed; **Export PowerPoint downloaded a valid 826 KB, 3-slide deck
+with 6 embedded images** (real html2canvas captures); 0 console errors.
+- **Bug found + fixed in the browser:** the Overlap matrix and detail table
+  double-scaled `common_weight`/`wi_*` (they arrive from the engine already in
+  percentage points, so ×100 gave "1297.4%"). Fixed `fmt()` in
+  `overlap-matrix.tsx` and `pct()` in `overlap-detail-table.tsx` to append `%`
+  without multiplying; jaccard stays ×100 (it is a 0–1 fraction). tsc clean.
 
-### 3. Two bugs the sweep caught (both hidden inside existing functions)
-- **`skill_engine` recency cap.** Norm-skill was scored at each manager's own last
-  reporting month. When the eVestment universe lags the buy-list, that compares a
-  manager against buy-list peers only — or, on a thin tab like `US` with two
-  names, produces **no score at all**. Now capped at the latest month with an
-  adequate universe peer set.
-- **Placeholder misclassification.** We used bare `fuzzy_match` with no benchmark
-  filter and no alias resolution. On the 6/30 FactSet exposures file that
-  misflagged **53 of 69** names as placeholders (benchmark rows like
-  `MSCI EAFE NR USD` became fake managers; `CALSTRS - CASTLEARK EAFE+Canada`
-  couldn't resolve). Now 8. Latent on the 3/31 files — it would have bitten the
-  moment the newer exports were loaded.
+### Auto-run universe clones on startup (2026-07-07)
+User wanted the Market Cycle chart populated without clicking "Run Universe
+Clones". Added `_auto_run_universe_on_startup()` in `backend/app.py`, called at
+import time (fires under both `run.py` and `python app.py`). Refactored the
+`/run_universe` worker into a reusable module-level `_start_universe_run()` that
+both the route and the startup hook call (route is now a thin wrapper).
+Guards: only runs when a universe file is staged AND readable on disk, factor
+returns are loaded, no universe clone results are already cached, and no run is
+in progress — so it fires once on first boot, then every later boot sees cached
+results and skips. Failures are swallowed so a bad auto-run never blocks server
+boot. Verified: staged the small ISC universe file, restarted, boot log showed
+"Auto-running universe clones on startup ... started (['ISC'])" and the server
+came up normally with the clone running in the background.
+- **OneDrive caveat that matters here:** `backend/uploads/*.xlsx` universe files
+  were dehydrated OneDrive placeholders (show a size but reads fail with OSError
+  22); the `clone_tool/uploads/` copies were readable. The auto-run guard checks
+  `os.path.exists`, which is true for placeholders — but the clone itself would
+  fail to read them. Off OneDrive this is a non-issue; on OneDrive, ensure the
+  staged universe file is "Always keep on this device".
 
-### 4. The deploy outage — RDS was rotating the password
-Deploys were failing at `aws ecs wait services-stable` with `Max attempts
-exceeded`; 150 failed tasks. **I first blamed my own change and was wrong** — the
-logs showed the backend never reaches app import. It dies in the entrypoint:
+## 2026-07-07 — Moved project off OneDrive to C:\dev\pc_tool (canonical working copy)
 
-```
-FATAL: password authentication failed for user "postgres"
-[entrypoint] server not ready (30/30) → exit 1
-```
-
-Root cause: RDS had **"Manage master credentials in Secrets Manager"** enabled,
-rotating the master password **every 7 days**. It rotated 7/30 09:36; the app's
-`pc-tool/database-url` still held the 7/16 password. Nothing broke immediately
-because a *running* container never re-reads the password — it only surfaced when
-a deploy forced a new task ~30 hours later. **The deploy was the messenger, not
-the cause.**
-
-Fix: rebuilt the DSN from the live password (URL-encoded — it contains `[`, which
-URL parsers read as an IPv6 host; 28 chars → 40 encoded), then **turned rotation
-off** and set a static password. That also *deleted* the `rds!db-220cca1f-…`
-secret, so DEPLOYMENT.md §5's retrieval command no longer worked — corrected.
-`services-stable` now passes in 2m37s.
-
-Lesson worth keeping: **read the logs before blaming the last change.**
-
-### 5. One regression I introduced and reverted
-I had put `_warm_universe_dfs()` at module scope in `app.py`. That's a 21 MB
-openpyxl parse (~24s, ~39 MB of DataFrames) holding the GIL on a 0.5 vCPU task —
-it starves the gunicorn threads answering the ALB health check, the documented
-killer for this service (§14). Moved off the import path; it's kicked lazily from
-`/risk_analysis`. **Never add blocking work to module scope in `backend/app.py`.**
-
-### 6. Deploys are now self-service
-- **No post-deploy step.** `INPUT_PARSER_VERSION` is stamped into the cache;
-  on boot a mismatch triggers a one-time background re-read of the input
-  workbooks. Bump it whenever parsing changes. (New DEPLOYMENT.md §16.)
-- **Preflight** step (~10s, before the build): checks the DSN secret parses and
-  warns if password rotation gets re-enabled.
-- **"Explain the failure"** step (`if: failure()`): dumps deployment state, ECS
-  events, stopped-task exit codes and the last 80 log lines into the job output.
-  The waiter's `Max attempts exceeded` is useless on its own.
-- **README rewritten** — it claimed the backend lives in `clone_tool/`. It does
-  not; that's the vendored reference copy. Anyone onboarding would have edited the
-  wrong tree. Now documents the data, the database and how to start it.
-- **Skills added:** `deploy` (commit + push + deploy + verify), `start`
-  (backend/frontend locally), `pull` (sync + reinstall + migrate).
-
-### Gotchas worth remembering
-- Git Bash mangles `/ecs/pc-tool` into a Windows path → prefix `MSYS_NO_PATHCONV=1`.
-  `aws logs tail` also crashes on Next.js's `▲` → add `PYTHONUTF8=1`.
-- `next start` here needs `output: standalone` handling, and `BACKEND_INTERNAL_URL`
-  isn't picked up by it — easiest local test is to run the backend on :3001.
-- The clone tool's `Map` sheet means two different things across vintages
-  (FactSet crosswalk vs a manager/region table). Our loader ignores the old one.
-- The clone's redemption UI says "±2%" while its constant is `0.01` (±1%). Ours is
-  self-consistent at ±1% and now reads the tolerance from the response.
-
-### Still open
-- **HTTPS / auth** — unchanged from the 7/20 entry; ALB is HTTP-only and open.
-- **Two features are inert until newer files are loaded:** the alias crosswalk
-  needs a `Map` sheet with `Factset Name | Returns Name | Tab`, and the
-  "Actual track record" report blocks need a `Client` sheet. No workbook we have
-  contains the latter.
-- **`sslmode`** is still `prefer`, so libpq silently falls back to plaintext.
-  Pinning `require` would make failures legible; left out to change one variable
-  at a time during the outage.
+OneDrive's on-demand file hydration was intermittently failing reads of
+node_modules/.next files, which crashed `next build` AND `next dev` with
+`UNKNOWN: unknown error, read` (errno -4094), and even left some uploaded data
+files as unreadable dehydrated placeholders. Fixed by relocating:
+- Fresh `git clone` of origin (HEAD 5a0b69a) into **C:\dev\pc_tool** — this is
+  now the working copy. Reinstalled frontend deps and rebuilt the backend venv
+  there. Copied the gitignored data (backend/uploads/*.xlsx + cache/results.pkl)
+  so it boots fully loaded (139 managers, 12 portfolios, ISC universe).
+- Verified: `npm run dev` binds to **:3000** (no more accidental :3001
+  collision), backend on :3001, browser UI works end-to-end with 0 console
+  errors, and `next build` is fully green WITH the real type-check
+  ("Finished TypeScript in 7.1s", all 11 routes) — so the OneDrive path was the
+  entire cause.
+- Removed the `typescript.ignoreBuildErrors` workaround from next.config.ts
+  (commit e2e51b6, local only — not pushed). The old OneDrive copy and the
+  temporary `C:\Users\BryanRodas\pc_tool_fe` can be retired.
+- Run from now on: backend `cd C:\dev\pc_tool\backend; venv\Scripts\python.exe
+  run.py`; frontend `cd C:\dev\pc_tool\frontend; npm run dev` → open
+  http://localhost:3000.
