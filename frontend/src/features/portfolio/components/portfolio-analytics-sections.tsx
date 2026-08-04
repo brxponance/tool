@@ -15,6 +15,7 @@ import type {
 import { OverlapSection } from "@/features/overlap/components/overlap-section";
 import type { OverlapManagerInput } from "@/features/overlap/types";
 
+import { ClientRedemptionSection } from "./client-redemption-section";
 import { DiverseOwnershipSection } from "./diverse-ownership-section";
 import { MarginalContributionChart } from "./marginal-contribution-chart";
 import { MarketCycleSection } from "./market-cycle-section";
@@ -341,6 +342,10 @@ type PortfolioAnalyticsSectionsProps = {
   client: string | null;
   portfolioManagers: PortfolioManager[];
   hasExposures: boolean;
+  // For the client-redemption section, which only renders once a portfolio
+  // payload is loaded and needs the client's total AUM for its amount input.
+  hasPortfolio: boolean;
+  clientAum: number | null;
 };
 
 export function PortfolioAnalyticsSections({
@@ -360,6 +365,8 @@ export function PortfolioAnalyticsSections({
   client,
   portfolioManagers,
   hasExposures,
+  hasPortfolio,
+  clientAum,
 }: PortfolioAnalyticsSectionsProps) {
   // The overlap endpoints only need name + weights.
   const overlapManagers: OverlapManagerInput[] = portfolioManagers.map((m) => ({
@@ -425,34 +432,38 @@ export function PortfolioAnalyticsSections({
           </div>
 
           <div className="panel" id="portfolio-edge-section">
-            <div className="panel-header" style={{ padding: "8px 12px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <div className="panel-header" style={{ padding: "4px 12px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span className="panel-title">Portfolio Edge</span>
               <span style={{ fontFamily: "var(--mono)", fontSize: 9, color: "var(--text3)" }}>Weighted avg Norm Skill Z</span>
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 0 }}>
-              <div style={{ padding: "10px 14px", borderRight: "1px solid var(--border)" }}>
+              <div style={{ padding: "4px 12px 6px", borderRight: "1px solid var(--border)" }}>
                 <div style={{ fontFamily: "var(--mono)", fontSize: 9, color: "var(--text2)", textTransform: "uppercase", letterSpacing: ".06em" }}>Current</div>
-                <div style={{ fontFamily: "var(--mono)", fontSize: 22, fontWeight: 600, marginTop: 2, color: stats?.edge_current.z != null && stats.edge_current.z < 0 ? "var(--red)" : "var(--green)" }}>
+                <div style={{ fontFamily: "var(--mono)", fontSize: 17, fontWeight: 600, color: stats?.edge_current.z != null && stats.edge_current.z < 0 ? "var(--red)" : "var(--green)" }}>
                   {stats?.edge_current.z != null ? `${stats.edge_current.z >= 0 ? "+" : ""}${formatNumber(stats.edge_current.z, 2)}` : "--"}
                 </div>
-                <div style={{ fontFamily: "var(--mono)", fontSize: 9, color: "var(--text3)", marginTop: 1 }}>
+                <div style={{ fontFamily: "var(--mono)", fontSize: 9, color: "var(--text3)" }}>
                   {stats?.edge_current.total_weight ? `${formatPercent(stats.edge_current.covered_weight, 1)} of ${formatPercent(stats.edge_current.total_weight, 1)} scored` : ""}
                 </div>
               </div>
-              <div style={{ padding: "10px 14px" }}>
+              <div style={{ padding: "4px 12px 6px" }}>
                 <div style={{ fontFamily: "var(--mono)", fontSize: 9, color: "var(--text2)", textTransform: "uppercase", letterSpacing: ".06em" }}>Proposed</div>
-                <div style={{ fontFamily: "var(--mono)", fontSize: 22, fontWeight: 600, marginTop: 2, color: stats?.edge_proposed.z != null && stats.edge_proposed.z < 0 ? "var(--red)" : "var(--green)" }}>
+                <div style={{ fontFamily: "var(--mono)", fontSize: 17, fontWeight: 600, color: stats?.edge_proposed.z != null && stats.edge_proposed.z < 0 ? "var(--red)" : "var(--green)" }}>
                   {stats?.edge_proposed.z != null ? `${stats.edge_proposed.z >= 0 ? "+" : ""}${formatNumber(stats.edge_proposed.z, 2)}` : "--"}
                 </div>
-                <div style={{ fontFamily: "var(--mono)", fontSize: 9, color: "var(--text3)", marginTop: 1 }}>
+                <div style={{ fontFamily: "var(--mono)", fontSize: 9, color: "var(--text3)" }}>
                   {stats?.edge_proposed.total_weight ? `${formatPercent(stats.edge_proposed.covered_weight, 1)} of ${formatPercent(stats.edge_proposed.total_weight, 1)} scored` : ""}
                 </div>
               </div>
             </div>
           </div>
+
+          <DiverseOwnershipSection client={client} managers={portfolioManagers} />
         </div>
 
-        <div className="panel" id="risk-section">
+        {/* Flex column so the exposures table can stretch to the full height
+            of the left stack instead of leaving dead space below it. */}
+        <div className="panel" id="risk-section" style={{ display: "flex", flexDirection: "column" }}>
           <div className="panel-header" style={{ padding: "8px 12px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <span className="panel-title">FactSet Risk Exposures — Active Style</span>
             <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)", marginLeft: "auto" }}>
@@ -472,8 +483,11 @@ export function PortfolioAnalyticsSections({
               Upload a FactSet Risk file to see portfolio factor exposures.
             </div>
           ) : (
-            <div style={{ overflowX: "auto" }}>
-              <table className="data-table w-full">
+            <div style={{ overflowX: "auto", flex: 1 }}>
+              {/* height:100% makes the browser distribute the panel's spare
+                  vertical space across the factor rows, so the table always
+                  reaches the bottom of the panel. */}
+              <table className="data-table w-full" style={{ height: "100%" }}>
                 <thead>
                   {/* Group labels belong on the FIRST row, spanning their
                       value+bar pair; the sub-row carries Value/Bar. These were
@@ -532,24 +546,40 @@ export function PortfolioAnalyticsSections({
         </div>
       </div>
 
-      {/* Diverse rollup sits with the other headline portfolio metrics, above
-          Market Cycle — matching the reference tool's ordering. */}
-      <DiverseOwnershipSection client={client} managers={portfolioManagers} />
+      {/* Client redemption sits between the headline metrics row and Market
+          Cycle. Only meaningful once a portfolio is loaded. */}
+      {hasPortfolio ? (
+        <ClientRedemptionSection
+          client={client}
+          managers={portfolioManagers}
+          clientAum={clientAum}
+        />
+      ) : null}
 
-      <MarketCycleSection
-        benchmark={benchmark}
-        loading={loadingAncillary}
-        data={marketCycle}
-      />
-
-      {/* Holdings overlap sits between Market Cycle and Exposures, matching the
-          reference tool. Owned by the `overlap` feature — composed in here, not
-          reimplemented. Renders nothing without a FactSet exposures file. */}
-      <OverlapSection
-        client={client}
-        managers={overlapManagers}
-        hasExposures={hasExposures}
-      />
+      {/* Market cycle takes 2/3 of the row with holdings overlap alongside on
+          the right. OverlapSection renders nothing without a FactSet exposures
+          file, so the grid collapses to a single full-width column then. It is
+          owned by the `overlap` feature — composed in here, not reimplemented. */}
+      <div
+        className="mb-16"
+        style={{
+          display: "grid",
+          gridTemplateColumns: hasExposures ? "3fr 2fr" : "1fr",
+          gap: 16,
+          alignItems: "stretch",
+        }}
+      >
+        <MarketCycleSection
+          benchmark={benchmark}
+          loading={loadingAncillary}
+          data={marketCycle}
+        />
+        <OverlapSection
+          client={client}
+          managers={overlapManagers}
+          hasExposures={hasExposures}
+        />
+      </div>
 
       <PortfolioExposuresSection
         exposureMenu={exposureMenu}

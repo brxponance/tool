@@ -79,21 +79,17 @@ function OverlapMatrixGrid({
   const pairs: OverlapPair[] = data?.pairs ?? [];
   const n = managers.length;
 
+  // Fill the column: the table spans the full panel width and cells get taller
+  // when there are fewer managers, so small portfolios don't leave a sea of
+  // white space while 10-manager grids still fit without scrolling.
+  const cellH = n <= 4 ? 64 : n <= 6 ? 54 : n <= 8 ? 46 : 40;
+  const bigCells = cellH >= 54;
+
   const pmap = useMemo(() => {
     const m = new Map<string, OverlapPair>();
     pairs.forEach((p) => m.set(pairKey(p.i, p.j), p));
     return m;
   }, [pairs]);
-
-  const topPairs = useMemo(
-    () =>
-      pairs
-        .map((p) => ({ p, cw: p[basis].common_weight, cnt: p[basis].shared_count }))
-        .filter((x) => x.cnt > 0)
-        .sort((a, b) => b.cw - a.cw)
-        .slice(0, 5),
-    [pairs, basis],
-  );
 
   const headLabel: React.CSSProperties = {
     fontFamily: "var(--mono)",
@@ -103,6 +99,7 @@ function OverlapMatrixGrid({
     letterSpacing: ".06em",
     fontWeight: 600,
     margin: "10px 0 4px",
+    textAlign: "center",
   };
 
   if (n < 2) {
@@ -120,7 +117,21 @@ function OverlapMatrixGrid({
     <div>
       <div style={headLabel}>{label}</div>
       <div style={{ overflowX: "auto" }}>
-        <table style={{ borderCollapse: "separate", borderSpacing: 0, fontFamily: "var(--mono)" }}>
+        <table
+          style={{
+            borderCollapse: "separate",
+            borderSpacing: 0,
+            fontFamily: "var(--mono)",
+            width: "100%",
+            tableLayout: "fixed",
+          }}
+        >
+          <colgroup>
+            <col style={{ width: 140 }} />
+            {managers.map((_, idx) => (
+              <col key={idx} />
+            ))}
+          </colgroup>
           <thead>
             <tr>
               <th style={{ background: "transparent", padding: 0 }} />
@@ -164,9 +175,9 @@ function OverlapMatrixGrid({
                     color: "var(--text)",
                     fontWeight: 600,
                     textAlign: "right",
-                    padding: "0 10px 0 4px",
+                    padding: "0 8px 0 4px",
                     whiteSpace: "nowrap",
-                    maxWidth: 190,
+                    maxWidth: 150,
                     overflow: "hidden",
                     textOverflow: "ellipsis",
                   }}
@@ -178,8 +189,7 @@ function OverlapMatrixGrid({
                 </td>
                 {managers.map((colMgr, j) => {
                   const base: React.CSSProperties = {
-                    width: 62,
-                    height: 44,
+                    height: cellH,
                     border: "1px solid var(--surface)",
                     textAlign: "center",
                     lineHeight: 1.15,
@@ -192,8 +202,8 @@ function OverlapMatrixGrid({
                         title={`${rowMgr.display} — ${rowMgr.count} holdings`}
                         style={{ ...base, background: "var(--surface2)", color: "var(--text3)", cursor: "default" }}
                       >
-                        <div style={{ fontSize: 11, fontWeight: 600 }}>{rowMgr.count}</div>
-                        <div style={{ fontSize: 9, opacity: 0.82 }}>holdings</div>
+                        <div style={{ fontSize: bigCells ? 12 : 11, fontWeight: 600 }}>{rowMgr.count}</div>
+                        <div style={{ fontSize: bigCells ? 10 : 9, opacity: 0.82 }}>holdings</div>
                       </td>
                     );
                   }
@@ -218,8 +228,8 @@ function OverlapMatrixGrid({
                           outlineOffset: isActive ? -2 : undefined,
                         }}
                       >
-                        <div style={{ fontSize: 11, fontWeight: 600 }}>0</div>
-                        <div style={{ fontSize: 9, opacity: 0.82 }}>—</div>
+                        <div style={{ fontSize: bigCells ? 12 : 11, fontWeight: 600 }}>0</div>
+                        <div style={{ fontSize: bigCells ? 10 : 9, opacity: 0.82 }}>—</div>
                       </td>
                     );
                   }
@@ -238,8 +248,8 @@ function OverlapMatrixGrid({
                         outlineOffset: isActive ? -2 : undefined,
                       }}
                     >
-                      <div style={{ fontSize: 11, fontWeight: 600 }}>{cnt}</div>
-                      <div style={{ fontSize: 9, opacity: 0.82 }}>{cw.toFixed(1)}%</div>
+                      <div style={{ fontSize: bigCells ? 12 : 11, fontWeight: 600 }}>{cnt}</div>
+                      <div style={{ fontSize: bigCells ? 10 : 9, opacity: 0.82 }}>{cw.toFixed(1)}%</div>
                     </td>
                   );
                 })}
@@ -249,43 +259,6 @@ function OverlapMatrixGrid({
         </table>
       </div>
 
-      {topPairs.length ? (
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
-          <span
-            style={{
-              fontFamily: "var(--mono)",
-              fontSize: 9,
-              color: "var(--text2)",
-              textTransform: "uppercase",
-              letterSpacing: ".06em",
-              fontWeight: 600,
-              alignSelf: "center",
-            }}
-          >
-            Most overlap:
-          </span>
-          {topPairs.map((x) => (
-            <button
-              key={`${x.p.i}-${x.p.j}`}
-              type="button"
-              onClick={() => onCellClick(x.p.i, x.p.j, state)}
-              style={{
-                fontFamily: "var(--mono)",
-                fontSize: 10,
-                padding: "5px 9px",
-                border: "1px solid var(--border)",
-                borderRadius: 14,
-                background: "var(--surface)",
-                color: "var(--text2)",
-                cursor: "pointer",
-              }}
-            >
-              {shortName(managers[x.p.i]?.display ?? "")} × {shortName(managers[x.p.j]?.display ?? "")} ·{" "}
-              <b style={{ color: "var(--text)", fontWeight: 600 }}>{x.cw.toFixed(1)}%</b> / {x.cnt}
-            </button>
-          ))}
-        </div>
-      ) : null}
     </div>
   );
 }
@@ -425,8 +398,8 @@ export function OverlapSection({ client, managers, hasExposures = true }: Props)
   };
 
   return (
-    <div className="contrib-section mb-16">
-      <div className="panel">
+    <div className="contrib-section" style={{ height: "100%" }}>
+      <div className="panel" style={{ height: "100%", display: "flex", flexDirection: "column" }}>
         <div className="panel-header">
           <span className="panel-title">Holdings Overlap</span>
           <span
@@ -510,7 +483,16 @@ export function OverlapSection({ client, managers, hasExposures = true }: Props)
           </div>
         </div>
 
-        <div className="panel-body" style={{ padding: 12 }}>
+        <div
+          className="panel-body"
+          style={{
+            padding: 12,
+            flex: 1,
+            display: "flex",
+            flexDirection: "column",
+            justifyContent: "center",
+          }}
+        >
           {error ? <div className="alert alert-error">{error}</div> : null}
           {unmatched.length ? (
             <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--amber, #d68c1f)", marginBottom: 8 }}>
@@ -518,22 +500,24 @@ export function OverlapSection({ client, managers, hasExposures = true }: Props)
             </div>
           ) : null}
 
-          <OverlapMatrixGrid
-            label="Current"
-            data={current}
-            basis={basis}
-            vmax={vmax}
-            onCellClick={openDetail}
-            activeKey={detail.key}
-          />
-          <OverlapMatrixGrid
-            label="Proposed"
-            data={proposed}
-            basis={basis}
-            vmax={vmax}
-            onCellClick={openDetail}
-            activeKey={detail.key}
-          />
+          <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
+            <OverlapMatrixGrid
+              label="Current"
+              data={current}
+              basis={basis}
+              vmax={vmax}
+              onCellClick={openDetail}
+              activeKey={detail.key}
+            />
+            <OverlapMatrixGrid
+              label="Proposed"
+              data={proposed}
+              basis={basis}
+              vmax={vmax}
+              onCellClick={openDetail}
+              activeKey={detail.key}
+            />
+          </div>
 
           {detail.key ? (
             <div style={{ marginTop: 14, borderTop: "1px solid var(--border)", paddingTop: 10 }}>

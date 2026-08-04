@@ -502,6 +502,18 @@ select:focus {
   background: rgba(0, 119, 204, 0.04);
 }
 
+/* Tight variant for tables that must fit a half-width panel without
+   scrolling (portfolio managers table). */
+.data-table.tight th,
+.data-table.tight td {
+  padding-left: 5px;
+  padding-right: 5px;
+}
+
+.data-table.tight input[type="number"] {
+  width: 58px;
+}
+
 .data-table .mono {
   font-family: var(--mono);
   font-size: 11px;

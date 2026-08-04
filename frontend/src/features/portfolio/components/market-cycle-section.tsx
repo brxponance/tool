@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 
 import type { MarketCycleResponse, MarketCyclePlacement } from "../types";
 
-import { MC_BUCKETS, MarketCycleChart, mcApplyOverrides } from "./market-cycle-chart";
+import { MC_BUCKETS, MC_STATUS_COLORS, MarketCycleChart, mcApplyOverrides } from "./market-cycle-chart";
 
 type MarketCycleSectionProps = {
   benchmark: string;
@@ -55,6 +55,20 @@ export function MarketCycleSection({ benchmark, loading, data }: MarketCycleSect
     [data, overrides],
   );
 
+  // Union of current + proposed for the single combined chart. Each placement
+  // carries both weights, so merging by name (proposed wins) yields one entry
+  // per manager; the chart colors each dot retained/removed/added from there.
+  const combinedPlacements = useMemo<MarketCyclePlacement[]>(() => {
+    const byName: Record<string, MarketCyclePlacement> = {};
+    currentWithOverrides.forEach((p) => {
+      byName[p.name] = p;
+    });
+    proposedWithOverrides.forEach((p) => {
+      byName[p.name] = p;
+    });
+    return Object.values(byName);
+  }, [currentWithOverrides, proposedWithOverrides]);
+
   // Combine current+proposed for the placement table, sorted by effective x.
   const tableRows = useMemo<MarketCyclePlacement[]>(() => {
     if (!data) return [];
@@ -87,8 +101,8 @@ export function MarketCycleSection({ benchmark, loading, data }: MarketCycleSect
   const fatal = data?.error || (data?.missing_universe && !hasPlacements);
 
   return (
-    <div className="contrib-section mb-16" id="market-cycle-section">
-      <div className="panel">
+    <div className="contrib-section" id="market-cycle-section" style={{ height: "100%" }}>
+      <div className="panel" style={{ height: "100%", display: "flex", flexDirection: "column" }}>
         <div className="panel-header">
           <span className="panel-title">Market Cycle Chart</span>
           <span style={{ marginLeft: "auto", fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)" }}>
@@ -123,46 +137,42 @@ export function MarketCycleSection({ benchmark, loading, data }: MarketCycleSect
                 include them.
               </div>
             )}
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "1fr 1fr",
-                gap: 16,
-                padding: 16,
-                background: "var(--surface)",
-              }}
-            >
-              <div>
-                <div
-                  style={{
-                    fontFamily: "var(--mono)",
-                    fontSize: 10,
-                    color: "var(--text2)",
-                    textAlign: "center",
-                    marginBottom: 8,
-                    textTransform: "uppercase",
-                    letterSpacing: ".06em",
-                  }}
-                >
-                  Current Portfolio
-                </div>
-                <MarketCycleChart placements={currentWithOverrides} portfolioKey="current" />
-              </div>
-              <div>
-                <div
-                  style={{
-                    fontFamily: "var(--mono)",
-                    fontSize: 10,
-                    color: "var(--text2)",
-                    textAlign: "center",
-                    marginBottom: 8,
-                    textTransform: "uppercase",
-                    letterSpacing: ".06em",
-                  }}
-                >
-                  Proposed Portfolio
-                </div>
-                <MarketCycleChart placements={proposedWithOverrides} portfolioKey="proposed" />
+            <div style={{ padding: 12, background: "var(--surface)" }}>
+              <MarketCycleChart placements={combinedPlacements} portfolioKey="combined" />
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  justifyContent: "center",
+                  gap: 18,
+                  marginTop: 8,
+                  fontFamily: "var(--mono)",
+                  fontSize: 10,
+                  color: "var(--text2)",
+                }}
+              >
+                {[
+                  { label: "In current & proposed", background: MC_STATUS_COLORS.retained.fill },
+                  { label: "Added", background: MC_STATUS_COLORS.added.fill },
+                  { label: "Removed", background: MC_STATUS_COLORS.removed.fill },
+                  {
+                    label: "Removed + added (same placement)",
+                    background: `linear-gradient(90deg, ${MC_STATUS_COLORS.removed.fill} 50%, ${MC_STATUS_COLORS.added.fill} 50%)`,
+                  },
+                ].map((item) => (
+                  <span key={item.label} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+                    <span
+                      style={{
+                        width: 10,
+                        height: 10,
+                        borderRadius: "50%",
+                        background: item.background,
+                        display: "inline-block",
+                      }}
+                    />
+                    {item.label}
+                  </span>
+                ))}
               </div>
             </div>
 

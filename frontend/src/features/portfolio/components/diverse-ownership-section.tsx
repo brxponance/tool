@@ -20,58 +20,40 @@ type ResultState = {
   error: string | null;
 };
 
-const cellLabel: React.CSSProperties = {
-  fontFamily: "var(--mono)",
-  fontSize: 10,
-  color: "var(--text3)",
-  textTransform: "uppercase",
-  letterSpacing: 0.5,
-};
-const cellValue: React.CSSProperties = {
-  fontFamily: "var(--mono)",
-  fontSize: 18,
-  color: "var(--text)",
-  marginTop: 2,
-};
-
-function RollupCard({ title, r }: { title: string; r: DiverseOwnershipRollup }) {
+// One Current/Proposed stat cell, mirroring the Portfolio Edge panel: big
+// headline % (portfolio weight with diverse firms) over the firm-count
+// fraction, with unmatched weight as the footnote.
+function RollupCell({
+  label,
+  r,
+  divider,
+}: {
+  label: string;
+  r: DiverseOwnershipRollup;
+  divider?: boolean;
+}) {
   return (
-    <div
-      style={{
-        border: "1px solid var(--border)",
-        background: "var(--surface2)",
-        padding: 14,
-      }}
-    >
-      <div style={{ ...cellLabel, marginBottom: 8, color: "var(--text2)" }}>{title}</div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 12 }}>
-        <div>
-          <div style={cellLabel}>Diverse weight</div>
-          <div style={{ ...cellValue, color: "var(--accent)" }}>{r.weight_pct.toFixed(1)}%</div>
-        </div>
-        <div>
-          <div style={cellLabel}>Diverse firms</div>
-          <div style={cellValue}>
-            {r.n_diverse}
-            <span style={{ fontSize: 12, color: "var(--text3)" }}> / {r.n_firms}</span>
-          </div>
-        </div>
-        <div>
-          <div style={cellLabel}>Firm-count ratio</div>
-          <div style={{ ...cellValue, fontSize: 14 }}>{r.ratio_pct.toFixed(1)}%</div>
-        </div>
-        <div>
-          <div style={cellLabel}>Unmatched weight</div>
-          <div
-            style={{
-              ...cellValue,
-              fontSize: 14,
-              color: r.unknown_weight_pct > 20 ? "var(--amber)" : "var(--text2)",
-            }}
-          >
-            {r.unknown_weight_pct.toFixed(1)}%
-          </div>
-        </div>
+    <div style={{ padding: "4px 12px 6px", borderRight: divider ? "1px solid var(--border)" : undefined }}>
+      <div style={{ fontFamily: "var(--mono)", fontSize: 9, color: "var(--text2)", textTransform: "uppercase", letterSpacing: ".06em" }}>
+        {label}
+      </div>
+      <div style={{ fontFamily: "var(--mono)", display: "flex", alignItems: "baseline", gap: 8 }}>
+        <span style={{ fontSize: 17, fontWeight: 600, color: "var(--accent)" }}>
+          {r.weight_pct.toFixed(1)}%
+        </span>
+        <span style={{ fontSize: 12, color: "var(--text)" }}>
+          {r.n_diverse}
+          <span style={{ color: "var(--text3)" }}> / {r.n_firms} firms</span>
+        </span>
+      </div>
+      <div
+        style={{
+          fontFamily: "var(--mono)",
+          fontSize: 9,
+          color: r.unknown_weight_pct > 20 ? "var(--amber)" : "var(--text3)",
+        }}
+      >
+        unmatched {r.unknown_weight_pct.toFixed(1)}%
       </div>
     </div>
   );
@@ -125,81 +107,54 @@ export function DiverseOwnershipSection({ client, managers }: Props) {
   const data = result.data;
 
   return (
-    <div className="contrib-section mb-16">
-      <div className="panel">
-        <div className="panel-header">
-          <span className="panel-title">Diverse / Woman Owned</span>
-          <span
+    <div className="panel" id="diverse-ownership-section">
+      <div className="panel-header" style={{ padding: "4px 12px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <span className="panel-title">Diverse / Woman Owned</span>
+        <span style={{ fontFamily: "var(--mono)", fontSize: 9, color: "var(--text3)" }}>
+          Majority-owned (≥{data?.threshold ?? threshold}%)
+        </span>
+        {result.loading && (
+          <span style={{ fontFamily: "var(--mono)", fontSize: 9, color: "var(--text3)" }}>Computing…</span>
+        )}
+        <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 5 }}>
+          <span style={{ fontFamily: "var(--mono)", fontSize: 9, color: "var(--text3)" }}>Threshold</span>
+          <input
+            type="number"
+            min={0}
+            max={100}
+            step={5}
+            value={threshold}
+            onChange={(e) => setThreshold(Number(e.target.value) || 0)}
             style={{
+              width: 48,
               fontFamily: "var(--mono)",
-              fontSize: 10,
-              color: "var(--text3)",
-              marginLeft: 8,
+              fontSize: 11,
+              padding: "2px 4px",
+              border: "1px solid var(--border)",
+              background: "var(--surface)",
+              color: "var(--text)",
             }}
-          >
-            Majority-owned (≥{data?.threshold ?? threshold}%)
-          </span>
-        </div>
-        <div className="panel-body" style={{ padding: 16 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)" }}>Threshold</span>
-              <input
-                type="number"
-                min={0}
-                max={100}
-                step={5}
-                value={threshold}
-                onChange={(e) => setThreshold(Number(e.target.value) || 0)}
-                style={{
-                  width: 64,
-                  fontFamily: "var(--mono)",
-                  fontSize: 12,
-                  padding: "4px 6px",
-                  border: "1px solid var(--border)",
-                  background: "var(--surface)",
-                  color: "var(--text)",
-                }}
-              />
-              <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)" }}>% diverse/female</span>
-            </div>
-            {result.loading && (
-              <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)" }}>
-                Computing…
-              </span>
-            )}
-            {!ready && (
-              <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text3)" }}>
-                Select a client first.
-              </span>
-            )}
-            {result.error && (
-              <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--red)" }}>
-                {result.error}
-              </span>
-            )}
-          </div>
-
-          {data && !data.has_data && (
-            <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text3)" }}>
-              No qualitative data loaded. Upload a firm/strategy qualitative workbook on the Setup tab.
-            </div>
-          )}
-
-          {data?.has_data && data.current && data.proposed && (
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-                gap: 12,
-              }}
-            >
-              <RollupCard title={`Current (≥ ${data.threshold ?? threshold}%)`} r={data.current} />
-              <RollupCard title={`Proposed (≥ ${data.threshold ?? threshold}%)`} r={data.proposed} />
-            </div>
-          )}
-        </div>
+          />
+          <span style={{ fontFamily: "var(--mono)", fontSize: 9, color: "var(--text3)" }}>%</span>
+        </span>
       </div>
+
+      {data?.has_data && data.current && data.proposed ? (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 0 }}>
+          <RollupCell label="Current" r={data.current} divider />
+          <RollupCell label="Proposed" r={data.proposed} />
+        </div>
+      ) : (
+        <div style={{ padding: "10px 14px", fontFamily: "var(--mono)", fontSize: 11, color: result.error ? "var(--red)" : "var(--text3)" }}>
+          {result.error
+            ? result.error
+            : !ready
+              ? "Select a client first."
+              : data && !data.has_data
+                ? "No qualitative data loaded. Upload a firm/strategy qualitative workbook on the Setup tab."
+                : "Computing…"}
+        </div>
+      )}
     </div>
   );
 }

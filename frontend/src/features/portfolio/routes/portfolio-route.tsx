@@ -10,7 +10,6 @@ import { OptimizerPanel } from "@/features/optimize/components/optimizer-panel";
 
 import { AddManagerModal } from "../components/add-manager-modal";
 import { ClientManageModal } from "../components/client-manage-modal";
-import { ClientRedemptionSection } from "../components/client-redemption-section";
 import { MemoExportButton } from "../components/memo-export-button";
 import { PortfolioAnalyticsSections } from "../components/portfolio-analytics-sections";
 import { PortfolioTable } from "../components/portfolio-table";
@@ -294,14 +293,6 @@ export function PortfolioRoute() {
         <OptimizerPanel clientName={selectedClient} />
       </div>
 
-      {portfolio ? (
-        <ClientRedemptionSection
-          client={selectedClient}
-          managers={managers}
-          clientAum={clientAum}
-        />
-      ) : null}
-
       <PortfolioAnalyticsSections
         benchmark={benchmark}
         contribution={contribution}
@@ -319,6 +310,8 @@ export function PortfolioRoute() {
         client={selectedClient}
         portfolioManagers={managers}
         hasExposures={Boolean(status?.has_exposures)}
+        hasPortfolio={Boolean(portfolio)}
+        clientAum={clientAum}
       />
 
       <AddManagerModal

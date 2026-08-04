@@ -12,7 +12,7 @@ import { PlaceholderBucketsModal } from "./placeholder-buckets-modal";
 
 // Column count of the managers table without the optional AUM group. Used for
 // full-width rows (ideal complement, AUM banner) appended to the table body.
-const COLSPAN_BASE = 17;
+const COLSPAN_BASE = 9;
 // The AUM group adds two sub-columns (Cur / Prop) after Proposed Wt.
 const AUM_COLS = 2;
 
@@ -356,11 +356,10 @@ export function PortfolioTable({
 
   return (
     <div className="overflow-x-auto">
-      <div className="overflow-x-auto">
-        <table className="data-table w-full">
+      <table className="data-table tight w-full">
           <thead>
             <tr>
-              <th rowSpan={headSpan} style={{ width: 60 }}>Tab</th>
+              <th rowSpan={headSpan} style={{ width: 46 }}>Tab</th>
               <th rowSpan={headSpan}>Manager</th>
               <th rowSpan={headSpan}>Current Wt</th>
               <th rowSpan={headSpan}>Proposed Wt</th>
@@ -379,14 +378,6 @@ export function PortfolioTable({
               <th rowSpan={headSpan} title="Normalized Skill Z-score: annualized since-inception skill, z-scored against same-window peers">
                 Norm Skill (Z)
               </th>
-              <th rowSpan={headSpan}>Core</th>
-              <th rowSpan={headSpan}>Value</th>
-              <th rowSpan={headSpan}>Growth</th>
-              <th rowSpan={headSpan}>Yield</th>
-              <th rowSpan={headSpan}>Quality</th>
-              <th rowSpan={headSpan}>Dynamic</th>
-              <th rowSpan={headSpan}>Defensive</th>
-              <th rowSpan={headSpan}>Low Vol</th>
               <th rowSpan={headSpan}>R² Full</th>
               <th rowSpan={headSpan}></th>
             </tr>
@@ -580,14 +571,6 @@ export function PortfolioTable({
                   <td className={`mono ${vg3Class}`}>{formatPercent(vg3)}</td>
                   <td className={`mono ${fullClass}`}>{formatPercent(full)}</td>
                   <td className={`mono ${nsClass}`}>{nsZ == null ? "--" : `${nsZ >= 0 ? "+" : ""}${formatNumber(nsZ, 2)}`}</td>
-                  <td className="mono">{formatPercent(manager.style_buckets.Core ?? 0)}</td>
-                  <td className="mono">{formatPercent(manager.style_buckets.Value ?? 0)}</td>
-                  <td className="mono">{formatPercent(manager.style_buckets.Growth ?? 0)}</td>
-                  <td className="mono">{formatPercent(manager.style_buckets.Yield ?? 0)}</td>
-                  <td className="mono">{formatPercent(manager.style_buckets.Quality ?? 0)}</td>
-                  <td className="mono">{formatPercent(manager.style_buckets.Dynamic ?? 0)}</td>
-                  <td className="mono">{formatPercent(manager.style_buckets.Defensive ?? 0)}</td>
-                  <td className="mono">{formatPercent(manager.style_buckets["Low Vol"] ?? 0)}</td>
                   <td>
                     <span className="mono" style={{ color: "var(--text2)" }}>{r2Label}%</span>
                     <span className="r2-bar">
@@ -643,8 +626,7 @@ export function PortfolioTable({
               </>
             ) : null}
           </tbody>
-        </table>
-      </div>
+      </table>
       <PlaceholderBucketsModal
         manager={editingPlaceholder}
         onClose={() => setEditingPlaceholder(null)}

@@ -4,6 +4,7 @@
 
 _Newest first. Add new entries directly below this index._
 
+- [2026-08-04 — One combined market-cycle chart; localhost-vs-127.0.0.1 dev gotcha](#2026-08-04--one-combined-market-cycle-chart-localhost-vs-127001-dev-gotcha)
 - [2026-07-31 — Added root CLAUDE.md; journals now indexed and newest-first](#2026-07-31--added-root-claudemd-journals-now-indexed-and-newest-first)
 - [2026-07-31 — Ported the new clone_tool drop; fixed the deploy outage; made deploys self-service](#2026-07-31-ported-the-new-clone_tool-drop-fixed-the-deploy-outage-made-deploys-self-service)
 - [2026-07-20 — Fixed broken deploys + added a stable URL (ALB)](#2026-07-20-fixed-broken-deploys-added-a-stable-url-alb)
@@ -11,6 +12,122 @@ _Newest first. Add new entries directly below this index._
 - [2026-07-07 — Moved project off OneDrive to C:\dev\pc_tool (canonical working copy)](#2026-07-07-moved-project-off-onedrive-to-cdevpc_tool-canonical-working-copy)
 
 ---
+
+## 2026-08-04 — One combined market-cycle chart; localhost-vs-127.0.0.1 dev gotcha
+
+### Market cycle: two charts → one
+
+The Portfolio tab used to render side-by-side "Current Portfolio" and "Proposed
+Portfolio" market-cycle charts. Replaced with a **single combined chart**: blue
+dot = manager in both, red = being removed (current weight > 0, proposed = 0),
+green = being added, and a half-red/half-green dot when a removed and an added
+manager land on the exact same placement.
+
+This was a **regression against the prototype** — `clone_tool/static/index.html`
+already had the combined chart (`mcStatus`, `MC_STATUS_COLORS`, semicircle
+split-dot rendering around L5232–5793); the Next.js rewrite had reverted to two
+charts. The change is a port, not new design.
+
+Files: `frontend/src/features/portfolio/components/market-cycle-chart.tsx`
+(new `portfolioKey="combined"` mode + exported `mcStatus`/`MC_STATUS_COLORS`)
+and `market-cycle-section.tsx` (single full-width chart + color legend). The
+Report tab still uses `portfolioKey="current"` and is untouched. No backend
+change: `/market_cycle` returns one placement per manager carrying **both**
+weights, so added/removed is derived client-side.
+
+Follow-up in the same session: the market-cycle and Holdings Overlap sections
+now share one grid row in `portfolio-analytics-sections.tsx` — market cycle
+left, overlap right, final split **3fr 2fr** (60/40; started at 2/3–1/3, widened
+the overlap column because portfolios run up to 10 managers). When no exposures
+file is loaded, `OverlapSection` renders nothing and the grid collapses to one
+full-width column rather than leaving a hole.
+
+Polish pass (three screenshot-critique-adjust iterations with Playwright):
+
+- **Equal heights**: both section roots get `height: 100%` and their `.panel`s
+  become flex columns; the overlap `.panel-body` is `flex: 1` and centers its
+  content vertically. Grid `alignItems: stretch` does the rest — measured
+  0px height delta at 5 and 10 managers.
+- **Overlap panel**: removed the "Most overlap" chip rows (cell click still
+  opens the same detail table), grouped Current/Proposed with a fixed 28px gap,
+  and made the matrices **fill the column**: `width: 100%` +
+  `tableLayout: fixed` with a 140px label `<col>` and the rest split evenly,
+  so column count no longer dictates table width. Cell *height* steps by
+  manager count (≤4 → 64, ≤6 → 54, ≤8 → 46, else 40) with fonts bumped one
+  point on the big sizes — small portfolios get big readable cells instead of
+  whitespace, and a 10-manager grid fits with no horizontal scroll (fixed
+  layout also cured the clipped last rotated header).
+- **Portfolio Managers table**: removed the eight style-bucket columns (Core,
+  Value, Growth, Yield, Quality, Dynamic, Defensive, Low Vol — hand-written
+  `<th>`/`<td>` pairs in `portfolio-table.tsx`, not array-driven) so the table
+  fits its half-width panel without horizontal scroll. **`COLSPAN_BASE` 17 → 9**
+  is the load-bearing edit — every full-width row (AUM banner, ideal
+  complement, qual detail) derives its colspan from that constant, so change
+  the constant, never the call sites. Also removed a redundant nested
+  `overflow-x-auto` wrapper, and closed the last ~50px of overflow with a new
+  `.data-table.tight` CSS variant (5px horizontal cell padding, 58px weight
+  inputs) plus a narrower Tab column. Verified `scrollWidth == clientWidth` on
+  MD and NYC. Bucket percentages are no longer visible in this table; the
+  placeholder "Edit buckets" modal still shows and edits them.
+- **Diverse / Woman Owned**: moved from a full-width section into the left
+  column stack directly under Portfolio Edge (left of FactSet Risk Exposures),
+  restyled to match the Edge panel — Current | Proposed cells with a big
+  `weight_pct%` headline, an `n_diverse / n_firms firms` fraction, and an
+  unmatched-weight footnote. The threshold input moved into the panel header.
+  Fetch logic untouched. Gotcha found while verifying: the backend reads
+  `float(payload.get('threshold', 50) or 50)` — a threshold of **0 is falsy
+  and silently becomes 50** (`app.py:4472`); pre-existing, left as is.
+- **FactSet Risk dead space**: the risk panel stretches to the left stack's
+  height, which left whitespace under its 11-row table. Fix: panel is a flex
+  column, the table wrapper gets `flex: 1`, and the table gets
+  `height: "100%"` — browsers distribute a table's spare height across its
+  rows, so the factor rows fatten evenly and the table always reaches the
+  panel bottom. Edge/Diverse stat cells also tightened (4px header/cell
+  padding, 17px headline, Diverse firm-fraction inlined beside the %) —
+  Edge 120→92px, Diverse 145→96px.
+- **Client Redemption**: moved out of `portfolio-route.tsx` into
+  `portfolio-analytics-sections.tsx`, rendered right after the Edge/Risk grid
+  and before Market Cycle. That component now takes `hasPortfolio` and
+  `clientAum` props since the route owned those values.
+- **Chart whitespace**: trimmed the SVG layout constants in
+  `market-cycle-chart.tsx` — macro panels 118 → 82 (they had ~35px of dead
+  space below the bullets), plot band 200 → 165, plus smaller band gaps.
+  Heights are viewBox units, so the chart just renders shorter at the same
+  width. Watch the recession *metrics* panel when touching `metricsPanelH`:
+  its 6 bullets nearly fill the 90px.
+
+Gotchas for next time:
+
+- Group dots by `x` only — `y` is a pure function of `x` (`waveY`), so "same
+  placement" = same x. And `x` is nullable in the TS types (`(p.x ?? 0)`),
+  unlike the prototype which assumes it's set.
+- Keep name labels **per manager**, not per dot-group, so both names show on a
+  shared split dot; `labelOffsets()` is index-aligned to the placements array.
+- Verified live with visible Playwright: zeroing a proposed weight re-fetches
+  `/market_cycle` and flips that dot red. The added/green and split-dot branches
+  are straight ports but weren't exercised through the UI (needs the
+  add-manager flow) — worth a glance next time a real add happens.
+
+### The "no data" mystery: Next 16 blocks dev assets on 127.0.0.1
+
+The frontend dev server looked completely empty (status pill stuck on
+"Checking...", every panel in its empty state) even though the backend and the
+`/api/backend/*` proxy returned full data via curl. Root cause: **Next.js 16
+blocks cross-origin dev resources** — pages opened at `http://127.0.0.1:3000`
+get their `/_next/*` requests blocked (`allowedDevOrigins` warning in the dev
+server log), React never hydrates, so no data fetch ever fires and the page
+sits in its server-rendered initial state. Silent in the browser; the only
+tells are the log warning and failing HMR websocket handshakes.
+
+Use **http://localhost:3000** for local dev. Killing/restarting the dev server
+does nothing (it was never wedged), and curl-based health checks can't catch
+it — they pass while the browser is broken. The one-line fix
+(`allowedDevOrigins: ["127.0.0.1"]` in `next.config.ts`) was proposed but the
+user chose to keep the config untouched; if 127.0.0.1 support is ever wanted,
+that's the change. Also noted along the way: no data files are ever "missing"
+locally — `backend/cache/results.pkl` (65 MB, not in git, expensive to
+recompute) plus `backend/uploads/` hold everything; don't press Clear Cache /
+Reset Universe casually.
 
 ## 2026-07-31 — Added root CLAUDE.md; journals now indexed and newest-first
 

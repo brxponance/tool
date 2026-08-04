@@ -108,6 +108,53 @@ export function mcApplyOverrides(
   });
 }
 
+// Classify a placement as the portfolio moves from current → proposed weights.
+export type McStatus = "retained" | "removed" | "added";
+
+export function mcStatus(p: MarketCyclePlacement): McStatus {
+  const cw = p.current_weight || 0;
+  const pw = p.proposed_weight || 0;
+  if (cw > 0 && pw <= 0) return "removed";
+  if (cw <= 0 && pw > 0) return "added";
+  return "retained";
+}
+
+// Dot colors for the combined market-cycle chart.
+export const MC_STATUS_COLORS: Record<McStatus, { fill: string; stroke: string }> = {
+  retained: { fill: "#0077cc", stroke: "#004a80" },
+  removed: { fill: "#d94b42", stroke: "#a3352e" },
+  added: { fill: "#22a24d", stroke: "#14713a" },
+};
+
+const MC_STATUS_LABELS: Record<McStatus, string> = {
+  retained: "Retained",
+  removed: "Removed",
+  added: "Added",
+};
+
+function mcTip(
+  p: MarketCyclePlacement,
+  portfolioKey: "current" | "proposed" | "combined",
+): string {
+  const lines = [
+    portfolioKey === "combined" ? `${p.name} — ${MC_STATUS_LABELS[mcStatus(p)]}` : p.name,
+    `Bucket: ${p.bucket}${p.is_override ? " (override)" : ""}`,
+    ...(p.is_override && p._original_bucket ? [`Default bucket: ${p._original_bucket}`] : []),
+    `Initial: ${p.initial_bucket}${p.is_defensive ? " → Defensive" : ""}`,
+    ...(p.v_vs_g != null
+      ? [`V-vs-G: ${p.v_vs_g.toFixed(3)} (pctl ${(p.v_pct * 100).toFixed(1)}%)`]
+      : [`V pctl: ${(p.v_pct * 100).toFixed(1)}%`]),
+    ...(p.q_vs_d != null
+      ? [`Q-vs-D: ${p.q_vs_d.toFixed(3)} (pctl ${(p.q_pct * 100).toFixed(1)}%)`]
+      : [`Q pctl: ${(p.q_pct * 100).toFixed(1)}%`]),
+    ...(p.downside_capture != null ? [`10yr Downside Cap: ${p.downside_capture.toFixed(1)}`] : []),
+    portfolioKey === "combined"
+      ? `Weight: ${((p.current_weight || 0) * 100).toFixed(1)}% → ${((p.proposed_weight || 0) * 100).toFixed(1)}%`
+      : `Weight: ${((portfolioKey === "current" ? p.current_weight : p.proposed_weight) * 100).toFixed(1)}%`,
+  ];
+  return lines.join("\n");
+}
+
 const PHASES = [
   { x0: 0.0, x1: 1.0, label: "RECOVERY", gradId: "ph_green" },
   { x0: 1.0, x1: 2.0, label: "MID", gradId: "ph_yellow" },
@@ -160,7 +207,7 @@ const QUALITY_LABELS = [
 
 export type MarketCycleChartProps = {
   placements: MarketCyclePlacement[];
-  portfolioKey: "current" | "proposed";
+  portfolioKey: "current" | "proposed" | "combined";
 };
 
 export function MarketCycleChart({ placements, portfolioKey }: MarketCycleChartProps) {
@@ -170,23 +217,23 @@ export function MarketCycleChart({ placements, portfolioKey }: MarketCycleChartP
   const chartRight = W - marginX;
   const chartW = chartRight - chartLeft;
 
-  const phaseHeaderY = 4;
-  const phaseHeaderH = 26;
+  const phaseHeaderY = 2;
+  const phaseHeaderH = 24;
   const macroLabelY = phaseHeaderY + phaseHeaderH + 2;
-  const labelBandH = 18;
+  const labelBandH = 16;
   const macroPanelY = macroLabelY + labelBandH;
-  const macroPanelH = 118;
-  const momentumY = macroPanelY + macroPanelH + 10;
-  const momentumH = 14;
-  const plotTop = momentumY + momentumH + 6;
-  const plotH = 200;
+  const macroPanelH = 82;
+  const momentumY = macroPanelY + macroPanelH + 6;
+  const momentumH = 12;
+  const plotTop = momentumY + momentumH + 4;
+  const plotH = 165;
   const plotBottom = plotTop + plotH;
-  const qualY = plotBottom + 4;
+  const qualY = plotBottom + 3;
   const qualH = 22;
-  const metricsLabelY = qualY + qualH + 6;
+  const metricsLabelY = qualY + qualH + 4;
   const metricsPanelY = metricsLabelY + labelBandH;
   const metricsPanelH = 90;
-  const H = metricsPanelY + metricsPanelH + 6;
+  const H = metricsPanelY + metricsPanelH + 4;
 
   const xScale = (x: number) => chartLeft + (x / 4) * chartW;
   const waveY0 = plotBottom - 0.15 * plotH;
@@ -390,27 +437,80 @@ export function MarketCycleChart({ placements, portfolioKey }: MarketCycleChartP
       <path d={wavePath} fill="none" stroke={`url(#${gp}wave)`} strokeWidth="5.5" strokeLinecap="round" />
 
       {/* Manager dots + labels */}
-      {placements.length ? (
+      {placements.length && portfolioKey === "combined" ? (
+        <>
+          {/* Group by x (y is a pure function of x) so a removed and an added
+              manager landing on the exact same placement collapse into a
+              single half-red/half-green dot instead of two overlapping dots. */}
+          {Object.values(
+            placements.reduce<Record<string, MarketCyclePlacement[]>>((acc, p) => {
+              const key = (p.x ?? 0).toFixed(3);
+              (acc[key] = acc[key] || []).push(p);
+              return acc;
+            }, {}),
+          ).map((grp) => {
+            const cx = xScale(grp[0].x ?? 0);
+            const cy = yScale(waveY(grp[0].x ?? 0));
+            const r = 9;
+            const hasRemoved = grp.some((p) => mcStatus(p) === "removed");
+            const hasAdded = grp.some((p) => mcStatus(p) === "added");
+            const tip = grp.map((p) => mcTip(p, portfolioKey)).join("\n───\n");
+            const key = `grp-${(grp[0].x ?? 0).toFixed(3)}`;
+            if (hasRemoved && hasAdded) {
+              // Left semicircle red (removed), right semicircle green (added).
+              return (
+                <g key={key}>
+                  <path
+                    d={`M ${cx} ${cy - r} A ${r} ${r} 0 0 0 ${cx} ${cy + r} Z`}
+                    fill={MC_STATUS_COLORS.removed.fill}
+                  />
+                  <path
+                    d={`M ${cx} ${cy - r} A ${r} ${r} 0 0 1 ${cx} ${cy + r} Z`}
+                    fill={MC_STATUS_COLORS.added.fill}
+                  />
+                  <circle cx={cx} cy={cy} r={r} fill="none" stroke="#555" strokeWidth="1.5">
+                    <title>{tip}</title>
+                  </circle>
+                </g>
+              );
+            }
+            const c = hasRemoved
+              ? MC_STATUS_COLORS.removed
+              : hasAdded
+                ? MC_STATUS_COLORS.added
+                : MC_STATUS_COLORS.retained;
+            return (
+              <circle key={key} cx={cx} cy={cy} r={r} fill={c.fill} stroke={c.stroke} strokeWidth="1.5">
+                <title>{tip}</title>
+              </circle>
+            );
+          })}
+          {/* Labels: one per manager, so both names in a shared placement still show. */}
+          {placements.map((p, idx) => {
+            const cx = xScale(p.x ?? 0);
+            const cy = yScale(waveY(p.x ?? 0));
+            const display = p.name.length > 18 ? `${p.name.slice(0, 18)}…` : p.name;
+            return (
+              <text
+                key={`lbl-${idx}`}
+                x={cx}
+                y={cy + offsets[idx].dy}
+                textAnchor="middle"
+                fontSize="11"
+                fill="#2a2a2a"
+                fontWeight="500"
+              >
+                {display}
+              </text>
+            );
+          })}
+        </>
+      ) : placements.length ? (
         placements.map((p, idx) => {
           const cx = xScale(p.x ?? 0);
           const cy = yScale(waveY(p.x ?? 0));
           const off = offsets[idx];
-          const w = portfolioKey === "current" ? p.current_weight : p.proposed_weight;
-          const tipLines = [
-            p.name,
-            `Bucket: ${p.bucket}${p.is_override ? " (override)" : ""}`,
-            ...(p.is_override && p._original_bucket ? [`Default bucket: ${p._original_bucket}`] : []),
-            `Initial: ${p.initial_bucket}${p.is_defensive ? " → Defensive" : ""}`,
-            ...(p.v_vs_g != null
-              ? [`V-vs-G: ${p.v_vs_g.toFixed(3)} (pctl ${(p.v_pct * 100).toFixed(1)}%)`]
-              : [`V pctl: ${(p.v_pct * 100).toFixed(1)}%`]),
-            ...(p.q_vs_d != null
-              ? [`Q-vs-D: ${p.q_vs_d.toFixed(3)} (pctl ${(p.q_pct * 100).toFixed(1)}%)`]
-              : [`Q pctl: ${(p.q_pct * 100).toFixed(1)}%`]),
-            ...(p.downside_capture != null ? [`10yr Downside Cap: ${p.downside_capture.toFixed(1)}`] : []),
-            `Weight: ${(w * 100).toFixed(1)}%`,
-          ];
-          const tip = tipLines.join("\n");
+          const tip = mcTip(p, portfolioKey);
           const display = p.name.length > 18 ? `${p.name.slice(0, 18)}…` : p.name;
           return (
             <g key={`mgr-${idx}`}>
@@ -432,7 +532,9 @@ export function MarketCycleChart({ placements, portfolioKey }: MarketCycleChartP
           fontSize="11"
           fill="#888"
         >
-          No managers with {portfolioKey} weight &gt; 0
+          {portfolioKey === "combined"
+            ? "No managers in portfolio"
+            : `No managers with ${portfolioKey} weight > 0`}
         </text>
       )}
 
