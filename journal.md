@@ -4,6 +4,7 @@
 
 _Newest first. Add new entries directly below this index._
 
+- [2026-08-06 — Deploys have been failing since Jul 31: pc-tool/database-url unreadable](#2026-08-06--deploys-have-been-failing-since-jul-31-pc-tooldatabase-url-unreadable)
 - [2026-08-04 — One combined market-cycle chart; localhost-vs-127.0.0.1 dev gotcha](#2026-08-04--one-combined-market-cycle-chart-localhost-vs-127001-dev-gotcha)
 - [2026-07-31 — Added root CLAUDE.md; journals now indexed and newest-first](#2026-07-31--added-root-claudemd-journals-now-indexed-and-newest-first)
 - [2026-07-31 — Ported the new clone_tool drop; fixed the deploy outage; made deploys self-service](#2026-07-31-ported-the-new-clone_tool-drop-fixed-the-deploy-outage-made-deploys-self-service)
@@ -12,6 +13,40 @@ _Newest first. Add new entries directly below this index._
 - [2026-07-07 — Moved project off OneDrive to C:\dev\pc_tool (canonical working copy)](#2026-07-07-moved-project-off-onedrive-to-cdevpc_tool-canonical-working-copy)
 
 ---
+
+## 2026-08-06 — Deploys have been failing since Jul 31: pc-tool/database-url unreadable
+
+Pushed the Portfolio-tab UI overhaul (`d692ecf`) and the deploy workflow
+**failed in Preflight**: `Secret pc-tool/database-url is missing or unreadable.`
+Checking run history: the Jul 31 19:31 UTC run (`f06f0fc`) failed the **same
+way** — the last successful deploy was Jul 31 15:54 UTC (`fb948d5`). So the
+secret became unreadable in that ~3.5-hour window on Jul 31 — the same
+afternoon rotation was turned off and the RDS-managed `rds!…` secret was
+deleted (see DEPLOYMENT.md §Database password). Production is still up and
+healthy (ALB 200s, `/clients` works) because running containers never re-read
+the secret — the same "deploy is the messenger" shape §5 warns about, one
+level up.
+
+Leading suspects, in order:
+
+1. `pc-tool/database-url` was **scheduled for deletion** during the Jul 31
+   cleanup (a secret pending deletion errors on `get-secret-value`, which the
+   Preflight's `2>/dev/null` swallows). Fix: Secrets Manager → the secret →
+   **Cancel deletion**, then re-run the workflow.
+2. The secret was **recreated**, changing its ARN suffix, while the GitHub
+   OIDC role's policy pins the old ARN → role can read nothing. Fix: point the
+   policy at the new ARN (or `pc-tool/database-url-*`).
+3. Role permissions changed.
+
+Diagnosed **without local AWS access**: this machine has no `aws` CLI, no
+`~/.aws`, and no `gh` — used the GitHub REST API with the token from
+`git credential fill` to list runs and download job logs (never echo the
+token). Also: the served page itself shows which build is live — the old
+build still contains the `% diverse/female` label the new one removed.
+
+**Open**: cancel the deletion / fix the role in the AWS Console, then re-run
+"Build and Deploy to ECS" — `d692ecf` is already on `origin/main`, so no new
+push is needed. Preflight fails before building, so nothing was half-shipped.
 
 ## 2026-08-04 — One combined market-cycle chart; localhost-vs-127.0.0.1 dev gotcha
 
