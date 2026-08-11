@@ -38,9 +38,9 @@ The workflow diagnoses itself. Open the failed run and expand the
 events, why the container stopped (with exit codes), and the last 80 log lines,
 plus the likely cause. You don't need AWS access to read it.
 
-There's also a **"Preflight"** step that runs first and fails in ~10 seconds if
-the database secret is missing or if password rotation has been switched back on
-(see §5) — so you find out before waiting through a build.
+There's also a **"Preflight"** step that runs first and reports on the database
+secret and password rotation (see §5). It is **advisory only — it can never fail
+a deploy.** Read its warnings, but a warning there is not why a deploy failed.
 
 ### What a deploy does and doesn't touch
 
@@ -141,16 +141,42 @@ No CloudShell, no manual Docker builds. A deploy takes ~5–8 minutes.
 The workflow has two steps that exist purely to keep this diagnosable by someone
 without AWS access:
 
-- **Preflight** (runs first, ~10s) — verifies the `pc-tool/database-url` secret
-  exists and parses, and warns if RDS-managed password rotation has been
-  re-enabled. Prints the DSN with the password masked. Fails fast rather than
-  wasting a build.
-- **Explain the failure** (`if: failure()`) — on any failure, dumps the
-  deployment state, recent ECS events, stopped-task exit codes and the last 80
-  log lines into the job output, followed by the likely cause. This exists
-  because the stabilization waiter's only error message is
-  `Waiter ServicesStable failed: Max attempts exceeded`, which is useless on
-  its own.
+- **Preflight (advisory)** — reports whether `pc-tool/database-url` exists and
+  whether RDS-managed password rotation is on. Marked `continue-on-error`: it
+  **cannot fail the build**, by design (see the warning below). It uses
+  `describe-secret`, never `get-secret-value` — CI confirms the secret is there
+  but never reads the password.
+- **Explain the failure** — fires only when the *stabilization waiter* failed
+  (`steps.wait.conclusion == 'failure'`). Dumps deployment state, recent ECS
+  events, stopped-task exit codes and the last 80 log lines, followed by likely
+  causes. Exists because the waiter's only message is
+  `Waiter ServicesStable failed: Max attempts exceeded`, which is useless alone.
+  It is deliberately *not* `if: failure()` — when it fired on any failure it
+  printed pages of ECS stability hints for problems that had nothing to do with
+  ECS, pointing you in the wrong direction.
+
+> ### ⚠ Never let a pre-check block a deploy
+>
+> The first version of Preflight ran `secretsmanager get-secret-value` and did
+> `exit 1` when the result came back empty. **The deploy role
+> (`pc-tool-gh-deploy`) only has `AmazonEC2ContainerRegistryPowerUser` +
+> `AmazonECS_FullAccess` — no Secrets Manager access at all.** So the call was
+> `AccessDenied`, which the script could not tell apart from "the secret is
+> missing", and every deploy died with
+> `Error: Secret pc-tool/database-url is missing or unreadable` while the secret
+> was perfectly healthy.
+>
+> That blocked production for **a week** (2026-07-31 → 08-11). Two commits sat
+> unshipped and nobody could tell why, because the error named the wrong cause.
+>
+> Rules that follow, for any check added here:
+> 1. A pre-check is advisory. Use `continue-on-error: true`. Deploys are gated by
+>    the build and the service, not by diagnostics.
+> 2. Never report success for something you could not verify — a false "OK" is
+>    worse than no check. Distinguish `AccessDenied` ("cannot check") from
+>    `ResourceNotFound` ("genuinely absent").
+> 3. Write checks against **the deploy role's** permissions, not your own. Your
+>    IAM user is far more privileged than CI.
 
 ---
 

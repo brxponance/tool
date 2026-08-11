@@ -38,45 +38,68 @@ jobs:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # ── Fail fast, before spending 8 minutes on a build ─────────────────
-      # The runner can't reach RDS (it's in a private subnet), so this can't
-      # test the password directly. It checks what it CAN: that the DSN secret
-      # exists and points at the right database, and that RDS-managed rotation
-      # hasn't been switched back on — rotation silently invalidates the DSN
-      # every 7 days and is what broke this pipeline before.
-      - name: Preflight
+      # ── Advisory pre-checks — MUST NEVER FAIL THE BUILD ─────────────────
+      # History: an earlier version of this step ran `secretsmanager
+      # get-secret-value` and did `exit 1` when it came back empty. The deploy
+      # role (pc-tool-gh-deploy) only has ECR + ECS access, so that call was
+      # AccessDenied — indistinguishable from "empty" — and every deploy failed
+      # with "Secret is missing or unreadable" while the secret was perfectly
+      # fine. That blocked production for a week.
+      #
+      # Two rules follow from that:
+      #   1. This step is ADVISORY. It reports; it never blocks. `|| true` on
+      #      the whole thing so nothing here can gate a deploy.
+      #   2. It must never claim "OK" for something it couldn't actually check —
+      #      a false reassurance is worse than no check at all.
+      #
+      # It also uses describe-secret, not get-secret-value: CI has no business
+      # reading a database password, only confirming the secret is there.
+      - name: Preflight (advisory)
+        continue-on-error: true
         run: |
-          set -e
-          echo "Checking the database secret…"
-          DSN=$(aws secretsmanager get-secret-value \
-                  --secret-id pc-tool/database-url \
-                  --region "$AWS_REGION" \
-                  --query SecretString --output text 2>/dev/null || echo "")
-          if [ -z "$DSN" ]; then
-            echo "::error::Secret pc-tool/database-url is missing or unreadable."
-            echo "See DEPLOYMENT.md § Database password."
-            exit 1
-          fi
-          # Print only the shape — never the password.
-          echo "$DSN" | sed -E 's#(//[^:]+:)[^@]*(@)#\1***\2#'
-          echo "$DSN" | grep -q '^postgres' \
-            || { echo "::error::DSN does not start with postgres://"; exit 1; }
-          echo "$DSN" | grep -q 'rds.amazonaws.com' \
-            || echo "::warning::DSN host is not an RDS endpoint — is this intentional?"
+          echo "These checks are advisory — they never block the deploy."
+          echo
 
-          echo "Checking RDS password rotation…"
-          MANAGED=$(aws rds describe-db-instances \
-                      --db-instance-identifier xponance-db --region "$AWS_REGION" \
-                      --query 'DBInstances[0].MasterUserSecret.SecretArn' \
-                      --output text 2>/dev/null || echo "None")
-          if [ "$MANAGED" != "None" ] && [ -n "$MANAGED" ]; then
-            echo "::warning::RDS-managed master password is ENABLED, which rotates"
-            echo "the password on a schedule and will break this deploy when it does."
-            echo "Secret: $MANAGED"
-            echo "Turn it off, or keep pc-tool/database-url in sync. See DEPLOYMENT.md."
+          echo "── Database secret ──"
+          if OUT=$(aws secretsmanager describe-secret \
+                     --secret-id pc-tool/database-url \
+                     --region "$AWS_REGION" \
+                     --query '{name:Name,deleted:DeletedDate}' --output text 2>&1); then
+            case "$OUT" in
+              *None*) echo "OK — pc-tool/database-url exists." ;;
+              *)      echo "::warning::pc-tool/database-url is SCHEDULED FOR DELETION: $OUT" ;;
+            esac
           else
-            echo "OK — password is static, no rotation to break the deploy."
+            case "$OUT" in
+              *ResourceNotFound*)
+                echo "::warning::pc-tool/database-url does not exist. The backend"
+                echo "will not start without it — see DEPLOYMENT.md § Database password." ;;
+              *AccessDenied*|*not\ authorized*)
+                echo "Could not verify (deploy role lacks secretsmanager:DescribeSecret)."
+                echo "Not a problem with the deploy — the check simply can't run." ;;
+              *)
+                echo "Could not verify: $OUT" ;;
+            esac
           fi
+          echo
+
+          echo "── RDS password rotation ──"
+          if OUT=$(aws rds describe-db-instances \
+                     --db-instance-identifier xponance-db --region "$AWS_REGION" \
+                     --query 'DBInstances[0].MasterUserSecret.SecretArn' \
+                     --output text 2>&1); then
+            if [ "$OUT" = "None" ]; then
+              echo "OK — password is static, no rotation to break the deploy."
+            else
+              echo "::warning::RDS-managed master password is ENABLED. It rotates on a"
+              echo "schedule and will break the NEXT deploy after it does, unless"
+              echo "pc-tool/database-url is updated to match. Secret: $OUT"
+            fi
+          else
+            echo "Could not verify rotation state (deploy role lacks rds:DescribeDBInstances)."
+          fi
+          echo
+          echo "Preflight done — continuing regardless."
 
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
@@ -115,8 +138,14 @@ jobs:
       # ECS events + stopped-task exit codes + CloudWatch logs. This step does
       # that automatically so the reason is visible right here in the job log —
       # no AWS console needed, no expertise required.
+      #
+      # Scoped to `steps.wait.conclusion == 'failure'` on purpose: it used to run
+      # on ANY failure, so a build error or a failed pre-check would print pages
+      # of ECS stability hints that had nothing to do with the actual problem and
+      # sent you looking in the wrong place. If the deploy never got as far as
+      # waiting, the answer is in the failed step's own output, not here.
       - name: Explain the failure
-        if: failure()
+        if: failure() && steps.wait.conclusion == 'failure'
         run: |
           echo "::group::Deployment state"
           aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \

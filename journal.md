@@ -4,6 +4,7 @@
 
 _Newest first. Add new entries directly below this index._
 
+- [2026-08-11 — My preflight check blocked production for a week (AccessDenied read as "missing")](#2026-08-11--my-preflight-check-blocked-production-for-a-week-accessdenied-read-as-missing)
 - [2026-08-06 — Deploys have been failing since Jul 31: pc-tool/database-url unreadable](#2026-08-06--deploys-have-been-failing-since-jul-31-pc-tooldatabase-url-unreadable)
 - [2026-08-04 — One combined market-cycle chart; localhost-vs-127.0.0.1 dev gotcha](#2026-08-04--one-combined-market-cycle-chart-localhost-vs-127001-dev-gotcha)
 - [2026-07-31 — Added root CLAUDE.md; journals now indexed and newest-first](#2026-07-31--added-root-claudemd-journals-now-indexed-and-newest-first)
@@ -13,6 +14,76 @@ _Newest first. Add new entries directly below this index._
 - [2026-07-07 — Moved project off OneDrive to C:\dev\pc_tool (canonical working copy)](#2026-07-07-moved-project-off-onedrive-to-cdevpc_tool-canonical-working-copy)
 
 ---
+
+## 2026-08-11 — My preflight check blocked production for a week (AccessDenied read as "missing")
+
+Deploys had been failing since 2026-07-31 with:
+
+```
+Checking the database secret…
+Error: Secret pc-tool/database-url is missing or unreadable.
+```
+
+The secret was fine the whole time. **This was my bug**, in the "Preflight" step
+I added on 07-31 to make deploys *safer*.
+
+### Root cause
+The check ran `aws secretsmanager get-secret-value` and did `exit 1` when the
+result was empty:
+
+```sh
+DSN=$(aws secretsmanager get-secret-value ... 2>/dev/null || echo "")
+if [ -z "$DSN" ]; then exit 1; fi
+```
+
+The deploy role `pc-tool-gh-deploy` has only `AmazonEC2ContainerRegistryPowerUser`
+and `AmazonECS_FullAccess` — **no Secrets Manager access**. So the call was
+`AccessDenied`, `2>/dev/null || echo ""` flattened that into an empty string, and
+an empty string was indistinguishable from "the secret is missing". Every deploy
+then failed *before the build*, naming a cause that was not real.
+
+I wrote the check against **my own** IAM user's permissions (`brodas`, broad
+access) without ever asking what the CI role could do.
+
+### Impact
+Production frozen 07-31 → 08-11. ECR `:latest` last pushed 07-31 11:55; the
+running task started 07-31 13:05. Two commits never shipped — `d692ecf`
+(Portfolio tab UI overhaul) and `8429914`. The failure message actively misled,
+pointing at a database problem that did not exist.
+
+A second, quieter defect in the same step: the rotation check did
+`|| echo "None"`, so when *it* was denied the step printed
+**"OK — password is static"** — a false reassurance about the exact thing that had
+caused the previous outage.
+
+### Fix
+- Preflight is now `continue-on-error: true`. It reports; it cannot gate a deploy.
+- Uses `describe-secret`, not `get-secret-value` — CI has no business reading a
+  database password, only confirming the secret exists.
+- Distinguishes `AccessDenied` ("could not verify") from `ResourceNotFound`
+  ("genuinely absent"). It never claims OK for something it could not check.
+- `Explain the failure` is now scoped to `steps.wait.conclusion == 'failure'`.
+  As `if: failure()` it printed pages of ECS-stability hints for a preflight
+  failure, sending you to the wrong place — visible in run #18, which dumped
+  "password authentication failed" guidance for a problem that was pure IAM.
+
+Verified all three branches locally by extracting the step's shell out of the
+YAML and running it against a stub `aws` that returns AccessDenied,
+ResourceNotFound, and success in turn. All three exit 0; only the genuinely-absent
+case warns. (First attempt at that test silently passed because I put a Windows
+path on bash's `PATH`, so the stub was never used and the real CLI answered —
+worth remembering: `PATH` entries must be `/c/...`, not `C:/...`.)
+
+### Rules now written into DEPLOYMENT.md §4
+1. A pre-check is advisory; use `continue-on-error: true`.
+2. Never report success for something you could not verify.
+3. Write CI checks against the **deploy role's** permissions, not your own.
+
+### Optional follow-up
+Granting the deploy role `secretsmanager:DescribeSecret` on that one secret and
+`rds:DescribeDBInstances` would make both checks functional instead of skipped.
+Not required — deploys work without it, and the step now says plainly when it
+could not verify.
 
 ## 2026-08-06 — Deploys have been failing since Jul 31: pc-tool/database-url unreadable
 
