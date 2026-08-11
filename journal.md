@@ -4,6 +4,7 @@
 
 _Newest first. Add new entries directly below this index._
 
+- [2026-08-11 — Uploading a weights file never took effect in production (S3 key vs local path)](#2026-08-11--uploading-a-weights-file-never-took-effect-in-production-s3-key-vs-local-path)
 - [2026-08-11 — My preflight check blocked production for a week (AccessDenied read as "missing")](#2026-08-11--my-preflight-check-blocked-production-for-a-week-accessdenied-read-as-missing)
 - [2026-08-06 — Deploys have been failing since Jul 31: pc-tool/database-url unreadable](#2026-08-06--deploys-have-been-failing-since-jul-31-pc-tooldatabase-url-unreadable)
 - [2026-08-04 — One combined market-cycle chart; localhost-vs-127.0.0.1 dev gotcha](#2026-08-04--one-combined-market-cycle-chart-localhost-vs-127001-dev-gotcha)
@@ -14,6 +15,61 @@ _Newest first. Add new entries directly below this index._
 - [2026-07-07 — Moved project off OneDrive to C:\dev\pc_tool (canonical working copy)](#2026-07-07-moved-project-off-onedrive-to-cdevpc_tool-canonical-working-copy)
 
 ---
+
+## 2026-08-11 — Uploading a weights file never took effect in production (S3 key vs local path)
+
+Symptom: a user uploaded `Manager_Weights_6_30.xlsx` on the production Setup tab.
+The tab showed the new filename, qualitative data worked, but the **Client Total
+AUM banner and AUM columns never appeared** and Client Redemption kept saying
+"No client AUM in the weights file". Clicking RELOAD INPUTS did nothing.
+
+### Root cause
+`/upload` only *stages* a file: it writes `state['files'][key] = path` and
+returns. It never re-parses. The Setup tab reads `state['files']`, so it displays
+the new filename while every analytical path still uses the previously parsed
+data — it looks uploaded and isn't active. The documented way to activate it is
+RELOAD INPUTS.
+
+But RELOAD INPUTS was broken in production. Every branch of
+`_reload_inputs_core` gated on:
+
+```python
+if 'weights' in state['files'] and os.path.exists(state['files']['weights']):
+```
+
+**In S3 mode `state['files'][key]` is an S3 key, not a local path.** A
+just-uploaded file has never been downloaded, so `os.path.exists()` is always
+False and the branch is silently skipped — `refreshed: {'weights': 'skipped'}`.
+The other three said `ok` only because those files had been resolved to local
+disk on an earlier boot; weights had just been replaced.
+
+Net effect: **client total AUM could never be loaded in production at all.** The
+only thing that ever picked up a new weights file was a container restart, where
+`load_cache` resolves keys to local paths.
+
+Same family as journal 2026-07-20 §8 (the `resolve_path` round-trip bug). S3 keys
+and local paths share one field in `state['files']`, so anything treating that
+field as a filesystem path is wrong in production and fine locally — which is
+exactly why it survived local testing.
+
+### Fix
+Added `_input_path(key)`: resolves through `resolve_path` (downloads from S3 to a
+stable local name when needed, no-op locally) and returns None if unusable. All
+four branches of `_reload_inputs_core` now use it, as does `/reload_weights`,
+which had the same bare `os.path.exists` bug.
+
+Verified: `refreshed: {'weights': 'ok', 'risk': 'ok', 'exposures': 'ok',
+'qualitative': 'ok'}` with 13 client-AUM entries.
+
+### Worth noting
+- The two-step upload → reload flow is easy to misread as one step, because the
+  Setup tab confirms the filename immediately. If this trips anyone else up, the
+  fix is for `/upload` to re-parse the affected input itself rather than only
+  staging it.
+- `/reload_inputs` when `db_enabled()` calls `sync_weights_to_state`, which
+  imports the workbook roster into Postgres (drafts preserved). Reloading a
+  workbook with a different client list therefore changes the production roster —
+  the 6/30 file carries 13 clients vs the 12 currently in the DB.
 
 ## 2026-08-11 — My preflight check blocked production for a week (AccessDenied read as "missing")
 

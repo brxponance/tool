@@ -814,8 +814,14 @@ def reload_weights():
     """Re-read just the weights file without rerunning clones."""
     if 'weights' not in state['files']:
         return jsonify({'status': 'error', 'message': 'No weights file uploaded yet'})
+    # Resolve through S3 when needed — a just-uploaded file is an S3 key, not a
+    # local path. See _input_path.
+    wpath = _input_path('weights')
+    if not wpath:
+        return jsonify({'status': 'error',
+                        'message': 'Weights file could not be read from storage.'})
     try:
-        w, b, caum = load_weights(state['files']['weights'])
+        w, b, caum = load_weights(wpath)
         state['client_aum'] = caum
         # DB authoritative → import workbook into Postgres (drafts preserved)
         # and reload from DB; otherwise fall back to the legacy in-memory set.
@@ -844,6 +850,31 @@ def reload_inputs():
     return jsonify(_reload_inputs_core())
 
 
+def _input_path(key):
+    """Local, openable path for a staged input file — or None if unavailable.
+
+    IMPORTANT: in S3 mode `state['files'][key]` is an S3 *key*, not a local path.
+    A file that was just uploaded has never been downloaded, so a bare
+    os.path.exists() on it is always False. That silently skipped the reload:
+    uploading a new weights workbook set the filename the Setup tab displays but
+    the app kept using the previously-parsed data, and only a container restart
+    (where load_cache resolves keys to local paths) ever picked it up. Client
+    total AUM in particular could never be loaded in production this way.
+
+    resolve_path downloads from S3 to a stable local name when needed, and is a
+    no-op locally.
+    """
+    raw = (state.get('files') or {}).get(key)
+    if not raw or not isinstance(raw, str):
+        return None
+    try:
+        p = resolve_path(raw, app.config['UPLOAD_FOLDER'], suffix='.xlsx')
+    except Exception as e:  # noqa: BLE001
+        print(f"[reload] could not resolve {key}: {e}")
+        return None
+    return p if p and os.path.exists(p) else None
+
+
 def _reload_inputs_core():
     """Core of /reload_inputs — returns a plain dict rather than a Response, so
     the startup auto-refresh (see _auto_reload_stale_inputs) can reuse it."""
@@ -852,9 +883,10 @@ def _reload_inputs_core():
     errors = {}
 
     # Weights
-    if 'weights' in state['files'] and os.path.exists(state['files']['weights']):
+    _p = _input_path('weights')
+    if _p:
         try:
-            w, b, caum = load_weights(state['files']['weights'])
+            w, b, caum = load_weights(_p)
             state['client_aum'] = caum
             if db_enabled():
                 sync_weights_to_state(w, b)   # import into DB, drafts preserved
@@ -866,29 +898,32 @@ def _reload_inputs_core():
             errors['weights'] = str(e)
 
     # Risk summary
-    if 'risk_summary' in state['files'] and os.path.exists(state['files']['risk_summary']):
+    _p = _input_path('risk_summary')
+    if _p:
         try:
-            state['risk_data'] = parse_risk_summary(state['files']['risk_summary'])
+            state['risk_data'] = parse_risk_summary(_p)
             status['risk'] = 'ok'
         except Exception as e:
             status['risk'] = 'error'
             errors['risk'] = str(e)
 
     # Exposures
-    if 'exposures' in state['files'] and os.path.exists(state['files']['exposures']):
+    _p = _input_path('exposures')
+    if _p:
         try:
             from exposures_engine import parse_exposures_file
-            state['exposures_data'] = parse_exposures_file(state['files']['exposures'])
+            state['exposures_data'] = parse_exposures_file(_p)
             status['exposures'] = 'ok'
         except Exception as e:
             status['exposures'] = 'error'
             errors['exposures'] = str(e)
 
     # Qualitative firm/strategy data
-    if 'qualitative' in state['files'] and os.path.exists(state['files']['qualitative']):
+    _p = _input_path('qualitative')
+    if _p:
         try:
             from qualitative_loader import parse_qualitative_file
-            state['qualitative_data'] = parse_qualitative_file(state['files']['qualitative'])
+            state['qualitative_data'] = parse_qualitative_file(_p)
             _QUAL_MATCH_CACHE.clear()  # manager names may have changed
             status['qualitative'] = 'ok'
         except Exception as e:
