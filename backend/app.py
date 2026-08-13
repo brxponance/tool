@@ -1864,47 +1864,90 @@ def update_placeholder_buckets():
 
 
 def _enumerate_placeholder_candidates():
-    """Return the set of manager names that should be eligible for the
-    Placeholder peer group: any name appearing in the FactSet exposures
-    file, the Risk Summary file, the Security-Level Risk file, or any
-    client's weights file, that does NOT fuzzy-match into clone_results
-    or universe_clone_results. These are managers the user has FactSet
-    data for but no clone (typically <3 years of returns), so they can
-    be added to a portfolio with manually-set style buckets."""
-    from data_loader import fuzzy_match
-    candidates = set()
+    """Return the set of display names eligible for the Placeholder peer
+    group: strategies appearing in the FactSet exposures / risk / security
+    files or a client's weights file that genuinely lack a clone (< 3 years
+    of returns).
+
+    Filtering rules (user-specified 2026-08-13):
+      - FIRM suppression: if any cloned manager belongs to the same firm
+        (holdings_resolver.firm_key), the candidate is NOT a placeholder even
+        when the alias crosswalk misses that particular client-decorated
+        sleeve name ('NYSCRF/XPONANCE - BALLINA CAPITAL' → firm 'ballina' has
+        clones → suppressed).
+      - ONE row per strategy: 'vs. <benchmark>' suffixes and client prefixes
+        are stripped and variants deduped ('IMC ACWI ex US' + 'IMC ACWI ex US
+        vs. MSCI …' → one row; 'NYCBERS - RAVENSWOOD EAFE+Canada' + weights
+        'Ravenswood EAFE + Canada' → one row, weights label wins).
+      - Security-risk columns without a 'vs. <benchmark>' suffix are strays
+        (a security name misparsed as a section, e.g. 'Uniphar PLC'), not
+        managers — dropped at the source.
+    """
+    import re as _re
+    from holdings_resolver import strip_vs_suffix, firm_key, _SECTION_PREFIX
+
+    # (raw name, priority): higher priority wins the display name for a
+    # deduped strategy — weights-file labels are the clean human names.
+    raw = []
     ed = state.get('exposures_data') or {}
-    for n in (ed.get('managers') or {}).keys():
-        candidates.add(n)
+    raw += [(n, 1) for n in (ed.get('managers') or {}).keys()]
     rd = state.get('risk_data') or {}
-    for n in rd.get('manager_names', []) or []:
-        candidates.add(n)
+    raw += [(n, 1) for n in rd.get('manager_names', []) or []]
     srd = state.get('security_risk_data') or {}
-    for n in (srd.get('managers') or {}).keys():
-        candidates.add(n)
-    weights = state.get('weights') or {}
-    for mgr_weights in weights.values():
-        for n in mgr_weights.keys():
-            candidates.add(n)
+    raw += [(n, 0) for n in (srd.get('managers') or {}).keys()
+            if _re.search(r'\svs\.?\s', str(n), _re.IGNORECASE)]
+    for mgr_weights in (state.get('weights') or {}).values():
+        raw += [(n, 2) for n in mgr_weights.keys()]
+
     mgr_dfs = state.get('manager_dfs') or {}
     clone_results = state.get('clone_results')
     ucr = state.get('universe_clone_results')
     factset_aliases = state.get('factset_aliases') or {}
-    placeholders = set()
-    for name in candidates:
-        # Benchmark rows (MSCI/Russell/… or a bare '... vs. DEFAULT') come from
-        # the risk/exposures files and are not managers — never placeholders.
+
+    # Firms with a cloned BUY-LIST return stream (>= 3 years of history by
+    # construction) — every client-decorated sleeve of these firms is real,
+    # never a placeholder. Deliberately NOT the universe clones: the peer
+    # universe contains hundreds of unrelated firms and a same-firm universe
+    # strategy says nothing about this specific sleeve's track record.
+    cloned_firms = set()
+    for td in (clone_results or {}).values():
+        for nm in (td or {}).keys():
+            fk = firm_key(nm)
+            if fk:
+                cloned_firms.add(fk)
+
+    groups = {}   # strategy key -> (priority, display name)
+    for name, prio in raw:
+        # Benchmark rows (MSCI/Russell/…) are not managers.
         if is_benchmark_name(name):
             continue
-        # Placeholder only when NO clone exists for this manager. clone_exists
-        # consults the authoritative FactSet-name aliases first, so decorated
-        # names like 'CALSTRS - CASTLEARK EAFE+Canada' resolve to the
-        # established manager and its clone; only genuinely clone-less managers
-        # (e.g. < 3 yrs of returns) remain placeholders.
-        if not clone_exists(name, mgr_dfs, clone_results, ucr,
-                            factset_aliases=factset_aliases):
-            placeholders.add(name)
-    return placeholders
+        # Placeholder only when NO clone exists (alias crosswalk consulted).
+        if clone_exists(name, mgr_dfs, clone_results, ucr,
+                        factset_aliases=factset_aliases):
+            continue
+        cleaned = strip_vs_suffix(name)
+        display = _SECTION_PREFIX.sub('', cleaned).strip() or cleaned
+        if is_benchmark_name(display):
+            continue
+        # Firm suppression applies only to CLIENT-DECORATED sleeve names
+        # ('NYSCRF/XPONANCE - BALLINA CAPITAL'): those are accounts of an
+        # existing firm strategy, so a cloned buy-list firm means the sleeve
+        # is real even when the alias crosswalk misses this decoration.
+        # Plain strategy names ('IMC Global') are judged per-strategy by
+        # clone_exists above — a firm may legitimately have one cloned
+        # strategy and another too young to clone.
+        was_prefixed = display != cleaned.strip()
+        if was_prefixed:
+            fk = firm_key(display)
+            if fk and fk in cloned_firms:
+                continue
+        key = _re.sub(r'[\s\+\-_/,\.]+', ' ', display).strip().lower()
+        if not key:
+            continue
+        cur = groups.get(key)
+        if cur is None or prio > cur[0] or (prio == cur[0] and len(display) < len(cur[1])):
+            groups[key] = (prio, display)
+    return {display for _, display in groups.values()}
 
 
 @app.route('/all_managers')
@@ -2546,6 +2589,8 @@ def compute_security_risk_exposures_core(managers, client_name, sleeve=None,
             factset_aliases=state.get('factset_aliases') or {},
             clone_results=state.get('clone_results'),
             universe_clone_results=state.get('universe_clone_results'),
+            client_name=client_name,
+            client_rosters=state.get('weights'),
         )
         return result
     except Exception as e:
@@ -4121,6 +4166,8 @@ def portfolio_exposures():
         factset_aliases=state.get('factset_aliases') or {},
         clone_results=state.get('clone_results'),
         universe_clone_results=state.get('universe_clone_results'),
+        client_name=client_name,
+        client_rosters=state.get('weights'),
     )
     return jsonify(result)
 
@@ -4168,6 +4215,8 @@ def holdings_overlap():
         managers, state['exposures_data'],
         benchmark_name=bmk_name, weight_state=weight_state,
         match_basis=match_basis,
+        client_name=client_name,
+        client_rosters=state.get('weights'),
     )
     return jsonify(result)
 
@@ -4203,6 +4252,8 @@ def holdings_overlap_detail():
         managers, state['exposures_data'], name_i, name_j,
         benchmark_name=bmk_name, weight_state=weight_state, top_n=top_n,
         match_basis=match_basis,
+        client_name=client_name,
+        client_rosters=state.get('weights'),
     )
     return jsonify(result)
 

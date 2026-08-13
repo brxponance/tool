@@ -387,6 +387,8 @@ def compute_exposures(
     factset_aliases: Optional[dict] = None,
     clone_results: Optional[dict] = None,
     universe_clone_results: Optional[dict] = None,
+    client_name: Optional[str] = None,
+    client_rosters: Optional[dict] = None,
 ) -> dict:
     """Compute current + proposed active style exposures.
 
@@ -419,6 +421,19 @@ def compute_exposures(
         _by_mgr = factset_candidates_by_manager(
             sec_names, factset_aliases, clone_results, universe_clone_results)
 
+    # Client-aware ownership resolution (same rules as the holdings overlap /
+    # grouping exposures): the client's own risk column wins, borrowing is
+    # gated on sleeve asset-class compatibility, and passive index sleeves
+    # resolve to the benchmark's own bottom-up column ('… vs. DEFAULT').
+    # Column names carry a 'vs. <benchmark>' suffix — stripped before
+    # ownership parsing. Legacy fuzzy matching when the client is unknown.
+    _resolution = None
+    if client_name:
+        from holdings_resolver import resolve_managers_generic, strip_vs_suffix
+        _resolution = resolve_managers_generic(
+            portfolio_managers, sec_names, client_name,
+            client_rosters=client_rosters, clean=strip_vs_suffix)
+
     def compute_side(weight_key: str):
         totals      = {f: 0.0 for f in factors}
         sleeve_w    = 0.0
@@ -446,13 +461,18 @@ def compute_exposures(
             match_input = (m.get('weight_file_name')
                            or m.get('matched_name')
                            or m.get('name', ''))
-            pool = sec_names
-            if _by_mgr:
-                subset = (_by_mgr.get(_dl_norm(m.get('matched_name')))
-                          or _by_mgr.get(_dl_norm(match_input)))
-                if subset:
-                    pool = subset
-            mgr_key = _match_mgr(match_input, pool)
+            if _resolution is not None:
+                display = m.get('matched_name') or m.get('weight_file_name') or '?'
+                res = _resolution.get(display)
+                mgr_key = res['section'] if res else None
+            else:
+                pool = sec_names
+                if _by_mgr:
+                    subset = (_by_mgr.get(_dl_norm(m.get('matched_name')))
+                              or _by_mgr.get(_dl_norm(match_input)))
+                    if subset:
+                        pool = subset
+                mgr_key = _match_mgr(match_input, pool)
             if mgr_key is None:
                 unmatched.append(m.get('matched_name') or m.get('name', '?'))
                 continue
@@ -515,6 +535,14 @@ def compute_exposures(
         'proposed':   proposed,
         'delta':      delta,
         'unmatched':  sorted(set(unc_cur) | set(unc_prop)),
+        # Resolution provenance per manager (client-aware path only):
+        # {display: {tier: own|peer|unmarked|index, borrowed_from}} — lets the
+        # UI badge borrowed profiles.
+        'sources': ({d: {'tier': r['tier'], 'borrowed_from': r['owner']
+                         if r['tier'] == 'peer' else None,
+                         'section': r['section']}
+                     for d, r in (_resolution or {}).items()}
+                    if _resolution is not None else None),
         'benchmark': {
             'matched_column':    benchmark_name,
             'requested':         benchmark_name,

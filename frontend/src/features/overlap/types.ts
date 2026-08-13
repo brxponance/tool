@@ -37,12 +37,20 @@ export type OverlapAxisManager = {
   display: string;
   count: number; // number of holdings
   alloc: number; // allocation pct (×100)
+  // Resolution provenance: null/absent = client's own section; otherwise the
+  // profile was borrowed ({tier: 'peer'|'unmarked'|'index', borrowed_from}).
+  source?: { tier: string; borrowed_from?: string | null } | null;
+  cash_pct?: number; // % of the matched section's weight in cash/FX lines
 };
+
+export type CashWarning = { manager: string; section: string; cash_pct: number };
 
 export type HoldingsOverlapResponse = {
   managers?: OverlapAxisManager[];
   pairs?: OverlapPair[];
   unmatched?: string[];
+  // Sleeves whose matched section is >10% cash (likely transition/liquidation)
+  cash_warnings?: CashWarning[];
   weight_state?: WeightState;
   benchmark_name?: string | null;
   match_basis?: MatchBasis;

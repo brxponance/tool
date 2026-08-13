@@ -25,7 +25,16 @@ import pandas as pd
 from rapidfuzz import fuzz, process
 
 # ── Column definitions ─────────────────────────────────────────────────────
-CATEGORICAL_COLS = {'MSCI Region', 'MSCI Country', 'Region', 'Country',
+# Header vintages: older FactSet exports name the geography columns
+# 'MSCI Region' / 'MSCI Country'; newer ones use 'Region' / 'Country'. They
+# are the SAME data, so parse_exposures_file canonicalises the old names to
+# the new ones at parse time — records only ever carry 'Region'/'Country',
+# and the grouping menu offers each geography exactly once. (Before this,
+# both vintages appeared in the menu and picking the one absent from the
+# loaded file rendered a 100%-Unclassified table.)
+COLUMN_ALIASES = {'MSCI Region': 'Region', 'MSCI Country': 'Country'}
+
+CATEGORICAL_COLS = {'Region', 'Country',
                     'GICS Sector', 'GICS Industry',
                     # Developed/Emerging/Other split. The FactSet file has no such
                     # column, so 'Market Development' is DERIVED per security from
@@ -37,15 +46,8 @@ CATEGORICAL_COLS = {'MSCI Region', 'MSCI Country', 'Region', 'Country',
 # is a set, so iterating it directly gives an order that shuffles between server
 # restarts (string hashing is salted per process). Anything in the set but missing
 # here is appended alphabetically.
-#
-# GICS Sector leads deliberately: the UI defaults to the first entry, and Sector
-# is the one categorical column present in every FactSet export vintage. Region /
-# Country only exist in newer files (older ones carry MSCI Region / MSCI Country),
-# so defaulting to Region would open the panel on an all-"Unclassified" table for
-# anyone still on an older exposures workbook.
 CATEGORICAL_ORDER = ['GICS Sector', 'GICS Industry',
-                     'Region', 'Country', 'Market Development',
-                     'MSCI Region', 'MSCI Country']
+                     'Region', 'Country', 'Market Development']
 
 CONTINUOUS_COLS = [
     'Market Capitalization',
@@ -80,8 +82,6 @@ DISPLAY_LABELS = {
     'Return Vol - 252D':                         'Vol 252D',
     'Skewness - 252D':                           'Skewness',
     'Kurtosis - 252D':                           'Kurtosis',
-    'MSCI Region':                               'MSCI Region',
-    'MSCI Country':                              'MSCI Country',
     'GICS Sector':                               'Sector',
     'GICS Industry':                             'Industry',
     'Region':                                    'Region',
@@ -91,8 +91,8 @@ DISPLAY_LABELS = {
 
 # Groups for the selector UI (matches FactSet's row 6)
 COL_GROUPS = {
-    'MSCI Region': 'Categorical',
-    'MSCI Country': 'Categorical',
+    'Region': 'Categorical',
+    'Country': 'Categorical',
     'GICS Sector': 'Categorical',
     'GICS Industry': 'Categorical',
     'Market Capitalization': 'Size',
@@ -173,7 +173,11 @@ def parse_exposures_file(path):
                          "'SEDOL' and 'Port. Ending Weight' in the first 20 rows")
 
     headers   = all_rows[header_row_idx]
-    col_names = list(headers)
+    # Canonicalise header vintages ('MSCI Region' → 'Region', 'MSCI Country'
+    # → 'Country') so records carry one set of keys regardless of which
+    # export vintage was uploaded.
+    col_names = [COLUMN_ALIASES.get(c, c) if isinstance(c, str) else c
+                 for c in headers]
     data_start = header_row_idx + 1
 
     # ── Find portfolio section headers: col A set, col B empty, past header row
@@ -366,18 +370,45 @@ def _quintile_range_labels(breaks, sub_col):
     ]
 
 
+# ── Cash / FX position detection ────────────────────────────────────────
+# Currency rows ('U.S. Dollar', 'Japanese Yen', 'JPY999999') carry real
+# weight but no GICS/country tags, so they used to land in 'Unclassified',
+# blurring genuinely-missing classifications. They get their own 'Cash'
+# bucket instead. A row is cash only when BOTH hold: the name looks like a
+# currency AND the row has no sector classification — so a company like
+# 'Dollarama' (which has a sector) can never be misclassified as cash.
+_CASH_CODE = re.compile(r'^[A-Z]{2,3}\s*9{4,}\s*$')   # e.g. 'JPY999999'
+_CASH_WORDS = re.compile(
+    r'\b(cash|dollars?|yen|euro|pounds?|sterling|francs?|krona|krone|kroner'
+    r'|pesos?|real|reais|rand|won|yuan|renminbi|rupees?|rupiahs?|zloty'
+    r'|forint|koruna|shekels?|lira|dirhams?|riyals?|ringgit|baht|dong)\b',
+    re.IGNORECASE)
+
+
+def is_cash_row(sec):
+    """True when a parsed security record is a cash/FX line."""
+    if sec.get('GICS Sector') not in (None, '', '--'):
+        return False
+    nm = str(sec.get('name') or '')
+    return bool(_CASH_CODE.match(nm.strip()) or _CASH_WORDS.search(nm))
+
+
 def _portfolio_exposure_nested(securities, primary_col, sub_col, breaks_by_bucket):
     """Double-bucket a portfolio: {primary_bucket: {child_label: weight}}.
     Children are quintile labels (Q1 (High)…Q5 (Low) + Unclassified for missing
     sub-values). Buckets in `breaks_by_bucket` with value None are sparse —
     their weight goes into a single 'Insufficient data' child instead of
-    quintile rows. The 'Unclassified' primary bucket is kept but not expanded."""
+    quintile rows. The 'Cash' and 'Unclassified' primary buckets are kept but
+    not expanded."""
     out = {}
     for s in securities.values():
-        v = s.get(primary_col)
-        parent = str(v) if v is not None and v != '--' else 'Unclassified'
+        if is_cash_row(s):
+            parent = 'Cash'
+        else:
+            v = s.get(primary_col)
+            parent = str(v) if v is not None and v != '--' else 'Unclassified'
         children = out.setdefault(parent, {})
-        if parent == 'Unclassified':
+        if parent in ('Unclassified', 'Cash'):
             children[''] = children.get('', 0.0) + s['weight']
             continue
         # Sparse bucket: missing breaks → single 'Insufficient data' child
@@ -403,13 +434,16 @@ def _portfolio_exposure(securities, col, quintile_breaks):
 
     if col in CATEGORICAL_COLS:
         for s in securities.values():
-            v = s.get(col)
-            label = str(v) if v is not None and v != '--' else 'Unclassified'
+            if is_cash_row(s):
+                label = 'Cash'
+            else:
+                v = s.get(col)
+                label = str(v) if v is not None and v != '--' else 'Unclassified'
             buckets[label] = buckets.get(label, 0.0) + s['weight']
     else:
         breaks = quintile_breaks.get(col)
         for s in securities.values():
-            label = _assign_quintile(s.get(col), breaks)
+            label = 'Cash' if is_cash_row(s) else _assign_quintile(s.get(col), breaks)
             buckets[label] = buckets.get(label, 0.0) + s['weight']
 
     return buckets
@@ -519,7 +553,8 @@ def _fuzzy_match_manager(name, candidates, threshold=80, benchmark_hint=None):
 def compute_portfolio_exposures(managers_with_weights, exposures_data, grouping,
                                  benchmark_name=None, sub_grouping=None,
                                  factset_aliases=None, clone_results=None,
-                                 universe_clone_results=None):
+                                 universe_clone_results=None,
+                                 client_name=None, client_rosters=None):
     """
     Compute exposure for a client portfolio to a given grouping.
 
@@ -624,20 +659,38 @@ def compute_portfolio_exposures(managers_with_weights, exposures_data, grouping,
 
     matched     = {}   # matched_name -> exposure_file_name
     unmatched   = []
-    for m in managers_with_weights:
-        nm = m['matched_name']
-        match_input = m.get('weight_file_name') or nm
-        pool = candidate_names
-        if by_mgr:
-            subset = by_mgr.get(_norm_name(nm)) or by_mgr.get(_norm_name(match_input))
-            if subset:
-                pool = subset
-        hit = _fuzzy_match_manager(match_input, pool,
-                                    benchmark_hint=resolved_bmk_name)
-        if hit:
-            matched[nm] = hit
-        else:
-            unmatched.append(nm)
+    if client_name:
+        # Client-aware ownership resolution: the client's own uploaded
+        # sections win; a missing profile borrows another client's section
+        # only when the SLEEVE asset class is compatible (see
+        # holdings_resolver). Falls back to fuzzy matching when the caller
+        # doesn't know the client.
+        from holdings_resolver import resolve_managers
+        resolution = resolve_managers(managers_with_weights, exposures_data,
+                                      client_name, client_rosters=client_rosters)
+        for m in managers_with_weights:
+            nm = m['matched_name']
+            display = m.get('matched_name') or m.get('weight_file_name') or '?'
+            res = resolution.get(display)
+            if res:
+                matched[nm] = res['section']
+            else:
+                unmatched.append(nm)
+    else:
+        for m in managers_with_weights:
+            nm = m['matched_name']
+            match_input = m.get('weight_file_name') or nm
+            pool = candidate_names
+            if by_mgr:
+                subset = by_mgr.get(_norm_name(nm)) or by_mgr.get(_norm_name(match_input))
+                if subset:
+                    pool = subset
+            hit = _fuzzy_match_manager(match_input, pool,
+                                        benchmark_hint=resolved_bmk_name)
+            if hit:
+                matched[nm] = hit
+            else:
+                unmatched.append(nm)
 
     # ── Mode C dispatch ────────────────────────────────────────────────────
     # Honored only when grouping is categorical AND sub_grouping is a
@@ -647,14 +700,38 @@ def compute_portfolio_exposures(managers_with_weights, exposures_data, grouping,
         and grouping in CATEGORICAL_COLS
         and sub_grouping in CONTINUOUS_COLS
     )
+    # Holdings pool: manager sections plus benchmark sections, so a passive
+    # index sleeve resolved to a benchmark (holdings_resolver tier 'index')
+    # contributes the index's own holdings to the client exposure.
+    holdings_pool = dict(exp_managers)
+    holdings_pool.update(benchmarks_all)
+
+    # Flag sleeves whose section is heavily cash (>10%): almost always a
+    # manager transition — a terminated account liquidates to settlement
+    # cash while the weights file may still allocate to it (see journal
+    # 2026-08-13, CALSTRS/CastleArk). Surfaced so stale rosters announce
+    # themselves instead of masquerading as a cash position.
+    cash_warnings = []
+    for nm, exp_name in matched.items():
+        secs = holdings_pool.get(exp_name) or {}
+        tw = sum(s['weight'] for s in secs.values())
+        cw_cash = sum(s['weight'] for s in secs.values() if is_cash_row(s))
+        pct = 100 * cw_cash / tw if tw else 0.0
+        if pct > 10:
+            cash_warnings.append({'manager': nm, 'section': exp_name,
+                                  'cash_pct': round(pct, 1)})
+
     if nested_mode:
-        return _compute_nested_response(
+        nested = _compute_nested_response(
             managers_with_weights, exposures_data,
             grouping, sub_grouping,
-            benchmark, exp_managers, matched, unmatched,
+            benchmark, holdings_pool, matched, unmatched,
             resolved_bmk_name, benchmark_name, benchmark_fallback,
             benchmarks_all,
         )
+        if isinstance(nested, dict):
+            nested['cash_warnings'] = cash_warnings
+        return nested
 
     # Benchmark exposure
     bmark_exp = _portfolio_exposure(benchmark, grouping, quintile_breaks)
@@ -670,7 +747,7 @@ def compute_portfolio_exposures(managers_with_weights, exposures_data, grouping,
         exp_name = matched.get(nm)
         if exp_name is None:
             continue
-        mgr_securities = exp_managers[exp_name]
+        mgr_securities = holdings_pool[exp_name]
         mgr_exp = _portfolio_exposure(mgr_securities, grouping, quintile_breaks)
 
         cw  = float(m.get('current_weight',  0) or 0)
@@ -694,13 +771,14 @@ def compute_portfolio_exposures(managers_with_weights, exposures_data, grouping,
 
     # Build unified bucket list in a sensible order
     if grouping in CATEGORICAL_COLS:
-        # Sort by benchmark weight descending; Unclassified last
+        # Sort by benchmark weight descending; Cash then Unclassified last
         all_buckets = sorted(
             set(bmark_exp) | set(cur_norm) | set(prop_norm),
-            key=lambda b: (-bmark_exp.get(b, 0), b)
+            key=lambda b: (b in ('Cash', 'Unclassified'), b == 'Unclassified',
+                           -bmark_exp.get(b, 0), b)
         )
     else:
-        quintile_order = ['Q1 (High)', 'Q2', 'Q3', 'Q4', 'Q5 (Low)', 'Unclassified']
+        quintile_order = ['Q1 (High)', 'Q2', 'Q3', 'Q4', 'Q5 (Low)', 'Cash', 'Unclassified']
         all_buckets = quintile_order
 
     # Normalise benchmark to 100 (it already should be, but guard against rounding)
@@ -749,6 +827,7 @@ def compute_portfolio_exposures(managers_with_weights, exposures_data, grouping,
         'rows':                rows,
         'matched':             list(matched.keys()),
         'unmatched':           unmatched,
+        'cash_warnings':       cash_warnings,
         'coverage_current':    round(cur_covered_wt * 100, 1),
         'coverage_proposed':   round(prop_covered_wt * 100, 1),
         'benchmark_coverage':  round(cov_src.get(grouping, 1.0) * 100, 1),
@@ -772,14 +851,17 @@ def _compute_nested_response(managers_with_weights, exposures_data,
     # values yield None breaks → that bucket is flagged as insufficient_data.
     bmk_subsets = {}
     for s in benchmark.values():
-        v = s.get(grouping)
-        b = str(v) if v is not None and v != '--' else 'Unclassified'
+        if is_cash_row(s):
+            b = 'Cash'
+        else:
+            v = s.get(grouping)
+            b = str(v) if v is not None and v != '--' else 'Unclassified'
         bmk_subsets.setdefault(b, []).append(s)
 
     breaks_by_bucket = {}
     insufficient_buckets = set()
     for b, subset in bmk_subsets.items():
-        if b == 'Unclassified':
+        if b in ('Unclassified', 'Cash'):
             continue
         breaks = _quintile_breaks_for_subset(subset, sub_grouping)
         breaks_by_bucket[b] = breaks
@@ -829,12 +911,14 @@ def _compute_nested_response(managers_with_weights, exposures_data,
     else:
         bmk_norm = bmk_nested
 
-    # Step 3 — assemble parent rows in benchmark-weight-desc order, Unclassified last.
+    # Step 3 — assemble parent rows in benchmark-weight-desc order, Cash then
+    # Unclassified last.
     def _parent_total(d, p):
         return sum(d.get(p, {}).values())
     all_parents = sorted(
         set(bmk_norm) | set(cur_norm) | set(prop_norm),
-        key=lambda p: (p == 'Unclassified', -_parent_total(bmk_norm, p), p),
+        key=lambda p: (p in ('Cash', 'Unclassified'), p == 'Unclassified',
+                       -_parent_total(bmk_norm, p), p),
     )
 
     quintile_order = ['Q1 (High)', 'Q2', 'Q3', 'Q4', 'Q5 (Low)', 'Unclassified']
@@ -855,8 +939,8 @@ def _compute_nested_response(managers_with_weights, exposures_data,
             'delta_proposed': round(pw - bw, 2),
         }
 
-        if parent == 'Unclassified':
-            # Don't expand Unclassified parent — children intentionally absent.
+        if parent in ('Unclassified', 'Cash'):
+            # Don't expand Cash/Unclassified parents — children intentionally absent.
             row['insufficient_data'] = False
         elif parent in insufficient_buckets:
             row['insufficient_data'] = True

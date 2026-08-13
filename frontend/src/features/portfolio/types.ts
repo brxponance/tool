@@ -328,6 +328,9 @@ export type PortfolioExposuresResponse = {
   rows: PortfolioExposureRow[];
   matched: string[];
   unmatched: string[];
+  // Sleeves whose matched exposures section is >10% cash — almost always a
+  // manager in transition (terminated account liquidated to cash).
+  cash_warnings?: { manager: string; section: string; cash_pct: number }[];
   coverage_current: number;
   coverage_proposed: number;
   benchmark_coverage: number;

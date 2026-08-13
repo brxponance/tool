@@ -371,6 +371,7 @@ export function OverlapSection({ client, managers, hasExposures = true }: Props)
   const matchLabel =
     matchBasis === "issuer" ? "matched by issuer (share classes collapsed)" : "matched by exact security (SEDOL)";
   const unmatched = current?.unmatched ?? proposed?.unmatched ?? [];
+  const cashWarnings = current?.cash_warnings ?? proposed?.cash_warnings ?? [];
 
   const segButton = (active: boolean): React.CSSProperties => ({
     fontFamily: "var(--mono)",
@@ -497,6 +498,12 @@ export function OverlapSection({ client, managers, hasExposures = true }: Props)
           {unmatched.length ? (
             <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--amber, #d68c1f)", marginBottom: 8 }}>
               ⚠ No holdings data for: {unmatched.join(", ")}
+            </div>
+          ) : null}
+          {cashWarnings.length ? (
+            <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--amber, #d68c1f)", marginBottom: 8 }}>
+              ⚠ Heavy cash (possible transition/liquidated account):{" "}
+              {cashWarnings.map((w) => `${w.manager} (${w.cash_pct}% cash)`).join(", ")}
             </div>
           ) : null}
 

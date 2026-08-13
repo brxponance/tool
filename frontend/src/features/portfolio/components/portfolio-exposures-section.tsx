@@ -265,6 +265,12 @@ export function PortfolioExposuresSection({
     data?.unmatched && data.unmatched.length
       ? `⚠ No exposure data for: ${data.unmatched.join(", ")}`
       : "";
+  const cashWarningNote =
+    data?.cash_warnings && data.cash_warnings.length
+      ? `⚠ Heavy cash (possible transition/liquidated account): ${data.cash_warnings
+          .map((w) => `${w.manager} (${w.cash_pct}% cash)`)
+          .join(", ")}`
+      : "";
 
   return (
     <div className="contrib-section mb-16" id="portfolio-exposures-section">
@@ -280,6 +286,11 @@ export function PortfolioExposuresSection({
           {unmatchedNote ? (
             <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--amber)" }}>
               {unmatchedNote}
+            </span>
+          ) : null}
+          {cashWarningNote ? (
+            <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--amber)" }}>
+              {cashWarningNote}
             </span>
           ) : null}
         </div>

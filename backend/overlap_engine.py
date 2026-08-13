@@ -38,7 +38,7 @@ basis.
 
 import numpy as np
 
-from exposures_engine import _fuzzy_match_manager
+from exposures_engine import _fuzzy_match_manager, is_cash_row as _is_cash_row
 
 import re
 
@@ -176,7 +176,7 @@ def _manager_holdings(securities, match_basis):
         if key not in out:
             out[key] = {'weight': 0.0, 'name': nm, 'sedol': sedol,
                         'sector': rec.get('GICS Sector') or '',
-                        'country': rec.get('MSCI Country') or '',
+                        'country': rec.get('Country') or rec.get('MSCI Country') or '',
                         '_topw': w, 'n_lines': 0}
         grp = out[key]
         grp['weight'] += w
@@ -187,13 +187,14 @@ def _manager_holdings(securities, match_basis):
             grp['name'] = nm
             grp['sedol'] = sedol
             grp['sector'] = rec.get('GICS Sector') or grp['sector']
-            grp['country'] = rec.get('MSCI Country') or grp['country']
+            grp['country'] = rec.get('Country') or rec.get('MSCI Country') or grp['country']
     return out
 
 
 def compute_holdings_overlap(managers_with_weights, exposures_data,
                              benchmark_name=None, weight_state='current',
-                             match_basis='sedol'):
+                             match_basis='sedol', client_name=None,
+                             client_rosters=None):
     """
     Compute the pairwise holdings-overlap matrix for a client portfolio.
 
@@ -229,11 +230,25 @@ def compute_holdings_overlap(managers_with_weights, exposures_data,
     if not exp_managers:
         return {'error': 'Exposure file has no manager holdings.'}
 
+    # Holdings pool: manager sections plus benchmark sections, so a passive
+    # index sleeve (resolver tier 'index') reads the index's own holdings.
+    holdings_pool = dict(exp_managers)
+    holdings_pool.update(exposures_data.get('benchmarks') or {})
+
     candidate_names = list(exp_managers.keys())
     wkey = 'proposed_weight' if weight_state == 'proposed' else 'current_weight'
 
     # ── Select held managers on the chosen basis, match to the file ─────────
-    held   = []   # list of dicts: {name, display, alloc, exp_name}
+    # Client-aware ownership resolution (prefix rules + sleeve-class fallback)
+    # when the client is known; legacy fuzzy matching otherwise.
+    resolution = {}
+    if client_name:
+        from holdings_resolver import resolve_managers
+        resolution = resolve_managers(managers_with_weights, exposures_data,
+                                      client_name, client_rosters=client_rosters,
+                                      weight_state=weight_state)
+
+    held   = []   # list of dicts: {name, display, alloc, exp_name, source}
     unmatched = []
     seen_exp = set()
     for m in managers_with_weights:
@@ -241,9 +256,16 @@ def compute_holdings_overlap(managers_with_weights, exposures_data,
         if alloc <= 0:
             continue
         display = m.get('matched_name') or m.get('weight_file_name') or '?'
-        match_input = m.get('weight_file_name') or m.get('matched_name')
-        exp_name = _fuzzy_match_manager(match_input, candidate_names,
-                                        benchmark_hint=benchmark_name)
+        source = None
+        if client_name:
+            res = resolution.get(display)
+            exp_name = res['section'] if res else None
+            if res and res['tier'] != 'own':
+                source = {'tier': res['tier'], 'borrowed_from': res['owner']}
+        else:
+            match_input = m.get('weight_file_name') or m.get('matched_name')
+            exp_name = _fuzzy_match_manager(match_input, candidate_names,
+                                            benchmark_hint=benchmark_name)
         if not exp_name:
             unmatched.append(display)
             continue
@@ -254,13 +276,14 @@ def compute_holdings_overlap(managers_with_weights, exposures_data,
             continue
         seen_exp.add(exp_name)
         held.append({'name': display, 'display': display,
-                     'alloc': alloc, 'exp_name': exp_name})
+                     'alloc': alloc, 'exp_name': exp_name, 'source': source})
 
     if len(held) < 2:
         return {
             'managers':   [{'name': h['name'], 'display': h['display'],
-                            'count': len(_manager_holdings(exp_managers[h['exp_name']], match_basis)),
-                            'alloc': round(h['alloc'] * 100, 2)} for h in held],
+                            'count': len(_manager_holdings(holdings_pool[h['exp_name']], match_basis)),
+                            'alloc': round(h['alloc'] * 100, 2),
+                            'source': h.get('source')} for h in held],
             'pairs':      [],
             'unmatched':  unmatched,
             'weight_state': weight_state,
@@ -277,19 +300,32 @@ def compute_holdings_overlap(managers_with_weights, exposures_data,
     internal = []
     scaled   = []
     counts   = []
+    cash_pcts = []
     for h in held:
-        holds = _manager_holdings(exp_managers[h['exp_name']], match_basis)
+        secs = holdings_pool[h['exp_name']]
+        holds = _manager_holdings(secs, match_basis)
         i_w = {k: v['weight'] for k, v in holds.items()}
         s_w = {k: w * h['alloc'] for k, w in i_w.items()}
         internal.append(i_w)
         scaled.append(s_w)
         counts.append(len(holds))
+        tw = sum(s['weight'] for s in secs.values())
+        cash_pcts.append(round(100 * sum(s['weight'] for s in secs.values()
+                                         if _is_cash_row(s)) / tw, 1) if tw else 0.0)
 
     n = len(held)
     axis = [{'name': h['name'], 'display': h['display'],
              'count': counts[k],
-             'alloc': round(h['alloc'] * 100, 2)}
+             'alloc': round(h['alloc'] * 100, 2),
+             'source': h.get('source'),
+             'cash_pct': cash_pcts[k]}
             for k, h in enumerate(held)]
+
+    # Sleeves >10% cash are almost always mid-transition / liquidated
+    # accounts (journal 2026-08-13, CALSTRS/CastleArk) — flag them.
+    cash_warnings = [{'manager': held[k]['name'], 'section': held[k]['exp_name'],
+                      'cash_pct': cash_pcts[k]}
+                     for k in range(len(held)) if cash_pcts[k] > 10]
 
     pairs = []
     for i in range(n):
@@ -307,6 +343,7 @@ def compute_holdings_overlap(managers_with_weights, exposures_data,
         'managers':   axis,
         'pairs':      pairs,
         'unmatched':  unmatched,
+        'cash_warnings': cash_warnings,
         'weight_state': weight_state,
         'benchmark_name': benchmark_name,
         'match_basis': match_basis,
@@ -315,7 +352,8 @@ def compute_holdings_overlap(managers_with_weights, exposures_data,
 
 def compute_pair_detail(managers_with_weights, exposures_data, name_i, name_j,
                         benchmark_name=None, weight_state='current',
-                        top_n=None, match_basis='sedol'):
+                        top_n=None, match_basis='sedol', client_name=None,
+                        client_rosters=None):
     """
     Return the shared-security detail for one pair, for the drill-down panel.
 
@@ -328,8 +366,19 @@ def compute_pair_detail(managers_with_weights, exposures_data, name_i, name_j,
     if exposures_data is None:
         return {'error': 'No exposure data loaded.'}
     exp_managers = exposures_data.get('managers') or {}
+    holdings_pool = dict(exp_managers)
+    holdings_pool.update(exposures_data.get('benchmarks') or {})
     candidate_names = list(exp_managers.keys())
     wkey = 'proposed_weight' if weight_state == 'proposed' else 'current_weight'
+
+    # Same client-aware resolution the matrix uses, so the drill-down opens
+    # the exact section the matrix scored.
+    resolution = {}
+    if client_name:
+        from holdings_resolver import resolve_managers
+        resolution = resolve_managers(managers_with_weights, exposures_data,
+                                      client_name, client_rosters=client_rosters,
+                                      weight_state=weight_state)
 
     def _resolve(target_display):
         for m in managers_with_weights:
@@ -337,6 +386,9 @@ def compute_pair_detail(managers_with_weights, exposures_data, name_i, name_j,
             if display != target_display:
                 continue
             alloc = float(m.get(wkey, 0) or 0)
+            if client_name:
+                res = resolution.get(display)
+                return (res['section'] if res else None), alloc
             match_input = m.get('weight_file_name') or m.get('matched_name')
             exp_name = _fuzzy_match_manager(match_input, candidate_names,
                                             benchmark_hint=benchmark_name)
@@ -348,8 +400,8 @@ def compute_pair_detail(managers_with_weights, exposures_data, name_i, name_j,
     if not exp_i or not exp_j:
         return {'error': 'One or both managers not found in exposure file.'}
 
-    holds_i = _manager_holdings(exp_managers[exp_i], match_basis)
-    holds_j = _manager_holdings(exp_managers[exp_j], match_basis)
+    holds_i = _manager_holdings(holdings_pool[exp_i], match_basis)
+    holds_j = _manager_holdings(holdings_pool[exp_j], match_basis)
     shared = set(holds_i.keys()) & set(holds_j.keys())
 
     rows = []
