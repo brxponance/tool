@@ -41,11 +41,15 @@ export function decoratedManagers(
   ) => Partial<Record<StyleBucketKey, number>> | undefined,
 ) {
   return managers.map((m) => {
-    const ov = getOverride(tab, m.name);
+    // Rows shown in a multi-group view carry their own tab (`_tab`); fall
+    // back to the table-level tab for the single-group case.
+    const rowTab = m._tab ?? tab;
+    const ov = getOverride(rowTab, m.name);
     const eff = effectiveBuckets(m.style_buckets, ov);
     const vg = eff.isOverridden ? vgFromBuckets(eff.buckets) : m.vg_full || 0;
     return {
       ...m,
+      _rowTab: rowTab,
       _buckets: eff.buckets,
       _overriddenKeys: eff.overriddenKeys,
       _overridden: eff.isOverridden,

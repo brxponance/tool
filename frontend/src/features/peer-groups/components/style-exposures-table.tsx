@@ -149,12 +149,12 @@ export function StyleExposuresTable({ managers, tab, displayLabel, overrides }: 
           <tbody>
             {decorated.map((m) => (
               <Row
-                key={m.name}
+                key={`${m._rowTab}|${m.name}`}
                 m={m}
-                tab={tab}
-                onEdit={(b, v) => overrides.setOne(tab, m.name, b, v)}
-                onExclusive={(b) => overrides.setExclusive(tab, m.name, b)}
-                onClearMgr={() => overrides.clearOne(tab, m.name)}
+                tab={m._rowTab}
+                onEdit={(b, v) => overrides.setOne(m._rowTab, m.name, b, v)}
+                onExclusive={(b) => overrides.setExclusive(m._rowTab, m.name, b)}
+                onClearMgr={() => overrides.clearOne(m._rowTab, m.name)}
               />
             ))}
           </tbody>

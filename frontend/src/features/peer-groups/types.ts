@@ -12,6 +12,9 @@ export type AllManagersResponse = {
 
 export type PeerGroupManager = {
   name: string;
+  // Frontend-only tag: which peer tab this row came from. Set when multiple
+  // peer groups are shown together so edits/links stay tab-correct.
+  _tab?: string;
   r2_full: number | null;
   vg_full: number;
   pct_small: number;

@@ -439,9 +439,12 @@ export function MarketCycleChart({ placements, portfolioKey }: MarketCycleChartP
       {/* Manager dots + labels */}
       {placements.length && portfolioKey === "combined" ? (
         <>
-          {/* Group by x (y is a pure function of x) so a removed and an added
-              manager landing on the exact same placement collapse into a
-              single half-red/half-green dot instead of two overlapping dots. */}
+          {/* Group by x (y is a pure function of x) so managers landing on
+              the exact same placement collapse into ONE dot, split by the
+              statuses present: removed+added = half red / half green,
+              retained+added = half blue / half green, retained+removed =
+              half blue / half red, all three = three wedges. Solid color
+              when every co-located manager shares one status. */}
           {Object.values(
             placements.reduce<Record<string, MarketCyclePlacement[]>>((acc, p) => {
               const key = (p.x ?? 0).toFixed(3);
@@ -452,21 +455,31 @@ export function MarketCycleChart({ placements, portfolioKey }: MarketCycleChartP
             const cx = xScale(grp[0].x ?? 0);
             const cy = yScale(waveY(grp[0].x ?? 0));
             const r = 9;
-            const hasRemoved = grp.some((p) => mcStatus(p) === "removed");
-            const hasAdded = grp.some((p) => mcStatus(p) === "added");
+            // Fixed left→right order: removed (red), retained (blue), added (green).
+            const statuses = (["removed", "retained", "added"] as McStatus[]).filter((s) =>
+              grp.some((p) => mcStatus(p) === s),
+            );
             const tip = grp.map((p) => mcTip(p, portfolioKey)).join("\n───\n");
             const key = `grp-${(grp[0].x ?? 0).toFixed(3)}`;
-            if (hasRemoved && hasAdded) {
-              // Left semicircle red (removed), right semicircle green (added).
+            if (statuses.length === 1) {
+              const c = MC_STATUS_COLORS[statuses[0]];
+              return (
+                <circle key={key} cx={cx} cy={cy} r={r} fill={c.fill} stroke={c.stroke} strokeWidth="1.5">
+                  <title>{tip}</title>
+                </circle>
+              );
+            }
+            if (statuses.length === 2) {
+              // Vertical split: left semicircle = first status, right = second.
               return (
                 <g key={key}>
                   <path
                     d={`M ${cx} ${cy - r} A ${r} ${r} 0 0 0 ${cx} ${cy + r} Z`}
-                    fill={MC_STATUS_COLORS.removed.fill}
+                    fill={MC_STATUS_COLORS[statuses[0]].fill}
                   />
                   <path
                     d={`M ${cx} ${cy - r} A ${r} ${r} 0 0 1 ${cx} ${cy + r} Z`}
-                    fill={MC_STATUS_COLORS.added.fill}
+                    fill={MC_STATUS_COLORS[statuses[1]].fill}
                   />
                   <circle cx={cx} cy={cy} r={r} fill="none" stroke="#555" strokeWidth="1.5">
                     <title>{tip}</title>
@@ -474,15 +487,25 @@ export function MarketCycleChart({ placements, portfolioKey }: MarketCycleChartP
                 </g>
               );
             }
-            const c = hasRemoved
-              ? MC_STATUS_COLORS.removed
-              : hasAdded
-                ? MC_STATUS_COLORS.added
-                : MC_STATUS_COLORS.retained;
+            // All three statuses share the spot: three 120° wedges from 12 o'clock.
+            const wedge = (i: number) => {
+              const a0 = -Math.PI / 2 + (i * 2 * Math.PI) / 3;
+              const a1 = a0 + (2 * Math.PI) / 3;
+              const x0 = cx + r * Math.cos(a0);
+              const y0 = cy + r * Math.sin(a0);
+              const x1 = cx + r * Math.cos(a1);
+              const y1 = cy + r * Math.sin(a1);
+              return `M ${cx} ${cy} L ${x0} ${y0} A ${r} ${r} 0 0 1 ${x1} ${y1} Z`;
+            };
             return (
-              <circle key={key} cx={cx} cy={cy} r={r} fill={c.fill} stroke={c.stroke} strokeWidth="1.5">
-                <title>{tip}</title>
-              </circle>
+              <g key={key}>
+                {statuses.map((s, i) => (
+                  <path key={s} d={wedge(i)} fill={MC_STATUS_COLORS[s].fill} />
+                ))}
+                <circle cx={cx} cy={cy} r={r} fill="none" stroke="#555" strokeWidth="1.5">
+                  <title>{tip}</title>
+                </circle>
+              </g>
             );
           })}
           {/* Labels: one per manager, so both names in a shared placement still show. */}

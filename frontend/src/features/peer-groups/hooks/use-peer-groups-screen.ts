@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { getPeerGroupSummary } from "../api/get-peer-groups-screen-data";
-import type { PeerGroupsResponse, PeerStyle } from "../types";
+import type { PeerGroupManager, PeerGroupsResponse, PeerStyle } from "../types";
+import { filterByStyle } from "../lib/peer-helpers";
 
 export type PeerGroupRow = { id: string; label: string };
 export type PeerGroupBlock = { group: string; rows: PeerGroupRow[] };
@@ -51,73 +52,117 @@ export const PEER_TAB_GROUPS: PeerGroupBlock[] = [
 
 export const PEER_STYLES: PeerStyle[] = ["Growth", "Core", "Value"];
 
-type Selection = { tab: string; style: PeerStyle };
+export type Selection = { tab: string; style: PeerStyle };
 
-type State = {
-  data: PeerGroupsResponse | null;
-  loading: boolean;
-  error: string | null;
-};
-
-const initialState: State = { data: null, loading: false, error: null };
+const selKey = (s: Selection) => `${s.tab}|${s.style}`;
 
 export function usePeerGroupsScreen() {
-  const [selection, setSelection] = useState<Selection>({ tab: "EAFE", style: "Growth" });
-  const [state, setState] = useState<State>(initialState);
+  // Multiple peer groups can be viewed at once (e.g. EAFE Growth + EAFE
+  // Core). Buttons toggle selections; the tables show the union.
+  const [selections, setSelections] = useState<Selection[]>([
+    { tab: "EAFE", style: "Growth" },
+  ]);
+  const [dataByTab, setDataByTab] = useState<Record<string, PeerGroupsResponse>>({});
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const cache = useRef<Map<string, PeerGroupsResponse>>(new Map());
 
-  async function loadTab(tab: string) {
-    const hit = cache.current.get(tab);
-    if (hit) {
-      setState({ data: hit, loading: false, error: null });
-      return;
-    }
-    setState((current) => ({ ...current, loading: true, error: null }));
-    try {
-      const fresh = await getPeerGroupSummary(tab);
-      cache.current.set(tab, fresh);
-      setState({ data: fresh, loading: false, error: null });
-    } catch (error) {
-      setState({
-        data: null,
-        loading: false,
-        error:
-          error instanceof Error
-            ? error.message
-            : "Unable to load the selected peer group.",
+  async function loadTabs(tabs: string[]) {
+    const missing = tabs.filter((t) => !cache.current.has(t));
+    // Sync anything already cached into state first.
+    setDataByTab((prev) => {
+      const next = { ...prev };
+      tabs.forEach((t) => {
+        const hit = cache.current.get(t);
+        if (hit) next[t] = hit;
       });
+      return next;
+    });
+    if (!missing.length) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const fetched = await Promise.all(
+        missing.map(async (t) => [t, await getPeerGroupSummary(t)] as const),
+      );
+      fetched.forEach(([t, resp]) => cache.current.set(t, resp));
+      setDataByTab((prev) => {
+        const next = { ...prev };
+        fetched.forEach(([t, resp]) => {
+          next[t] = resp;
+        });
+        return next;
+      });
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Unable to load the selected peer group.",
+      );
+    } finally {
+      setLoading(false);
     }
   }
 
+  const tabsKey = [...new Set(selections.map((s) => s.tab))].sort().join(",");
   useEffect(() => {
-    void loadTab(selection.tab);
-  }, [selection.tab]);
+    void loadTabs(tabsKey ? tabsKey.split(",") : []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabsKey]);
 
-  function select(tab: string, style: PeerStyle) {
-    setSelection({ tab, style });
+  // Toggle a peer group in/out of the selection; the last one stays put.
+  function toggle(tab: string, style: PeerStyle) {
+    setSelections((prev) => {
+      const key = selKey({ tab, style });
+      const exists = prev.some((s) => selKey(s) === key);
+      if (exists) {
+        return prev.length > 1 ? prev.filter((s) => selKey(s) !== key) : prev;
+      }
+      return [...prev, { tab, style }];
+    });
+  }
+
+  function isSelected(tab: string, style: PeerStyle) {
+    return selections.some((s) => s.tab === tab && s.style === style);
   }
 
   function reload() {
-    cache.current.delete(selection.tab);
-    void loadTab(selection.tab);
+    const tabs = [...new Set(selections.map((s) => s.tab))];
+    tabs.forEach((t) => cache.current.delete(t));
+    void loadTabs(tabs);
   }
 
   // Drop a tab's cached response so the next visit refetches (used after
   // persisting placeholder buckets server-side).
   function invalidate(tab: string) {
     cache.current.delete(tab);
+    void loadTabs([...new Set(selections.map((s) => s.tab))]);
   }
 
-  const allManagers = useMemo(() => state.data?.managers ?? [], [state.data]);
+  // Union of every selected peer group, each row tagged with its own tab so
+  // edits and detail links stay tab-correct in a mixed table. Deduped by
+  // tab+name (a manager sits in exactly one style bucket per tab).
+  const allManagers = useMemo(() => {
+    const seen = new Set<string>();
+    const out: PeerGroupManager[] = [];
+    selections.forEach((sel) => {
+      const managers = dataByTab[sel.tab]?.managers ?? [];
+      filterByStyle(managers, sel.style, sel.tab).forEach((m) => {
+        const key = `${sel.tab}|${m.name}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        out.push({ ...m, _tab: sel.tab });
+      });
+    });
+    return out;
+  }, [selections, dataByTab]);
 
   return {
-    selection,
-    select,
+    selections,
+    toggle,
+    isSelected,
     reload,
     invalidate,
-    loading: state.loading,
-    error: state.error,
-    data: state.data,
+    loading,
+    error,
     allManagers,
   };
 }

@@ -94,13 +94,14 @@ export function SkillTable({ managers, tab }: Props) {
           </thead>
           <tbody>
             {rows.map((m) => {
-              const detailHref = `/manager-detail?tab=${encodeURIComponent(tab)}&manager=${encodeURIComponent(m.name)}`;
+              const rowTab = m._tab ?? tab;
+              const detailHref = `/manager-detail?tab=${encodeURIComponent(rowTab)}&manager=${encodeURIComponent(m.name)}`;
               const zTitle =
                 m.ns_z != null
                   ? `${m.ns_n_obs ?? "?"} mo · ${m.ns_n_peers ?? "?"} peers (${m.ns_adj_method ?? ""})`
                   : "Insufficient history";
               return (
-                <tr key={m.name}>
+                <tr key={`${rowTab}|${m.name}`}>
                   <td style={{ fontWeight: 500 }}>
                     <Link href={detailHref} style={{ color: "var(--accent)" }}>
                       {m.name}

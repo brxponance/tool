@@ -15,11 +15,18 @@ import {
   PEER_TAB_GROUPS,
   usePeerGroupsScreen,
 } from "../hooks/use-peer-groups-screen";
-import { filterByStyle } from "../lib/peer-helpers";
 
 export function PeerGroupsRoute() {
-  const { selection, select, reload, invalidate, loading, error, allManagers } =
-    usePeerGroupsScreen();
+  const {
+    selections,
+    toggle,
+    isSelected,
+    reload,
+    invalidate,
+    loading,
+    error,
+    allManagers,
+  } = usePeerGroupsScreen();
   const overrides = useBucketOverrides();
 
   // Persist Placeholder edits so they survive a refresh / backend restart —
@@ -69,15 +76,17 @@ export function PeerGroupsRoute() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [overrides, allManagers]);
 
-  const filtered = useMemo(
-    () => filterByStyle(allManagers, selection.style, selection.tab),
-    [allManagers, selection.style, selection.tab],
-  );
+  const displayLabel = selections
+    .map((s) =>
+      s.tab === "Placeholder"
+        ? "Placeholder managers (no clone)"
+        : `${s.tab === "USSC" ? "US SC" : s.tab} ${s.style}`,
+    )
+    .join(" + ");
 
-  const displayLabel =
-    selection.tab === "Placeholder"
-      ? "Placeholder managers (no clone)"
-      : `${selection.tab === "USSC" ? "US SC" : selection.tab} — ${selection.style}`;
+  // The tables receive rows tagged with their own tab (_tab); the tab prop
+  // is only the fallback for untagged rows.
+  const fallbackTab = selections[0]?.tab ?? "EAFE";
 
   return (
     <div>
@@ -87,13 +96,14 @@ export function PeerGroupsRoute() {
             <span className="peer-selector-label">{block.group}</span>
             {block.rows.map((row, idx) => {
               const style = PEER_STYLES[idx];
-              const active = selection.tab === row.id && selection.style === style;
+              const active = isSelected(row.id, style);
               return (
                 <button
                   key={row.label}
                   type="button"
                   className={cn("peer-btn", active && "active")}
-                  onClick={() => select(row.id, style)}
+                  onClick={() => toggle(row.id, style)}
+                  title="Click to add/remove this peer group from the view"
                 >
                   {row.label}
                 </button>
@@ -119,12 +129,17 @@ export function PeerGroupsRoute() {
           >
             Reload
           </button>
-          {loading && <span>Loading {selection.tab}…</span>}
+          <span>
+            {selections.length > 1
+              ? `${selections.length} peer groups selected — click a highlighted button to remove it`
+              : "Click additional peer groups to view them together"}
+          </span>
+          {loading && <span>Loading…</span>}
           {error && <span style={{ color: "var(--red)" }}>{error}</span>}
         </div>
       </div>
 
-      {filtered.length === 0 ? (
+      {allManagers.length === 0 ? (
         <div
           style={{
             color: "var(--text3)",
@@ -139,12 +154,12 @@ export function PeerGroupsRoute() {
       ) : (
         <>
           <StyleExposuresTable
-            managers={filtered}
-            tab={selection.tab}
+            managers={allManagers}
+            tab={fallbackTab}
             displayLabel={displayLabel}
             overrides={tableOverrides}
           />
-          <SkillTable managers={filtered} tab={selection.tab} />
+          <SkillTable managers={allManagers} tab={fallbackTab} />
         </>
       )}
     </div>

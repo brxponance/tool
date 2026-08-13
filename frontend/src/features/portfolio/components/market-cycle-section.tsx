@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 
 import type { MarketCycleResponse, MarketCyclePlacement } from "../types";
 
-import { MC_BUCKETS, MC_STATUS_COLORS, MarketCycleChart, mcApplyOverrides } from "./market-cycle-chart";
+import { MC_BUCKETS, MarketCycleChart, mcApplyOverrides } from "./market-cycle-chart";
 
 type MarketCycleSectionProps = {
   benchmark: string;
@@ -139,41 +139,6 @@ export function MarketCycleSection({ benchmark, loading, data }: MarketCycleSect
             )}
             <div style={{ padding: 12, background: "var(--surface)" }}>
               <MarketCycleChart placements={combinedPlacements} portfolioKey="combined" />
-              <div
-                style={{
-                  display: "flex",
-                  flexWrap: "wrap",
-                  justifyContent: "center",
-                  gap: 18,
-                  marginTop: 8,
-                  fontFamily: "var(--mono)",
-                  fontSize: 10,
-                  color: "var(--text2)",
-                }}
-              >
-                {[
-                  { label: "In current & proposed", background: MC_STATUS_COLORS.retained.fill },
-                  { label: "Added", background: MC_STATUS_COLORS.added.fill },
-                  { label: "Removed", background: MC_STATUS_COLORS.removed.fill },
-                  {
-                    label: "Removed + added (same placement)",
-                    background: `linear-gradient(90deg, ${MC_STATUS_COLORS.removed.fill} 50%, ${MC_STATUS_COLORS.added.fill} 50%)`,
-                  },
-                ].map((item) => (
-                  <span key={item.label} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-                    <span
-                      style={{
-                        width: 10,
-                        height: 10,
-                        borderRadius: "50%",
-                        background: item.background,
-                        display: "inline-block",
-                      }}
-                    />
-                    {item.label}
-                  </span>
-                ))}
-              </div>
             </div>
 
             {tableRows.length ? (
