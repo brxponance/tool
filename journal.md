@@ -4,6 +4,10 @@
 
 _Newest first. Add new entries directly below this index._
 
+- [2026-08-13 — New Performance Attribution tab; contribution tables moved out of Portfolio](#2026-08-13--new-performance-attribution-tab-contribution-tables-moved-out-of-portfolio)
+- [2026-08-13 — Peer groups: multi-select; placeholder list cleaned (strategy-level 3yr rule); market-cycle split dots for remaining+added/removed](#2026-08-13--peer-groups-multi-select-placeholder-list-cleaned-strategy-level-3yr-rule-market-cycle-split-dots-for-remainingaddedremoved)
+- [2026-08-13 — Exposures "Unclassified" audit: header-vintage aliasing fixed; CALSTRS's 23% is a terminated cash-only sleeve](#2026-08-13--exposures-unclassified-audit-header-vintage-aliasing-fixed-calstrss-23-is-a-terminated-cash-only-sleeve)
+- [2026-08-13 — Holdings overlap matched managers to the wrong client's portfolios; replaced fuzzy matching with client-ownership resolution](#2026-08-13--holdings-overlap-matched-managers-to-the-wrong-clients-portfolios-replaced-fuzzy-matching-with-client-ownership-resolution)
 - [2026-08-13 — /run crashed in production on a fresh upload (third S3-key bug; fixed the class at the source)](#2026-08-13--run-crashed-in-production-on-a-fresh-upload-third-s3-key-bug-fixed-the-class-at-the-source)
 - [2026-08-11 — Uploading a weights file never took effect in production (S3 key vs local path)](#2026-08-11--uploading-a-weights-file-never-took-effect-in-production-s3-key-vs-local-path)
 - [2026-08-11 — My preflight check blocked production for a week (AccessDenied read as "missing")](#2026-08-11--my-preflight-check-blocked-production-for-a-week-accessdenied-read-as-missing)
@@ -16,6 +20,227 @@ _Newest first. Add new entries directly below this index._
 - [2026-07-07 — Moved project off OneDrive to C:\dev\pc_tool (canonical working copy)](#2026-07-07-moved-project-off-onedrive-to-cdevpc_tool-canonical-working-copy)
 
 ---
+
+## 2026-08-13 — New Performance Attribution tab; contribution tables moved out of Portfolio
+
+New nav tab **Attribution** (`/attribution`, eyebrow "Performance") — the
+future home of the quarterly attribution / benchmark theme discovery work
+(see the design plan + FactSet pull spec journaled earlier this month). For
+now it hosts the two tables moved from the Portfolio tab: **Current
+Portfolio Contribution** and **Contribution by Style Group**, with its own
+client dropdown (same pattern as Portfolio's selector, read-only — no
+add/rename) plus a benchmark caption.
+
+Structure per frontend rules: new bounded feature `features/attribution/`
+(routes/components/api/types). The tab fetches `/clients` and
+`/portfolio_contribution/<client>` itself — no coupling to the portfolio
+screen's state. The contribution helpers (style-group bucketing by vg_full
+±25%, weighted sums, totals row) moved with the tables. Portfolio side: the
+two panels and the `contribution` prop were removed from
+`portfolio-analytics-sections.tsx` / `portfolio-route.tsx`; NOTE
+`use-portfolio-screen.ts` still fetches contribution data (including the
+draft-preview variant used when weights are edited) — left in place
+deliberately since the attribution tab may want the preview flow later;
+it's an unused fetch on the Portfolio tab today.
+
+## 2026-08-13 — Peer groups: multi-select; placeholder list cleaned (strategy-level 3yr rule); market-cycle split dots for remaining+added/removed
+
+Three UI/logic changes requested in one session:
+
+### Market-cycle chart: split dots for every co-location combo
+Previously only removed+added at the same placement got a half-red/half-green
+dot; a REMAINING manager sharing a spot with an added/removed one was silently
+swallowed into a solid color. `market-cycle-chart.tsx` now splits by all
+statuses present, fixed left→right order removed(red)/retained(blue)/
+added(green): two statuses = vertical half-split, all three = three 120°
+wedges. Report tab reuses the component so it inherits the fix. (The color
+legend under the chart was subsequently removed entirely at the user's
+request — the tooltips still name each manager's status.)
+
+### Peer groups tab: select multiple peer groups at once
+`use-peer-groups-screen.ts` now holds a Selection[] — peer buttons TOGGLE
+groups in/out (min 1), data fetched per unique tab and cached, and the tables
+show the union with each row tagged `_tab` so bucket edits, override storage,
+and manager-detail links stay tab-correct in a mixed view (EAFE Growth + EAFE
+Core, or even cross-universe combos). `decoratedManagers` resolves overrides
+per row-tab; row keys are `tab|name` to survive same-named managers across
+tabs.
+
+### Placeholder peer group: only genuine <3yr strategies, one row each
+`_enumerate_placeholder_candidates` (app.py) rewritten. The old union of raw
+file names surfaced junk: 'Uniphar PLC' (a security misparsed as a risk-file
+section), 'X' + 'X vs. MSCI …' duplicates, and client-decorated sleeves of
+fully-cloned firms (NYSCRF/XPONANCE - BALLINA CAPITAL, MASS PRIM - OSMOSIS…)
+whenever the alias crosswalk missed a decoration. New rules:
+- security-risk columns WITHOUT a 'vs. <benchmark>' suffix are strays → dropped
+  at source (kills Uniphar);
+- names are cleaned (strip 'vs.' suffix + client prefix) and deduped per
+  strategy; weights-file labels win the display name ('Ravenswood EAFE +
+  Canada', not 'NYCBERS - RAVENSWOOD EAFE+Canada');
+- FIRM suppression for client-decorated names only: if the firm has any
+  cloned BUY-LIST strategy, its decorated sleeves are never placeholders.
+  Deliberately NOT applied to plain strategy names — a firm can have one
+  cloned strategy and another too young ('IMC ACWI ex US' cloned, 'IMC
+  Global' legitimately placeholder). Also deliberately NOT keyed on universe
+  clones (first attempt did, and the peer universe's hundreds of firms
+  wrongly suppressed everything).
+Result on current data: 4 placeholders — IMC ACWI ex US, IMC Global, IMC
+Non-US Developed, Ravenswood EAFE + Canada. Gotcha for future readers:
+saved placeholder buckets are keyed by name, so entries stored under old
+decorated names won't re-attach to the new clean display names.
+
+## 2026-08-13 — Exposures "Unclassified" audit: header-vintage aliasing fixed; CALSTRS's 23% is a terminated cash-only sleeve
+
+User reported way-too-high Unclassified weight in the FactSet grouping
+exposures (e.g. Industry). Swept every grouping × client; three separate
+causes, only one of them a tool bug:
+
+1. **Tool bug (fixed): header-vintage duplicates in the grouping menu.**
+   3/31 exports name geography columns `MSCI Region`/`MSCI Country`; 6/30
+   renamed them `Region`/`Country`. Grouping lookups are exact header-string
+   matches and the menu offered BOTH vintages, so picking the one absent from
+   the loaded file rendered 100% Unclassified (benchmark included). Fix:
+   `COLUMN_ALIASES` in `exposures_engine.py` canonicalises old→new at parse
+   time, the menu now lists each geography once, and overlap metadata reads
+   Country with an MSCI fallback (tolerates stale pickled parses). Verified:
+   menu de-duped; Region works on 6/30 data; a 3/31 re-parse carries
+   canonical keys. Going forward the pull uses Region / Country / GICS
+   Sector / GICS Industry naming (user decision).
+2. **Data inconsistency (user to resolve): `CALSTRS - CASTLEARK EAFE+Canada`
+   is a terminated account** — ending weights are 89.9% U.S. Dollar +
+   JPY999999 39.3% + Yen 10%, every real stock at 0. The weights file still
+   allocates CastleArk 21.65% of CALSTRS, so ~23.5% of CALSTRS reads
+   Unclassified in EVERY grouping (NYSTRS ~13.8% via borrowing the same dead
+   section). Tool computes faithfully; the two inputs disagree. Options:
+   update Manager_Weights, re-pull exposures with a live section, or teach
+   the resolver to skip cash-only sections (policy decision not made).
+3. **Data reality: cash/FX rows** (3–7% baseline for most clients — currency
+   lines carry weight but no GICS/country tags) and sparse metrics
+   (`Earnings Growth 3-5Y Projected` missing for ~29–38% of even the
+   benchmark). **Cash bucket shipped same day**: `is_cash_row` in
+   `exposures_engine.py` routes currency lines (name matches a currency
+   word or an `XXX999999` FX code AND the row has no GICS sector — the
+   sector guard keeps 'Dollarama'-type names safe) into a `Cash` bucket in
+   all three grouping modes (categorical, quintile, nested; Cash parent not
+   expanded, ordered before Unclassified at the bottom). Verified: CALSTRS
+   sector view now reads Cash 23.5% / Unclassified 3.5% (was 27% blended),
+   Region's Unclassified vanished entirely (it was all cash), rows still
+   sum to 100. 'Unclassified' now genuinely means missing classification.
+
+**Follow-up (user rule): flag any sleeve >10% cash.** The 23.5% "Cash" was
+itself a red herring — decomposition showed the six live CALSTRS sleeves hold
+0.8–4% cash (~1.9% of the client); the other 21.65 points are the CastleArk
+section at literally 100% cash (89.9% USD + FX-forward pair + JPY — a
+liquidation snapshot; CALSTRS swapped CastleArk→Polen mid-Q2 per the EX2
+composite, but Manager_Weights_6_30 still carries CastleArk 21.65% and no
+Polen, and no Polen section exists in the exposures/risk pulls yet — DATA fix
+owed by user). Tool-side guardrail shipped: `compute_portfolio_exposures`
+(both modes) and `compute_holdings_overlap` now return `cash_warnings`
+([{manager, section, cash_pct}] for sections >10% cash; overlap axis rows
+also carry `cash_pct`), and the exposures panel + overlap section render an
+amber "Heavy cash (possible transition/liquidated account)" banner. Verified:
+CALSTRS and NYSTRS (which borrows the same dead section) flag CastleArk at
+100%; MD/ATL Health clean; nested mode carries the warnings too.
+
+## 2026-08-13 — Holdings overlap matched managers to the wrong client's portfolios; replaced fuzzy matching with client-ownership resolution
+
+Symptom (reported for ATL Health): the holdings-overlap matrix said 3 of the 6
+managers had no holdings in the exposures file, even though every sleeve was
+uploaded. The FactSet grouping panel below it had the same problem — both route
+manager names through `_fuzzy_match_manager`.
+
+### Root cause — worse than "missing"
+`WRatio('ballina sc', 'md castleark x sc')` = 85.5 — and so does every other
+`md <anything> x sc` key, because the score is carried by the generic 'sc'
+suffix, not the manager's name. All of them clear the 80 cutoff, and
+`extractOne` breaks ties by **file order**, which puts `MD-CASTLEARK WORLD X US
+SC` first. So for ATL Health: Ballina *claimed CastleArk's Maryland sleeve*,
+then CastleArk/Frontier/Redwood matched that same section and were discarded by
+the duplicate guard → reported "missing". The overlap that did render was
+silently wrong twice over: "Ballina" showed MD-CastleArk's book, and even the
+"successful" Lizard/Mac Alpha matches used **Maryland's** sleeves instead of ATL
+Health's own `XPN…AHE` sections.
+
+### Fix — ownership, not string similarity (`backend/holdings_resolver.py`)
+Every section in the group-exposures workbook belongs to a client via its
+prefix (user-specified rules): `MD-`, `CALSTRS`, `STLOUIS`/`XPN…SL` → STL,
+`XPN…E` → ATL Health, `Microsoft`, `IMRF`, `FIS NonUS Small Cap CIT`,
+`MASS PRIM`, `NYSCRF`, `NYCBERS` → NYC, `NYSTRS`, `COB`; anything else is an
+unmarked profile (IMC, Evolution, QTRON, New Haven-Huber). Resolution order:
+
+1. **Own client's section** for that firm — always wins.
+2. **Another client's section, same sleeve asset class** — keyed on the
+   *sleeve*, not the client benchmark (an EAFE+Canada sleeve inside ACWI-ex-US
+   NYSTRS borrows CALSTRS' EAFE+Canada profile). Size (SC/micro/standard) must
+   match exactly; region may relax only within the ex-US family
+   (EAFE ≈ EAFE+Canada ≈ World-ex-US, distance-ranked; ACWI-ex-US at distance 2).
+   US vs ex-US, EM vs developed, and cross-size never borrow — so
+   'IQI Micro Cap' correctly flags missing rather than borrowing IQI's EAFE
+   Value book.
+3. **Unmarked profiles**, same compatibility gate.
+
+**Passive index sleeves** (COB's 'MSCI EAFE + Canada') resolve to the
+workbook's BENCHMARK section of the same name (tier 'index') — both engines
+now read holdings from a pool of manager + benchmark sections, so the index
+participates in the overlap matrix, the drill-down, and grouping exposures
+with the index's own holdings.
+
+Sleeve classes for coded sections (`XPNDCMSL-Decatur Capital` has no class
+tokens) come from the owning client's weights roster ('Decatur US' → US).
+Borrowed profiles are surfaced in the API (`source: {tier, borrowed_from}`) so
+the UI can badge them.
+
+### Wiring
+`overlap_engine.compute_holdings_overlap` / `compute_pair_detail` and
+`exposures_engine.compute_portfolio_exposures` take `client_name` +
+`client_rosters` (passed by the three endpoints from `state['weights']`; the
+frontend already sends `client_name`). No client → legacy fuzzy path, so the
+manager-detail page (single manager, no client context) behaves as before. The
+docx memo path (`build_memo_exposures`) still uses its own matcher — untouched,
+future candidate.
+
+### Verified
+All 13 clients × 94 sleeves: 90 resolve (ATL Health 6/6 own — the original bug;
+MD/CALSTRS regression-identical; NYSTRS borrows CALSTRS/NYC with provenance;
+COB 8/8 including the passive sleeve on the MSCI EAFE + Canada benchmark
+section, 785 holdings, exposures coverage 100%). The 4 misses are the agreed
+set: Fithian, Maytech, Consilium EM, IQI Micro Cap — no compatible profile
+uploaded. Live-tested `/holdings_overlap`, `/holdings_overlap_detail`,
+`/portfolio_exposures` against the running backend.
+
+### Extended same day: FactSet security-risk exposures panel
+The user spotted CALSTRS active Size at **−0.916** — reproduced and traced to
+the SAME disease in `security_risk_engine._match_mgr` (a third, independent
+fuzzy matcher): the risk file has **no CALSTRS columns at all**, so every
+sleeve was borrowed by string similarity — CastleArk landed on the **CIT's
+small-cap** sleeve (Size −1.29) and 'Hillsdale EAFE + Canada SC' landed on
+**CastleArk's** column (wrong firm), double-counting one SC book across ~34%
+of the client. `compute_exposures` now takes `client_name`/`client_rosters`
+and resolves through `holdings_resolver.resolve_managers_generic` (risk
+columns carry a `vs. <benchmark>` suffix — `strip_vs_suffix` cleans before
+ownership parsing; index sleeves resolve to the benchmark's own bottom-up
+`… vs. DEFAULT` column). Response gains `sources` (per-manager tier +
+borrowed_from + section) for UI badging. Legacy fuzzy path kept when no
+client is passed (manager-detail page).
+
+Verified: CALSTRS active Size **−0.589** with right-firm, size-compatible
+borrows (CastleArk → NYSTRS standard sleeve, Hillsdale → MD's Hillsdale SC);
+MD uses its own columns + class-compatible ATL Health borrows for
+Ballina/Mac Alpha; COB's passive sleeve hits the index column. The residual
+negative Size is genuine (real SC sleeve at ~12% + Ballina's small-cap
+book). User plans to re-pull FactSet risk files organized by client (like
+the group-exposures file) — then most sleeves resolve at tier 'own'
+automatically; the borrow tiers remain the fallback.
+
+### Gotchas for future readers
+- The exposures workbook's manager sections are per client-manager *sleeve*;
+  the same firm appears under many clients. Any feature matching managers to
+  sections must be client-aware — string similarity alone WILL cross clients.
+- `WRatio` on short normalized keys ties on generic tokens; never trust its
+  ranking between candidates sharing a suffix like 'sc'.
+- ATL Health's two sleeves genuinely share only cash lines at SEDOL level —
+  cash rows ('Us Dollars', 'Japanese Yen') sit in the holdings and count
+  toward overlap; excluding them is an open question.
 
 ## 2026-08-13 — /run crashed in production on a fresh upload (third S3-key bug; fixed the class at the source)
 

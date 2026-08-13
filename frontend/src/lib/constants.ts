@@ -7,6 +7,7 @@ export const APP_NAV_ITEMS = [
   { href: "/setup", label: "Setup", eyebrow: "Connect" },
   { href: "/portfolio", label: "Portfolio", eyebrow: "Weights" },
   { href: "/overlap", label: "Overlap", eyebrow: "Holdings" },
+  { href: "/attribution", label: "Attribution", eyebrow: "Performance" },
   { href: "/peer-groups", label: "Peer Groups", eyebrow: "Compare" },
   { href: "/manager-detail", label: "Manager Detail", eyebrow: "Inspect" },
   { href: "/report", label: "Report", eyebrow: "Print" },

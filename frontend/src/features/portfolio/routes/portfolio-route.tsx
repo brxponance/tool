@@ -33,7 +33,6 @@ export function PortfolioRoute() {
     benchmarkOptions,
     clients,
     clientsEditable,
-    contribution,
     discardChanges,
     ensureManagerCatalog,
     error,
@@ -295,7 +294,6 @@ export function PortfolioRoute() {
 
       <PortfolioAnalyticsSections
         benchmark={benchmark}
-        contribution={contribution}
         exposureMenu={exposureMenu}
         loadingAncillary={loadingAncillary}
         loadingExposures={loadingExposures}
