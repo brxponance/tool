@@ -738,19 +738,32 @@ def run():
 
     def worker():
         try:
+            # A file staged by an older /upload may still be an S3 key rather
+            # than a local path — resolve (download) before opening anything.
+            # Same family as the 2026-08-11 weights fix; see _input_path.
+            mgr_path = _input_path('manager_returns')
+            fac_path = _input_path('factor_returns')
+            bad = [k for k, p in [('manager_returns', mgr_path),
+                                  ('factor_returns', fac_path)] if not p]
+            if bad:
+                raise RuntimeError(
+                    f"Input file(s) could not be read from storage: {bad}. "
+                    f"Try re-uploading them.")
+            # Rebind so every later consumer in this process gets a real path.
+            state['files']['manager_returns'] = mgr_path
+            state['files']['factor_returns'] = fac_path
             # Pre-count managers so the progress bar is meaningful from the
             # first tick. Cheap: just opens the workbook and counts columns.
             try:
                 from data_loader import load_manager_returns as _lmr
-                _pre_dfs = _lmr(state['files']['manager_returns'])
+                _pre_dfs = _lmr(mgr_path)
                 total_mgrs = sum(df.shape[1] for df in _pre_dfs.values())
                 set_progress_phase('Cloning managers', total=total_mgrs, reset_current=True)
                 state['_progress_phase_base'] = 0
             except Exception:
                 # Non-fatal: bar will just run indeterminate if this fails.
                 pass
-            results = run_cloning(state['files']['manager_returns'],
-                                  state['files']['factor_returns'],
+            results = run_cloning(mgr_path, fac_path,
                                   progress_callback=cb_counting)
             state['clone_results'] = results
             # Run-vs-run determinism diagnostic. Splits material beta
@@ -767,10 +780,14 @@ def run():
                     print(line)
             except Exception as e:
                 print(f"Determinism diagnostic skipped: {e}")
-            state['manager_dfs']   = load_manager_returns(state['files']['manager_returns'])
-            state['factset_aliases'] = load_factset_aliases(state['files']['manager_returns'])
-            if 'weights' in state['files']:
-                w, b, caum = load_weights(state['files']['weights'])
+            state['manager_dfs']   = load_manager_returns(mgr_path)
+            state['factset_aliases'] = load_factset_aliases(mgr_path)
+            wpath = _input_path('weights') if 'weights' in state['files'] else None
+            if 'weights' in state['files'] and not wpath:
+                cb("WARNING: weights file could not be read from storage — "
+                   "keeping previously loaded weights.")
+            if wpath:
+                w, b, caum = load_weights(wpath)
                 # Client total AUM only ever comes from the workbook (there is
                 # no DB column for it), so set it on both branches.
                 state['client_aum'] = caum
@@ -783,7 +800,7 @@ def run():
                     state['weights'], state['client_benchmarks'] = w, b
             # Cache factor returns for benchmark lookups
             from data_loader import load_factor_returns as lf
-            state['factor_df'] = lf(state['files']['factor_returns'])
+            state['factor_df'] = lf(fac_path)
             set_progress_phase('Computing normalized skill')
             absorb_regional_into_core(state['clone_results'])
             recompute_norm_skill()

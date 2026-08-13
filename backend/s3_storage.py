@@ -46,14 +46,21 @@ def download_file(key: str, suffix: str = '') -> str:
     return tmp.name
 
 def save_uploaded_file(file_storage, filename: str, upload_folder: str) -> str:
-    """Save a werkzeug FileStorage object. Goes to S3 if enabled, local disk
-    otherwise. Returns the path/key to store in state['files']."""
+    """Save a werkzeug FileStorage object. The file always lands on local disk
+    so the running process can open the returned path immediately; when S3 is
+    enabled it is ALSO uploaded there so a future container can re-download it
+    (load_cache rebinds by basename on boot).
+
+    Returns the LOCAL path. This used to return the S3 key in S3 mode (and
+    delete the local copy), which poisoned state['files'] with a non-path:
+    any code that opened the value directly — /run most visibly — raised
+    FileNotFoundError in production while working fine locally. Keeping the
+    local copy kills that whole bug class at the source.
+    """
     local_path = os.path.join(upload_folder, filename)
     file_storage.save(local_path)
     if is_enabled():
-        s3_key = upload_file(local_path, filename)
-        os.unlink(local_path)  # remove temp local copy
-        return s3_key
+        upload_file(local_path, filename)
     return local_path
 
 def resolve_path(path_or_key: str, upload_folder: str, suffix: str = '.xlsx') -> str:

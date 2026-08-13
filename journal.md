@@ -4,6 +4,7 @@
 
 _Newest first. Add new entries directly below this index._
 
+- [2026-08-13 — /run crashed in production on a fresh upload (third S3-key bug; fixed the class at the source)](#2026-08-13--run-crashed-in-production-on-a-fresh-upload-third-s3-key-bug-fixed-the-class-at-the-source)
 - [2026-08-11 — Uploading a weights file never took effect in production (S3 key vs local path)](#2026-08-11--uploading-a-weights-file-never-took-effect-in-production-s3-key-vs-local-path)
 - [2026-08-11 — My preflight check blocked production for a week (AccessDenied read as "missing")](#2026-08-11--my-preflight-check-blocked-production-for-a-week-accessdenied-read-as-missing)
 - [2026-08-06 — Deploys have been failing since Jul 31: pc-tool/database-url unreadable](#2026-08-06--deploys-have-been-failing-since-jul-31-pc-tooldatabase-url-unreadable)
@@ -15,6 +16,58 @@ _Newest first. Add new entries directly below this index._
 - [2026-07-07 — Moved project off OneDrive to C:\dev\pc_tool (canonical working copy)](#2026-07-07-moved-project-off-onedrive-to-cdevpc_tool-canonical-working-copy)
 
 ---
+
+## 2026-08-13 — /run crashed in production on a fresh upload (third S3-key bug; fixed the class at the source)
+
+Symptom: uploading new returns files on the deployed tool, then clicking RUN BUY
+LIST CLONES, failed immediately with:
+
+```
+ERROR: [Errno 2] No such file or directory: 'uploads/Tool_Buy_List_Mgr_Rts_06_26.xlsx'
+```
+
+FactSet/firm data updates worked fine — only the clone run broke.
+
+### Root cause
+The third member of the S3-key-vs-local-path family (2026-07-20 §8, 2026-08-11).
+`save_uploaded_file` in S3 mode uploaded the workbook to S3, **deleted the local
+copy**, and returned the S3 key (`uploads/<name>.xlsx`). The `/run` worker then
+passed `state['files']['manager_returns']` — that key — straight into
+`load_manager_returns`, which opened it as a filesystem path. The path happens to
+look like a plausible relative path, so the traceback is deceptively mundane.
+
+The universe run (`_start_universe_run`) already resolved keys through
+`resolve_path` before opening; the buy-list `/run` worker never got that
+treatment. Runs only worked in production when the inputs had been rebound to
+local disk by `load_cache` on a container restart — i.e. re-running *old* files
+worked, running *freshly uploaded* files could never work.
+
+### Fix — at the source this time
+Rather than adding a fourth call-site patch, `save_uploaded_file` now **keeps the
+local copy** and returns the LOCAL path in both modes; S3 still gets the upload
+so a future container can re-download it (`load_cache` rebinds by basename on
+boot). `state['files']` therefore never holds a raw S3 key again during the life
+of a process, which also covers every lazy
+`load_factor_returns(state['files']['factor_returns'])` site scattered through
+app.py.
+
+Belt-and-braces: the `/run` worker now resolves `manager_returns` /
+`factor_returns` through `_input_path` up front (clear error instead of a
+FileNotFoundError traceback), rebinds the resolved paths into `state['files']`,
+and resolves the weights file the same way (warns and keeps prior weights instead
+of crashing the whole clone run).
+
+Verified with a mocked-S3 unit test: S3 mode uploads to `uploads/<name>`, keeps
+the local file, returns the local path; `resolve_path` on that path is a no-op
+(no spurious download); local mode unchanged.
+
+### Worth noting
+- `/upload` still does not `save_cache()`, so a file staged but never run does
+  not survive a container restart in `state['files']` — the S3 object exists but
+  the staged name is forgotten. Harmless today (a run persists it), but it is
+  the remaining sharp edge of this design.
+- Local disk on Fargate is ephemeral and workbooks are small — keeping local
+  copies costs nothing.
 
 ## 2026-08-11 — Uploading a weights file never took effect in production (S3 key vs local path)
 
