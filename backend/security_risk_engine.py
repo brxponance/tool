@@ -187,8 +187,12 @@ _SLEEVES = {
 
 
 def get_sleeve_options(client_bench_str: str, available_benchmarks: list) -> list:
-    """Return [{label, sleeve, bench}] for the client's benchmark, filtered
-    to only options whose bench column is actually in the uploaded file."""
+    """Return [{label, sleeve, bench, missing}] for the client's benchmark.
+
+    Options whose benchmark column is absent from the uploaded risk file are
+    still returned, marked missing=True with bench=the preferred column name,
+    so the UI can flag them as unavailable rather than hiding them silently.
+    """
     key = _norm_bench(client_bench_str)
     options = _SLEEVES.get(key)
     if not options:
@@ -198,9 +202,14 @@ def get_sleeve_options(client_bench_str: str, available_benchmarks: list) -> lis
     for label, sleeve, pref in options:
         actual = avail_norm.get(_norm_bench(pref))
         if actual:
-            result.append({'label': label, 'sleeve': sleeve, 'bench': actual})
-    if not result:
-        result.append({'label': 'Full Portfolio', 'sleeve': None, 'bench': None})
+            result.append({'label': label, 'sleeve': sleeve, 'bench': actual,
+                           'missing': False})
+        else:
+            result.append({'label': label, 'sleeve': sleeve, 'bench': pref,
+                           'missing': True})
+    if not any(not o['missing'] for o in result):
+        result.insert(0, {'label': 'Full Portfolio', 'sleeve': None,
+                          'bench': None, 'missing': False})
     return result
 
 
@@ -429,10 +438,39 @@ def compute_exposures(
     # ownership parsing. Legacy fuzzy matching when the client is unknown.
     _resolution = None
     if client_name:
-        from holdings_resolver import resolve_managers_generic, strip_vs_suffix
+        from holdings_resolver import (resolve_managers_generic, section_client,
+                                       strip_vs_suffix)
         _resolution = resolve_managers_generic(
             portfolio_managers, sec_names, client_name,
             client_rosters=client_rosters, clean=strip_vs_suffix)
+        # Safety net for resolver misses (typically directory-added managers
+        # whose labels carry no sleeve tokens): Map crosswalk then legacy
+        # matching, restricted to columns owned by NO client and not already
+        # claimed — ownership resolution stays authoritative for client
+        # columns.
+        claimed = {r['section'] for r in _resolution.values()}
+        free = [s for s in sec_names
+                if s not in claimed and section_client(strip_vs_suffix(s)) is None]
+        for m in portfolio_managers:
+            display = m.get('matched_name') or m.get('weight_file_name') or '?'
+            if display in _resolution or not free:
+                continue
+            match_input = (m.get('weight_file_name')
+                           or m.get('matched_name') or m.get('name', ''))
+            pool = free
+            if _by_mgr and _dl_norm:
+                subset = (_by_mgr.get(_dl_norm(m.get('matched_name')))
+                          or _by_mgr.get(_dl_norm(match_input)))
+                if subset:
+                    narrowed = [s for s in subset if s in free]
+                    if narrowed:
+                        pool = narrowed
+            hit = _match_mgr(match_input, pool)
+            if hit:
+                _resolution[display] = {'section': hit, 'tier': 'fallback',
+                                        'owner': None, 'distance': 9}
+                claimed.add(hit)
+                free = [s for s in free if s != hit]
 
     def compute_side(weight_key: str):
         totals      = {f: 0.0 for f in factors}

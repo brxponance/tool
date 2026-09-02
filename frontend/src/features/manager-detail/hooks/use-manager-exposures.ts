@@ -6,10 +6,13 @@ import {
   getManagerPortfolioExposures,
   getManagerPortfolioExposuresMenu,
 } from "../api/get-manager-exposures";
+import { mgrBenchmarkHint } from "../lib/benchmark-hint";
 import type {
   ManagerExposureMenuGroup,
   ManagerPortfolioExposuresResponse,
 } from "../types";
+
+type ManagerRef = { name: string; tab: string };
 
 type Selection = {
   categorical: string | null;
@@ -17,20 +20,22 @@ type Selection = {
 };
 
 type DataState = {
-  data: ManagerPortfolioExposuresResponse | null;
+  // One response per manager, aligned with the managers argument.
+  data: Array<ManagerPortfolioExposuresResponse | null>;
   loading: boolean;
   error: string | null;
 };
 
-const emptyData: DataState = { data: null, loading: false, error: null };
+const emptyData: DataState = { data: [], loading: false, error: null };
 
+// Portfolio exposures for one or more managers: the menu is shared, and each
+// manager gets its own /portfolio_exposures call (the endpoint aggregates a
+// manager list into one portfolio, so per-manager columns need N calls).
 export function useManagerExposures(args: {
-  name: string | null;
-  tab: string | null;
-  benchmarkHint: string | null;
+  managers: ManagerRef[];
   hasExposures: boolean;
 }) {
-  const { name, tab, benchmarkHint, hasExposures } = args;
+  const { managers, hasExposures } = args;
 
   const [menu, setMenu] = useState<ManagerExposureMenuGroup[]>([]);
   const [selection, setSelection] = useState<Selection>({
@@ -65,14 +70,26 @@ export function useManagerExposures(args: {
   const grouping = selection.categorical ?? selection.continuous;
   const subGrouping = selection.categorical ? selection.continuous : null;
 
+  const signature = managers.map((m) => `${m.tab}::${m.name}`).join("|");
+
   useEffect(() => {
-    if (!hasExposures || !name || !tab || !grouping) {
+    if (!hasExposures || !managers.length || !grouping) {
       setState(emptyData);
       return;
     }
     const id = ++requestId.current;
     setState((curr) => ({ ...curr, loading: true, error: null }));
-    getManagerPortfolioExposures(name, tab, grouping, subGrouping, benchmarkHint)
+    Promise.all(
+      managers.map((m) =>
+        getManagerPortfolioExposures(
+          m.name,
+          m.tab,
+          grouping,
+          subGrouping,
+          mgrBenchmarkHint(m.name, m.tab),
+        ).catch(() => null),
+      ),
+    )
       .then((data) => {
         if (requestId.current === id) {
           setState({ data, loading: false, error: null });
@@ -81,13 +98,15 @@ export function useManagerExposures(args: {
       .catch((err) => {
         if (requestId.current === id) {
           setState({
-            data: null,
+            data: [],
             loading: false,
             error: err instanceof Error ? err.message : "Request failed.",
           });
         }
       });
-  }, [hasExposures, name, tab, grouping, subGrouping, benchmarkHint]);
+    // managers captured via signature
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasExposures, signature, grouping, subGrouping]);
 
   const setSelectionFromSection = useCallback(
     (categorical: string | null, continuous: string | null) => {

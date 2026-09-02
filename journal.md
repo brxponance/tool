@@ -9,6 +9,9 @@ _Newest first. Add new entries directly below this index._
 - [2026-08-13 — Exposures "Unclassified" audit: header-vintage aliasing fixed; CALSTRS's 23% is a terminated cash-only sleeve](#2026-08-13--exposures-unclassified-audit-header-vintage-aliasing-fixed-calstrss-23-is-a-terminated-cash-only-sleeve)
 - [2026-08-13 — Holdings overlap matched managers to the wrong client's portfolios; replaced fuzzy matching with client-ownership resolution](#2026-08-13--holdings-overlap-matched-managers-to-the-wrong-clients-portfolios-replaced-fuzzy-matching-with-client-ownership-resolution)
 - [2026-08-13 — /run crashed in production on a fresh upload (third S3-key bug; fixed the class at the source)](#2026-08-13--run-crashed-in-production-on-a-fresh-upload-third-s3-key-bug-fixed-the-class-at-the-source)
+- [2026-08-11 — Manager Detail: multi-manager comparison + skill-chart fixes](#2026-08-11--manager-detail-multi-manager-comparison--skill-chart-fixes)
+- [2026-08-11 — Regional sleeve views on the FactSet Risk panel (dormant backend, new UI)](#2026-08-11--regional-sleeve-views-on-the-factset-risk-panel-dormant-backend-new-ui)
+- [2026-08-11 — Added managers never matched FactSet data (UNKNOWN-class gate); risk panel now flags misses](#2026-08-11--added-managers-never-matched-factset-data-unknown-class-gate-risk-panel-now-flags-misses)
 - [2026-08-11 — Uploading a weights file never took effect in production (S3 key vs local path)](#2026-08-11--uploading-a-weights-file-never-took-effect-in-production-s3-key-vs-local-path)
 - [2026-08-11 — My preflight check blocked production for a week (AccessDenied read as "missing")](#2026-08-11--my-preflight-check-blocked-production-for-a-week-accessdenied-read-as-missing)
 - [2026-08-06 — Deploys have been failing since Jul 31: pc-tool/database-url unreadable](#2026-08-06--deploys-have-been-failing-since-jul-31-pc-tooldatabase-url-unreadable)
@@ -293,6 +296,214 @@ the local file, returns the local path; `resolve_path` on that path is a no-op
   the remaining sharp edge of this design.
 - Local disk on Fargate is ephemeral and workbooks are small — keeping local
   copies costs nothing.
+
+## 2026-08-11 — Manager Detail: multi-manager comparison + skill-chart fixes
+
+Manager Detail only (no other tab touched). Two parts:
+
+### Skill chart: growth of $100, rebased to the latest inception
+
+The chart now plots **growth of $100 invested in the manager's excess return
+over its static clone**, not a cumulative-percent line. The backend series is
+*additive* cumulative excess in percentage points, so differencing consecutive
+values recovers each month's excess return; those compound from $100.
+
+With several managers selected, everyone is **rebased to the latest inception
+in the selection** — a 2015-start manager restarts at $100 on a 2019-start
+manager's first month, so the comparison is like-for-like (verified:
+Channing + Oberweis rebase to Oct 2019, ending $100 vs $176). $100 is the
+reference line; the legend shows each manager's ending value.
+
+### Skill chart fixes (cumulative-skill-chart.tsx)
+
+Three compounding bugs made "Cumulative Skill vs Static Clone" look broken:
+
+1. **100× y-axis error**: `compute_cumulative_skill` already returns
+   percentage points (`round(v*100, 4)`), and the chart multiplied by 100
+   again — +12.5% displayed as 1250%. The vendored prototype confirms the
+   contract (formats with no ×100).
+2. **Fixed 640px drawing centered in a ~1100px box**: `viewBox 640×220` +
+   `w-full` + `height: 220` + default `preserveAspectRatio="xMidYMid meet"`
+   → scale locked to 1.0 and centered, dead space both sides. Now
+   `viewBox 960×320` with `width:100%; height:auto` so the aspect governs
+   (same pattern as market-cycle-chart).
+3. **Forced zero baseline**: `Math.min(0, …)` squashed all-positive series
+   into the top of the plot. Domain is now data-driven; zero renders as a
+   reference line only when in range.
+
+### Multi-manager comparison (up to 5, same asset class)
+
+- `use-manager-detail-screen` holds `entries[]` instead of one selection;
+  each entry fetches independently. Same-tab enforcement is done by
+  **filtering the typeahead suggestions** (wrong-class managers never
+  appear once one is picked) plus validation notices; placeholders are
+  excluded from comparison (no clone data).
+- Skill chart overlays all series on a **union timeline** (managers with
+  different inceptions start where their data starts) with a 5-color
+  palette; chips beside the search box carry matching color swatches.
+- Factor Composition: dropdown picks whose donut shows.
+- FactSet Risk: one numbers-only column per manager (bars removed — they
+  don't scale to five columns). Fetches N managers in parallel.
+- Period Returns: row per manager, benchmark at bottom; **Returns | Skill**
+  toggle — Skill shows geometric excess vs static clone,
+  `(1+mgr)/(1+clone)−1`, derived client-side for all periods (backend
+  `skill_periods` lacks qtd/ytd).
+- Portfolio Exposures: new `manager-exposures-compare-table.tsx` (the
+  portfolio feature's row shape is current/proposed/delta and can't carry N
+  managers). It **replicates that section's UI exactly** — A · Categorical /
+  B · Continuous button rows, the full grouping menu, nested `Sector ×
+  Market Cap` drill-down with chevrons, and the value+bar cells — but the
+  columns are [benchmark, manager…] with the "Cur vs Bmk" delta column
+  removed. First attempt replaced the button rows with two plain dropdowns
+  and dropped the bars/nesting; that lost the grouping UI the tab depends
+  on, so it was rebuilt against the original markup. Each manager = one
+  `/portfolio_exposures` call (the endpoint aggregates a manager list into
+  one portfolio, so per-manager columns need N calls); values are joined by
+  row label, children by `parent::child`.
+
+### Layout pass: Period Returns beside the risk table, no scrollbars
+
+Period Returns moved out of its full-width row into the **right column under
+the Growth-of-$100 chart** (chart shortened 320→250 viewBox units to give it
+room), sitting beside the FactSet risk table on the left. Its headers
+abbreviate (QTD/YTD/1YR/3YR/5YR/SI, full label on hover).
+
+The risk table must fit **5 managers with no horizontal scroll**:
+`tableLayout: fixed` + a `<colgroup>` (Factor column gets a fixed % that
+shrinks as managers are added: 46→24%; the rest split evenly — so manager
+columns are always exactly equal width, measured 5×79px at max). Manager
+names drop their region suffix ("Channing EAFE" → "Channing") and clip by a
+per-count budget; the left grid track widens 400→520px at 4-5 managers.
+Verified at 1 and 5 managers: zero scrollable tables, no body overflow.
+
+User caught a real asymmetry the equal-width claim hid: globals.css
+left-aligns **every `.data-table`'s 2nd column** (`th/td:nth-child(2)`,
+meant for name columns), so the FIRST manager column's numbers hugged the
+left while the rest right-aligned — equal widths, lopsided whitespace.
+Fixed with explicit `textAlign: "right"` on all value cells in the risk and
+period-returns tables (computed alignment verified: left, right, right,
+right → values all right). Watch for this rule any time a data column lands
+in position 2 of a `.data-table`.
+
+### Two follow-up bugs
+
+**Blank donut for single-bucket managers.** Oberweis is `{"Growth": 1.0}`.
+The arc builder computes start and end angles that coincide at 360°, and SVG
+draws *nothing* for a zero-length arc — so a 100%-one-factor manager rendered
+an empty box. `style-bucket-donut.tsx` now special-cases a single entry and
+draws the ring as a stroked `<circle>` instead of an arc path.
+
+**False "No exposure data" on the manager-detail exposures panel.** The
+missing-manager check ran against an empty `data` array before any grouping
+was picked (nothing is fetched until row A or B is clicked), so every selected
+manager was reported missing. The data was always fine — verified the three
+managers return 13 rows each straight from `/portfolio_exposures`. The warning
+now only evaluates once a fetch for the current selection has completed
+(`!loading && data.length === managers.length && base`). Lesson: "no results
+yet" and "no results exist" must not share a code path.
+
+### Gotcha that cost a cycle
+
+First version validated adds via a side-effect flag set inside a `setState`
+updater and read synchronously after — updaters run at render time, so the
+flag was never set and the detail fetch never fired ("Loading…" forever).
+Validation now reads a `stateRef` mirror synchronously. React updaters are
+not synchronous; don't smuggle flags out of them.
+
+## 2026-08-11 — Regional sleeve views on the FactSet Risk panel (dormant backend, new UI)
+
+Requirement: on the Portfolio tab's FactSet Risk Exposures panel, let the user
+split active style by region — US (vs Russell 1000), International Developed
+(vs MSCI EAFE + Canada; World-ex-US SC for small cap), EM (vs MSCI EM / EM SC)
+— with availability driven by the **client benchmark** (ACWI → all three;
+ACWI ex-US → dev + EM; developed-only clients → no split). Canada is
+developed; **unclassifiable markets (Argentina, Russia, frontier) lump into
+EM** with a visible flag; missing benchmark columns must be flagged, not
+hidden.
+
+### The big discovery
+
+**The backend already had all of it, dormant**: `security_risk_engine._SLEEVES`
+(per-benchmark option table), `get_sleeve_options`, `classify_country`
+(unknown → EM + flag when an EM sleeve exists — exactly the requested rule),
+sleeve/bench params on `/compute_security_risk_exposures`, a `/sleeve_options`
+route, and even a typed-but-unused frontend API helper `getSleeveOptions`.
+**No UI ever called any of it.** Before building a feature here, grep for it
+dormant first.
+
+### What was actually built
+
+- `get_sleeve_options` now returns options whose benchmark column is absent
+  as `missing: true` (they were silently dropped) so the UI can disable+flag.
+- `portfolio-analytics-sections.tsx`: Region segmented control on the risk
+  panel (options from `/sleeve_options`, only shown when the loaded risk data
+  is security-level and the benchmark supports a split); selecting a region
+  fetches its own view (debounced, reqId-guarded) while Full Portfolio keeps
+  using the hook-fetched prop data; coverage line (`X% of portfolio → Y%
+  proposed`, no-country weight) and amber country-classification flags.
+  Missing-benchmark options render struck-through/disabled with a tooltip.
+
+Verified live on STL (MSCI ACWI): all four views return distinct numbers vs
+the right benchmark (header follows), EM sleeve = 6.1% of portfolio and
+surfaces "Russia not in standard classification — treated as EM", switching
+back to Full restores identical numbers. Per-client options verified for all
+14 clients (developed-only clients correctly get no split; CIT's ACWI-ex-US-SC
+gets the SC pair). No missing columns in the current upload — the flag path
+is code-verified only.
+
+## 2026-08-11 — Added managers never matched FactSet data (UNKNOWN-class gate); risk panel now flags misses
+
+Symptom: add a manager from the directory (Oberweis) → "No exposure data" in
+Portfolio Exposures and a silent drop from FactSet Risk, even though
+`Oberweis Focused International Growth Fund` is plainly in the exposures file.
+
+### Root cause
+
+The `b00b816` ownership resolver (`holdings_resolver.py`) gates cross-client
+(tier 2) and unowned (tier 3) matches on `class_distance()`, which returns
+None when either side's region parses to `UNKNOWN`. Weights-file managers
+always carry region tokens in `weight_file_name` ("Ballina EAFE SC");
+**directory-added managers get the bare buy-list name ("Oberweis") — no
+tokens → UNKNOWN → tiers 2/3 unreachable → always unmatched.** The diagnostic
+tell: Manager Detail matched fine (no `client_name` → legacy fuzzy path);
+only the Portfolio tab (client-aware path) failed.
+
+Intended tier order (user-confirmed): own client's section → another client's
+section of the **same asset class** → a section attached to **no client** →
+flag, on both tables.
+
+### Fixes
+
+1. `holdings_resolver._resolve_all`: when the label has no class tokens,
+   derive the asset class from the manager's peer `tab` — `sleeve_class()`
+   already understands every tab token (EAFE/ISC/EM/US/USSC/ACWI; ISC ⇒
+   ACWI_XUS+SC). Wrong-class control verified: Oberweis with tab US does NOT
+   grab the international fund.
+2. Safety net in `exposures_engine` + `security_risk_engine`: resolver misses
+   retry via the FactSet Map crosswalk (`by_mgr`, computed-but-unused since
+   b00b816) then legacy fuzzy — **restricted to unowned, unclaimed sections**
+   so b00b816's cross-contamination protections stand.
+3. `section_client()` was missing a `New Haven` branch — that client's own
+   sections had `owner=None`, so it borrowed other clients' sleeves (Gilman
+   Hill/Martin/Redwood came from NYSTRS/IMRF) and Huber matched nothing. Now
+   tier-1 matches its own uploads.
+4. The Active Style panel now renders `unmatched` ("⚠ No exposure data for:
+   …") like the groupings panel — it used to fail silently.
+
+### Verification
+
+Before/after snapshot of `{manager → section}` across all 14 clients: zero
+changes to existing matches except New Haven's corrections; additions only
+(Oberweis, CIT's Arga ISC via fallback, New Haven's Huber). Mass PRIM FI's
+four fixed-income managers still flag on both panels — genuinely absent from
+the equity files, which is correct. UI verified with Playwright: added
+Oberweis through the real modal, set a weight, warning gone and risk deltas
+move; Mass PRIM FI shows the new flag on both panels.
+
+Gotcha for next time: added managers start at weight 0 and
+`security_risk_engine` skips zero-weight managers, so the risk-panel symptom
+only appears after a weight is typed — looks intermittent if you don't know
+that.
 
 ## 2026-08-11 — Uploading a weights file never took effect in production (S3 key vs local path)
 

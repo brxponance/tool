@@ -665,7 +665,7 @@ def compute_portfolio_exposures(managers_with_weights, exposures_data, grouping,
         # only when the SLEEVE asset class is compatible (see
         # holdings_resolver). Falls back to fuzzy matching when the caller
         # doesn't know the client.
-        from holdings_resolver import resolve_managers
+        from holdings_resolver import resolve_managers, section_client
         resolution = resolve_managers(managers_with_weights, exposures_data,
                                       client_name, client_rosters=client_rosters)
         for m in managers_with_weights:
@@ -676,6 +676,38 @@ def compute_portfolio_exposures(managers_with_weights, exposures_data, grouping,
                 matched[nm] = res['section']
             else:
                 unmatched.append(nm)
+        # Safety net for resolver misses (typically managers added from the
+        # buy-list directory, whose labels carry no sleeve tokens): Map
+        # crosswalk first, then fuzzy — but only over sections that belong to
+        # NO client and are not already claimed, so ownership matching stays
+        # authoritative for client-labeled sections.
+        if unmatched:
+            claimed = set(matched.values())
+            free_pool = [s for s in candidate_names
+                         if s not in claimed and section_client(s) is None]
+            if free_pool:
+                from data_loader import _norm_name as _dl_norm
+                still = []
+                for nm in unmatched:
+                    m = next((x for x in managers_with_weights
+                              if x['matched_name'] == nm), {})
+                    match_input = m.get('weight_file_name') or nm
+                    pool = free_pool
+                    if by_mgr:
+                        subset = by_mgr.get(_dl_norm(nm)) or by_mgr.get(_dl_norm(match_input))
+                        if subset:
+                            narrowed = [s for s in subset if s in free_pool]
+                            if narrowed:
+                                pool = narrowed
+                    hit = _fuzzy_match_manager(match_input, pool,
+                                               benchmark_hint=resolved_bmk_name)
+                    if hit and hit not in claimed:
+                        matched[nm] = hit
+                        claimed.add(hit)
+                        free_pool = [s for s in free_pool if s != hit]
+                    else:
+                        still.append(nm)
+                unmatched = still
     else:
         for m in managers_with_weights:
             nm = m['matched_name']

@@ -43,6 +43,39 @@ export function StyleBucketDonut({ buckets, size = 220 }: StyleBucketDonutProps)
   const radius = size / 2 - 4;
   const innerRadius = radius * 0.55;
 
+  // A single bucket at ~100% is a full circle: its arc start and end points
+  // coincide, and SVG draws nothing for a zero-length arc (the donut showed
+  // up blank). Render the complete ring as a stroked circle instead.
+  if (entries.length === 1) {
+    const [label, value] = entries[0];
+    const color = BUCKET_COLORS[label] ?? "#94a3b8";
+    const ringR = (radius + innerRadius) / 2;
+    return (
+      <div>
+        <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+          <circle
+            cx={cx}
+            cy={cy}
+            r={ringR}
+            fill="none"
+            stroke={color}
+            strokeWidth={radius - innerRadius}
+          >
+            <title>{`${label}: ${(value * 100).toFixed(1)}%`}</title>
+          </circle>
+        </svg>
+        <div className="pie-legend">
+          <div className="pie-legend-item">
+            <div className="pie-swatch" style={{ background: color }} />
+            <span>
+              {label} {Math.round((value / total) * 100)}%
+            </span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // Build cumulative angle offsets so we never mutate during render.
   const fractions = entries.map(([, value]) => value / total);
   const offsets: number[] = [];

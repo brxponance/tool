@@ -3,18 +3,20 @@
 import { useEffect, useState } from "react";
 
 import { getManagerRiskExposures } from "../api/get-manager-exposures";
+import { mgrBenchmarkHint } from "../lib/benchmark-hint";
 import type { ManagerRiskExposuresResponse } from "../types";
 
+type ManagerRef = { name: string; tab: string };
+
 type Props = {
-  name: string;
-  tab: string;
-  benchmarkHint: string | null;
+  managers: ManagerRef[];
   useSecurityRisk: boolean;
   hasRiskFile: boolean;
 };
 
 type LoadState = {
-  data: ManagerRiskExposuresResponse | null;
+  // One response per manager, aligned with the managers prop.
+  data: Array<ManagerRiskExposuresResponse | null>;
   loading: boolean;
   error: string | null;
 };
@@ -25,54 +27,81 @@ function fmtVal(v: number | null | undefined) {
   return `${sign}${v.toFixed(3)}`;
 }
 
+// Drop the peer-group suffix ('Channing EAFE' → 'Channing') and then clip,
+// so five columns still fit the left panel without scrolling.
+function shortName(name: string, max: number) {
+  const trimmed = name
+    .replace(
+      /\s+(EAFE(\s*\+\s*Canada)?|ACWI(\s*ex[- ]?US)?|xUS|Non[- ]?US|International|Global|World|EM|US)(\s+(SC|Small\s*Cap|SMID))?\s*$/i,
+      "",
+    )
+    .trim();
+  const base = trimmed || name;
+  return base.length > max ? `${base.slice(0, max)}…` : base;
+}
+
+// Active style exposures for one or more managers side by side — numbers
+// only (the single-manager diverging bars don't scale to five columns).
 export function ManagerRiskExposuresPanel({
-  name,
-  tab,
-  benchmarkHint,
+  managers,
   useSecurityRisk,
   hasRiskFile,
 }: Props) {
   const [state, setState] = useState<LoadState>({
-    data: null,
+    data: [],
     loading: false,
     error: null,
   });
 
+  const signature = managers.map((m) => `${m.tab}::${m.name}`).join("|");
+
   useEffect(() => {
-    if (!hasRiskFile) {
-      setState({ data: null, loading: false, error: null });
+    if (!hasRiskFile || !managers.length) {
+      setState({ data: [], loading: false, error: null });
       return;
     }
     let cancelled = false;
-    setState({ data: null, loading: true, error: null });
-    getManagerRiskExposures(name, tab, benchmarkHint, useSecurityRisk)
-      .then((data) => {
-        if (!cancelled) setState({ data, loading: false, error: null });
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          setState({
-            data: null,
-            loading: false,
-            error: err instanceof Error ? err.message : "Request failed.",
-          });
-        }
-      });
+    setState({ data: [], loading: true, error: null });
+    Promise.all(
+      managers.map((m) =>
+        getManagerRiskExposures(
+          m.name,
+          m.tab,
+          mgrBenchmarkHint(m.name, m.tab),
+          useSecurityRisk,
+        ).catch(() => null),
+      ),
+    ).then((results) => {
+      if (cancelled) return;
+      setState({ data: results, loading: false, error: null });
+    });
     return () => {
       cancelled = true;
     };
-  }, [name, tab, benchmarkHint, useSecurityRisk, hasRiskFile]);
+    // managers captured via signature
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signature, useSecurityRisk, hasRiskFile]);
 
-  const data = state.data;
-  const factors = data?.factors ?? [];
-  const cur = data?.current ?? {};
-  const hasManagerData = factors.some((f) => cur[f] != null);
-  const allVals = factors
-    .map((f) => cur[f])
-    .filter((v): v is number => v != null);
-  const maxAbs = allVals.length
-    ? Math.max(...allVals.map(Math.abs), 0.01)
-    : 1.0;
+  const results = state.data;
+  const firstWithData = results.find((r) => r?.factors?.length);
+  const factors = firstWithData?.factors ?? [];
+  const anyValue = results.some((r) =>
+    (r?.factors ?? []).some((f) => r?.current?.[f] != null),
+  );
+  const benchNames = Array.from(
+    new Set(
+      results
+        .map((r) => r?.benchmark?.matched_column)
+        .filter((b): b is string => !!b),
+    ),
+  );
+
+  // Column budget: the factor label shrinks and names/values compress as
+  // managers are added, so five columns still fit without a scrollbar.
+  const n = managers.length;
+  const labelPct = n <= 1 ? 46 : n === 2 ? 40 : n === 3 ? 34 : n === 4 ? 28 : 24;
+  const nameLen = n <= 1 ? 18 : n === 2 ? 14 : n === 3 ? 12 : n === 4 ? 10 : 9;
+  const valFontSize = n >= 4 ? 10 : 11;
 
   return (
     <div className="panel" id="mgr-risk-section">
@@ -87,7 +116,7 @@ export function ManagerRiskExposuresPanel({
         }}
       >
         <span className="panel-title">FactSet Risk Exposures — Active Style</span>
-        {data?.benchmark?.matched_column && (
+        {benchNames.length ? (
           <span
             style={{
               marginLeft: "auto",
@@ -96,9 +125,9 @@ export function ManagerRiskExposuresPanel({
               color: "var(--text3)",
             }}
           >
-            vs {data.benchmark.matched_column}
+            vs {benchNames.join(" · ")}
           </span>
-        )}
+        ) : null}
       </div>
       {!hasRiskFile ? (
         <div
@@ -125,18 +154,7 @@ export function ManagerRiskExposuresPanel({
         >
           Computing…
         </div>
-      ) : state.error ? (
-        <div
-          style={{
-            padding: 14,
-            color: "var(--red)",
-            fontFamily: "var(--mono)",
-            fontSize: 11,
-          }}
-        >
-          {state.error}
-        </div>
-      ) : data?.error ? (
+      ) : !anyValue ? (
         <div
           style={{
             padding: 14,
@@ -146,79 +164,78 @@ export function ManagerRiskExposuresPanel({
             fontSize: 11,
           }}
         >
-          {data.error}
-        </div>
-      ) : !hasManagerData ? (
-        <div
-          style={{
-            padding: 14,
-            textAlign: "center",
-            color: "var(--amber)",
-            fontFamily: "var(--mono)",
-            fontSize: 11,
-          }}
-        >
-          Risk file loaded but this manager has no matching column. Check that
-          the manager name matches a column in the risk file.
+          {results.length && results.every((r) => r?.error)
+            ? results[0]?.error
+            : "Risk file loaded but no matching column for the selected manager(s)."}
         </div>
       ) : (
-        <div style={{ overflowX: "auto" }}>
-          <table className="data-table w-full">
+        <div>
+          {/* No horizontal scroll even at 5 managers: fixed layout, a
+              proportionally narrower factor column, and names truncated
+              harder as columns are added. */}
+          <table
+            className="data-table tight w-full"
+            style={{ tableLayout: "fixed", width: "100%" }}
+          >
+            <colgroup>
+              <col style={{ width: `${labelPct}%` }} />
+              {managers.map((m) => (
+                <col key={`${m.tab}-${m.name}`} />
+              ))}
+            </colgroup>
             <thead>
               <tr>
-                <th style={{ width: 140, textAlign: "left" }}>Factor</th>
-                <th style={{ minWidth: 60 }}>Value</th>
-                <th style={{ width: 160 }}>Bar</th>
+                <th style={{ textAlign: "left" }}>Factor</th>
+                {managers.map((m, i) => (
+                  <th
+                    key={`${m.tab}-${m.name}`}
+                    title={
+                      results[i]?.benchmark?.matched_column
+                        ? `${m.name} vs ${results[i]?.benchmark?.matched_column}`
+                        : m.name
+                    }
+                    style={{
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      fontSize: 9,
+                      // Globals left-align every table's 2nd column (meant for
+                      // name columns); force uniform alignment so the first
+                      // manager column doesn't get lopsided whitespace.
+                      textAlign: "right",
+                    }}
+                  >
+                    {shortName(m.name, nameLen)}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>
-              {factors.map((f) => {
-                const v = cur[f];
-                const width = v != null ? (Math.abs(v) / maxAbs) * 50 : 0;
-                const start = v != null && v >= 0 ? 50 : 50 - width;
-                return (
-                  <tr key={f}>
-                    <td style={{ fontWeight: 500, fontSize: 12 }}>{f}</td>
-                    <td className="mono" style={{ fontSize: 11 }}>
-                      {fmtVal(v)}
+              {factors.map((f) => (
+                <tr key={f}>
+                  <td
+                    style={{
+                      fontWeight: 500,
+                      fontSize: 11,
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                    }}
+                    title={f}
+                  >
+                    {f}
+                  </td>
+                  {managers.map((m, i) => (
+                    <td
+                      key={`${m.tab}-${m.name}`}
+                      className="mono"
+                      style={{ fontSize: valFontSize, textAlign: "right" }}
+                    >
+                      {fmtVal(results[i]?.current?.[f])}
                     </td>
-                    <td>
-                      {v != null ? (
-                        <div
-                          style={{
-                            position: "relative",
-                            height: 12,
-                            background: "var(--border)",
-                            borderRadius: 3,
-                          }}
-                        >
-                          <div
-                            style={{
-                              position: "absolute",
-                              left: "50%",
-                              top: 0,
-                              bottom: 0,
-                              width: 1,
-                              background: "var(--text3)",
-                            }}
-                          />
-                          <div
-                            style={{
-                              position: "absolute",
-                              left: `${start}%`,
-                              width: `${width}%`,
-                              top: 0,
-                              bottom: 0,
-                              background: "var(--text2)",
-                              borderRadius: 3,
-                            }}
-                          />
-                        </div>
-                      ) : null}
-                    </td>
-                  </tr>
-                );
-              })}
+                  ))}
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>

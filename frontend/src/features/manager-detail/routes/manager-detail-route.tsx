@@ -4,21 +4,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { backendJson } from "@/lib/backend";
 import type { BackendStatus } from "@/features/setup/types";
-import { PortfolioExposuresSection } from "@/features/portfolio/components/portfolio-exposures-section";
-import type {
-  ExposureMenuGroup,
-  PortfolioExposuresResponse,
-} from "@/features/portfolio/types";
 
-import { CumulativeSkillChart } from "../components/cumulative-skill-chart";
+import { CumulativeSkillChart, SERIES_COLORS } from "../components/cumulative-skill-chart";
+import { ManagerExposuresCompareTable } from "../components/manager-exposures-compare-table";
 import { ManagerRiskExposuresPanel } from "../components/manager-risk-exposures-panel";
-// (useRef is used for the click-outside wrapper only; selection sync uses
-// a state sentinel to satisfy the react-hooks/refs lint rule.)
 import { StyleBucketDonut } from "../components/style-bucket-donut";
 import { useManagerDetailScreen } from "../hooks/use-manager-detail-screen";
 import { useManagerExposures } from "../hooks/use-manager-exposures";
-import { mgrBenchmarkHint } from "../lib/benchmark-hint";
-import type { PeriodReturnKey } from "../types";
+import { MAX_COMPARE_MANAGERS, type PeriodReturnKey } from "../types";
 
 const PERIOD_KEYS: PeriodReturnKey[] = ["qtd", "ytd", "t1", "t3", "t5", "si"];
 const PERIOD_LABELS: Record<PeriodReturnKey, string> = {
@@ -29,10 +22,33 @@ const PERIOD_LABELS: Record<PeriodReturnKey, string> = {
   t5: "Trailing 5yr",
   si: "Since Inception",
 };
+// Abbreviated headers — the table now lives in the narrower right column
+// beside the risk panel, with the full label on hover.
+const PERIOD_SHORT: Record<PeriodReturnKey, string> = {
+  qtd: "QTD",
+  ytd: "YTD",
+  t1: "1YR",
+  t3: "3YR",
+  t5: "5YR",
+  si: "SI",
+};
 
 function fmtPct(value: number | null | undefined) {
   if (value == null || Number.isNaN(value)) return "--";
   return `${(value * 100).toFixed(1)}%`;
+}
+
+// Excess skill for a period: geometric excess of manager over static clone,
+// consistent with data_loader.compute_cumulative_skill's monthly math.
+function skillFor(
+  mgr: number | null | undefined,
+  clone: number | null | undefined,
+) {
+  if (mgr == null || clone == null || Number.isNaN(mgr) || Number.isNaN(clone)) {
+    return null;
+  }
+  if (clone <= -1) return null;
+  return (1 + mgr) / (1 + clone) - 1;
 }
 
 // Placeholder managers (< 3 years of returns) have no clone, so the
@@ -74,18 +90,20 @@ export function ManagerDetailRoute({
   initialTab,
 }: ManagerDetailRouteProps) {
   const {
-    data,
     directory,
+    entries,
     error,
-    loadingDetail,
     loadingDirectory,
-    selected,
-    selectManager,
+    notice,
+    addManager,
+    removeManager,
     clearSelection,
   } = useManagerDetailScreen({ manager: initialManager, tab: initialTab });
 
-  const [search, setSearch] = useState(initialManager ?? "");
+  const [search, setSearch] = useState("");
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const [returnsMode, setReturnsMode] = useState<"returns" | "skill">("returns");
+  const [compositionKey, setCompositionKey] = useState<string | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
 
   // Poll backend status once on mount so we know whether the risk +
@@ -106,32 +124,15 @@ export function ManagerDetailRoute({
     };
   }, []);
 
-  // Benchmark hint for the FactSet risk + exposures requests. Mirrors the
-  // reference UI's mgrBenchmarkHint(): manual overrides, xUS→ACWI-ex-US
-  // rerouting, and tab inference for Placeholder managers — instead of the
-  // regression benchmark from /manager_skill_summary.
-  const benchmarkHint = selected
-    ? mgrBenchmarkHint(selected.name, selected.tab)
-    : null;
+  const managerRefs = useMemo(
+    () => entries.map((e) => ({ name: e.item.name, tab: e.item.tab })),
+    [entries],
+  );
 
   const exposures = useManagerExposures({
-    name: selected?.name ?? null,
-    tab: selected?.tab ?? null,
-    benchmarkHint,
+    managers: managerRefs,
     hasExposures: !!status?.has_exposures,
   });
-
-  // Sync the search box when the selection changes from elsewhere (initial
-  // load, directory default). Derived-state-from-props pattern with a state
-  // sentinel to avoid setState-in-effect and ref-during-render lints.
-  const [lastSyncedName, setLastSyncedName] = useState<string | null>(null);
-  const incomingName = selected?.name ?? null;
-  if (incomingName !== lastSyncedName) {
-    setLastSyncedName(incomingName);
-    if (incomingName && incomingName !== search) {
-      setSearch(incomingName);
-    }
-  }
 
   useEffect(() => {
     function onDocClick(event: MouseEvent) {
@@ -147,16 +148,49 @@ export function ManagerDetailRoute({
   const suggestions = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (q.length < 2) return [];
-    return directory.filter((m) => m.name.toLowerCase().includes(q)).slice(0, 10);
-  }, [search, directory]);
+    const selectedKeys = new Set(entries.map((e) => `${e.item.tab}::${e.item.name}`));
+    return directory
+      .filter((m) => {
+        if (!m.name.toLowerCase().includes(q)) return false;
+        if (selectedKeys.has(`${m.tab}::${m.name}`)) return false;
+        if (entries.length > 0) {
+          // Comparison additions must share the first pick's asset class,
+          // and placeholders (no clone data) can't be compared.
+          if (m.tab !== entries[0].item.tab) return false;
+          if (m.is_placeholder || m.tab === "Placeholder") return false;
+        }
+        return true;
+      })
+      .slice(0, 10);
+  }, [search, directory, entries]);
 
-  const benchShort = (data?.summary.benchmark_name ?? "Benchmark")
+  const loadedEntries = entries.filter((e) => e.data);
+  const anyLoading = entries.some((e) => e.loading);
+  const primary = entries[0] ?? null;
+
+  // Factor composition selector: default to the first manager; reset when
+  // the chosen manager leaves the selection.
+  const compositionEntry =
+    loadedEntries.find((e) => `${e.item.tab}::${e.item.name}` === compositionKey) ??
+    loadedEntries[0] ??
+    null;
+
+  const skillSeries = loadedEntries
+    .filter((e) => !e.data?.summary.is_placeholder)
+    .map((e) => ({
+      name: e.item.name,
+      dates: e.data!.summary.dates,
+      values: e.data!.summary.cumulative_skill,
+    }));
+
+  const benchShort = (
+    loadedEntries[0]?.data?.summary.benchmark_name ?? "Benchmark"
+  )
     .replace("NR USD", "")
     .replace("TR USD", "")
     .trim();
 
-  const periodReturns = data?.summary.period_returns;
-  const isPlaceholder = !!data?.summary.is_placeholder;
+  const single = entries.length === 1;
 
   return (
     <div>
@@ -165,9 +199,16 @@ export function ManagerDetailRoute({
           <input
             type="text"
             className="detail-search-input"
-            placeholder="Search for a manager..."
+            placeholder={
+              entries.length
+                ? entries.length >= MAX_COMPARE_MANAGERS
+                  ? `Maximum of ${MAX_COMPARE_MANAGERS} managers selected`
+                  : `Add a ${entries[0].item.tab} manager to compare (up to ${MAX_COMPARE_MANAGERS})...`
+                : "Search for a manager..."
+            }
             value={search}
             autoComplete="off"
+            disabled={entries.length >= MAX_COMPARE_MANAGERS}
             onChange={(event) => {
               setSearch(event.target.value);
               setShowSuggestions(true);
@@ -188,7 +229,7 @@ export function ManagerDetailRoute({
           <button
             type="button"
             className="btn btn-outline btn-sm"
-            disabled={!selected || loadingDetail}
+            disabled={!entries.length || anyLoading}
             onClick={() => window.print()}
           >
             Print / Export PDF
@@ -200,9 +241,9 @@ export function ManagerDetailRoute({
                   key={`${m.tab}-${m.name}`}
                   className="detail-sugg-item"
                   onClick={() => {
-                    setSearch(m.name);
+                    setSearch("");
                     setShowSuggestions(false);
-                    selectManager(m);
+                    addManager(m);
                   }}
                 >
                   {m.name}{" "}
@@ -212,6 +253,71 @@ export function ManagerDetailRoute({
             </div>
           )}
         </div>
+        {entries.length ? (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8, alignItems: "center" }}>
+            {entries.map((e, i) => (
+              <span
+                key={`${e.item.tab}-${e.item.name}`}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  fontFamily: "var(--mono)",
+                  fontSize: 11,
+                  padding: "3px 8px",
+                  border: "1px solid var(--border)",
+                  borderRadius: 12,
+                  background: "var(--surface)",
+                }}
+              >
+                {!single ? (
+                  <span
+                    style={{
+                      width: 10,
+                      height: 3,
+                      borderRadius: 2,
+                      background: SERIES_COLORS[i % SERIES_COLORS.length],
+                      display: "inline-block",
+                    }}
+                  />
+                ) : null}
+                {e.item.name}
+                <span style={{ color: "var(--text3)", fontSize: 9 }}>{e.item.tab}</span>
+                {e.loading ? (
+                  <span style={{ color: "var(--text3)", fontSize: 9 }}>…</span>
+                ) : null}
+                <button
+                  type="button"
+                  aria-label={`Remove ${e.item.name}`}
+                  onClick={() => removeManager(e.item)}
+                  style={{
+                    border: "none",
+                    background: "none",
+                    color: "var(--text3)",
+                    cursor: "pointer",
+                    padding: 0,
+                    fontSize: 12,
+                    lineHeight: 1,
+                  }}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        ) : null}
+        {notice ? (
+          <div
+            style={{
+              marginTop: 6,
+              fontFamily: "var(--mono)",
+              fontSize: 10,
+              color: "var(--amber, #d68c1f)",
+            }}
+          >
+            ⚠ {notice}
+          </div>
+        ) : null}
       </div>
 
       {loadingDirectory && !directory.length ? (
@@ -228,7 +334,7 @@ export function ManagerDetailRoute({
         </div>
       ) : error ? (
         <div style={{ color: "var(--red)", padding: 20 }}>{error}</div>
-      ) : !selected ? (
+      ) : !entries.length ? (
         <div
           style={{
             color: "var(--text3)",
@@ -238,46 +344,68 @@ export function ManagerDetailRoute({
             textAlign: "center",
           }}
         >
-          Search for a manager above to view their detail.
+          Search for a manager above to view their detail. Add more managers of
+          the same asset class to compare (up to {MAX_COMPARE_MANAGERS}).
         </div>
-      ) : loadingDetail || !data ? (
+      ) : !loadedEntries.length ? (
         <div
           style={{
-            color: "var(--text3)",
+            color: entries.every((e) => e.error) ? "var(--red)" : "var(--text3)",
             fontFamily: "var(--mono)",
             fontSize: 11,
             padding: "40px 0",
             textAlign: "center",
           }}
         >
-          Loading {selected.name}...
+          {entries.every((e) => e.error)
+            ? entries[0].error
+            : `Loading ${primary?.item.name}...`}
         </div>
       ) : (
         <>
-          <div style={{ marginBottom: 12 }}>
-            <span style={{ fontSize: 16, fontWeight: 500 }}>{data.summary.name}</span>
-            <span className="badge badge-blue" style={{ marginLeft: 8 }}>
-              {data.summary.tab}
-            </span>
-            <span
+          {single ? (
+            <div style={{ marginBottom: 12 }}>
+              <span style={{ fontSize: 16, fontWeight: 500 }}>
+                {loadedEntries[0].data!.summary.name}
+              </span>
+              <span className="badge badge-blue" style={{ marginLeft: 8 }}>
+                {loadedEntries[0].data!.summary.tab}
+              </span>
+              <span
+                style={{
+                  fontFamily: "var(--mono)",
+                  fontSize: 11,
+                  color: "var(--text2)",
+                  marginLeft: 8,
+                }}
+              >
+                R&sup2;{" "}
+                {loadedEntries[0].data!.summary.r2_full != null
+                  ? `${(loadedEntries[0].data!.summary.r2_full * 100).toFixed(1)}%`
+                  : "--"}
+              </span>
+            </div>
+          ) : (
+            <div
               style={{
+                marginBottom: 12,
                 fontFamily: "var(--mono)",
                 fontSize: 11,
                 color: "var(--text2)",
-                marginLeft: 8,
               }}
             >
-              R&sup2;{" "}
-              {data.summary.r2_full != null
-                ? `${(data.summary.r2_full * 100).toFixed(1)}%`
-                : "--"}
-            </span>
-          </div>
+              Comparing {entries.length} {entries[0].item.tab} managers
+            </div>
+          )}
 
           <div
             className="detail-charts-grid"
             style={{
-              gridTemplateColumns: "400px 1fr",
+              // The risk table on the left grows a column per manager, so the
+              // left track widens with the selection instead of scrolling.
+              gridTemplateColumns: `${
+                entries.length >= 4 ? 520 : entries.length === 3 ? 470 : 400
+              }px 1fr`,
               alignItems: "start",
               gap: 16,
             }}
@@ -290,22 +418,51 @@ export function ManagerDetailRoute({
                 minWidth: 0,
               }}
             >
-              {isPlaceholder ? (
+              {compositionEntry?.data?.summary.is_placeholder ? (
                 <PlaceholderNaBox title="Factor Composition (Full Model)" />
-              ) : (
+              ) : compositionEntry ? (
                 <div className="chart-box">
-                  <div className="chart-title">Factor Composition (Full Model)</div>
-                  <StyleBucketDonut buckets={data.summary.style_buckets} />
+                  <div
+                    className="chart-title"
+                    style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}
+                  >
+                    <span>Factor Composition (Full Model)</span>
+                    {!single ? (
+                      <select
+                        value={`${compositionEntry.item.tab}::${compositionEntry.item.name}`}
+                        onChange={(e) => setCompositionKey(e.target.value)}
+                        style={{
+                          marginLeft: "auto",
+                          fontFamily: "var(--mono)",
+                          fontSize: 10,
+                          padding: "2px 4px",
+                          border: "1px solid var(--border)",
+                          background: "var(--surface)",
+                          color: "var(--text)",
+                          borderRadius: 3,
+                          maxWidth: 180,
+                        }}
+                      >
+                        {loadedEntries.map((e) => (
+                          <option
+                            key={`${e.item.tab}-${e.item.name}`}
+                            value={`${e.item.tab}::${e.item.name}`}
+                          >
+                            {e.item.name}
+                          </option>
+                        ))}
+                      </select>
+                    ) : null}
+                  </div>
+                  <StyleBucketDonut
+                    buckets={compositionEntry.data!.summary.style_buckets}
+                  />
                 </div>
-              )}
+              ) : null}
               <ManagerRiskExposuresPanel
-                name={data.summary.name}
-                tab={data.summary.tab}
-                benchmarkHint={benchmarkHint}
+                managers={managerRefs}
                 useSecurityRisk={!!status?.has_security_risk}
-                hasRiskFile={
-                  !!status?.has_risk || !!status?.has_security_risk
-                }
+                hasRiskFile={!!status?.has_risk || !!status?.has_security_risk}
               />
             </div>
             <div
@@ -316,78 +473,162 @@ export function ManagerDetailRoute({
                 minWidth: 0,
               }}
             >
-              {isPlaceholder ? (
-                <PlaceholderNaBox title="Cumulative Skill vs Static Clone" />
-              ) : (
+              {skillSeries.length ? (
                 <div className="chart-box">
-                  <div className="chart-title">Cumulative Skill vs Static Clone</div>
-                  <CumulativeSkillChart
-                    dates={data.summary.dates}
-                    values={data.summary.cumulative_skill}
-                  />
+                  <div className="chart-title">Growth of $100 — Skill vs Static Clone</div>
+                  <CumulativeSkillChart series={skillSeries} />
                 </div>
+              ) : (
+                <PlaceholderNaBox title="Growth of $100 — Skill vs Static Clone" />
               )}
-            </div>
-          </div>
 
-          <div className="panel">
-            <div className="panel-header">
+              {/* Period returns share the right column, filling the space
+                  under the chart and beside the risk table. */}
+              <div className="panel">
+            <div
+              className="panel-header"
+              style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", padding: "6px 12px" }}
+            >
               <span className="panel-title">Period Returns</span>
+              <div
+                style={{
+                  display: "inline-flex",
+                  border: "1px solid var(--border)",
+                  borderRadius: 4,
+                  overflow: "hidden",
+                  marginLeft: "auto",
+                }}
+              >
+                {(["returns", "skill"] as const).map((mode, i) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setReturnsMode(mode)}
+                    style={{
+                      fontFamily: "var(--mono)",
+                      fontSize: 10,
+                      padding: "3px 9px",
+                      background: returnsMode === mode ? "var(--accent)" : "var(--surface)",
+                      color: returnsMode === mode ? "#fff" : "var(--text2)",
+                      border: "none",
+                      borderLeft: i > 0 ? "1px solid var(--border)" : "none",
+                      cursor: "pointer",
+                    }}
+                    title={
+                      mode === "skill"
+                        ? "Excess skill returns: manager vs its static clone"
+                        : "Total returns"
+                    }
+                  >
+                    {mode === "returns" ? "Returns" : "Skill"}
+                  </button>
+                ))}
+              </div>
             </div>
-            <div className="panel-body" style={{ padding: 0, overflowX: "auto" }}>
-              <table className="data-table" style={{ width: "100%" }}>
+            <div className="panel-body" style={{ padding: 0 }}>
+              <table className="data-table tight" style={{ width: "100%", tableLayout: "fixed" }}>
                 <thead>
                   <tr>
-                    <th style={{ textAlign: "left" }}>Series</th>
+                    <th style={{ textAlign: "left", width: "26%" }}>
+                      {returnsMode === "returns" ? "Series" : "Excess skill"}
+                    </th>
                     {PERIOD_KEYS.map((key) => (
-                      <th key={key}>{PERIOD_LABELS[key]}</th>
+                      <th
+                        key={key}
+                        title={PERIOD_LABELS[key]}
+                        // Explicit alignment: globals left-align each table's
+                        // 2nd column, which would skew the QTD column.
+                        style={{ fontSize: 9, textAlign: "right" }}
+                      >
+                        {PERIOD_SHORT[key]}
+                      </th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  <tr>
-                    <td style={{ fontWeight: 500 }}>Manager</td>
-                    {PERIOD_KEYS.map((key) => (
-                      <td key={key} className="mono">
-                        {fmtPct(periodReturns?.mgr?.[key])}
+                  {loadedEntries.map((e) => {
+                    const pr = e.data!.summary.period_returns;
+                    return (
+                      <tr key={`${e.item.tab}-${e.item.name}`}>
+                        <td
+                          style={{
+                            fontWeight: 500,
+                            whiteSpace: "nowrap",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                          }}
+                          title={e.item.name}
+                        >
+                          {e.item.name}
+                        </td>
+                        {PERIOD_KEYS.map((key) => {
+                          if (returnsMode === "returns") {
+                            return (
+                              <td key={key} className="mono" style={{ textAlign: "right" }}>
+                                {fmtPct(pr?.mgr?.[key])}
+                              </td>
+                            );
+                          }
+                          const s = skillFor(pr?.mgr?.[key], pr?.clone?.[key]);
+                          return (
+                            <td
+                              key={key}
+                              className="mono"
+                              style={{
+                                textAlign: "right",
+                                color:
+                                  s == null
+                                    ? undefined
+                                    : s >= 0
+                                      ? "var(--green)"
+                                      : "var(--red)",
+                              }}
+                            >
+                              {s == null ? "--" : `${s >= 0 ? "+" : ""}${(s * 100).toFixed(1)}%`}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    );
+                  })}
+                  {returnsMode === "returns" ? (
+                    <tr>
+                      <td
+                        style={{
+                          color: "var(--text2)",
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                        }}
+                        title={benchShort}
+                      >
+                        {benchShort}
                       </td>
-                    ))}
-                  </tr>
-                  <tr>
-                    <td style={{ color: "var(--accent2)" }}>Static Clone</td>
-                    {PERIOD_KEYS.map((key) => (
-                      <td key={key} className="mono" style={{ color: "var(--accent2)" }}>
-                        {fmtPct(periodReturns?.clone?.[key])}
-                      </td>
-                    ))}
-                  </tr>
-                  <tr>
-                    <td style={{ color: "var(--text2)" }}>{benchShort}</td>
-                    {PERIOD_KEYS.map((key) => (
-                      <td key={key} className="mono" style={{ color: "var(--text2)" }}>
-                        {fmtPct(periodReturns?.bench?.[key])}
-                      </td>
-                    ))}
-                  </tr>
+                      {PERIOD_KEYS.map((key) => (
+                        <td key={key} className="mono" style={{ color: "var(--text2)", textAlign: "right" }}>
+                          {fmtPct(
+                            loadedEntries[0]?.data?.summary.period_returns?.bench?.[key],
+                          )}
+                        </td>
+                      ))}
+                    </tr>
+                  ) : null}
                 </tbody>
               </table>
             </div>
+              </div>
+            </div>
           </div>
 
-          {/* Portfolio Exposures section (reuses portfolio feature's
-              component — its data shape matches manager-level exposures
-              since both go through /portfolio_exposures with different
-              manager payloads). Only renders when an exposures file is
-              loaded; the section itself shows an empty state otherwise. */}
           <div style={{ marginTop: 16 }}>
-            <PortfolioExposuresSection
-              exposureMenu={exposures.exposureMenu as ExposureMenuGroup[]}
+            <ManagerExposuresCompareTable
+              managers={managerRefs}
+              exposureMenu={exposures.exposureMenu}
               loading={exposures.loading}
-              data={exposures.data as PortfolioExposuresResponse | null}
+              data={exposures.data}
               selectedCategorical={exposures.selectedCategorical}
               selectedContinuous={exposures.selectedContinuous}
               onSelectionChange={exposures.setSelection}
-              hideProposed
             />
           </div>
         </>

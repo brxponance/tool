@@ -1,5 +1,13 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+
 import { formatNumber, formatPercent } from "@/lib/utils";
 
+import {
+  getPortfolioRiskExposures,
+  getSleeveOptions,
+} from "../api/get-portfolio-screen-data";
 import type {
   ExposureMenuGroup,
   ManagerStruggleResponse,
@@ -9,6 +17,7 @@ import type {
   PortfolioStats,
   RiskAnalysisResponse,
   RiskExposuresResponse,
+  SleeveOption,
 } from "../types";
 import { OverlapSection } from "@/features/overlap/components/overlap-section";
 import type { OverlapManagerInput } from "@/features/overlap/types";
@@ -284,6 +293,63 @@ export function PortfolioAnalyticsSections({
   hasPortfolio,
   clientAum,
 }: PortfolioAnalyticsSectionsProps) {
+  // ── Regional sleeve breakdown for the FactSet Risk panel ────────────────
+  // Which regional views this client's benchmark supports (US / Non-US Dev /
+  // EM vs their respective benchmarks) comes from the backend; "Full
+  // Portfolio" (sleeve null) uses the default riskExposures prop, a regional
+  // sleeve triggers its own fetch. Only offered when the loaded risk data is
+  // security-level (sleeve_info present) — sleeves need per-stock countries.
+  const [sleeveOptions, setSleeveOptions] = useState<SleeveOption[]>([]);
+  const [sleeveSel, setSleeveSel] = useState<SleeveOption | null>(null);
+  const [sleeveData, setSleeveData] = useState<RiskExposuresResponse | null>(null);
+  const [sleeveLoading, setSleeveLoading] = useState(false);
+  const sleeveReq = useRef(0);
+
+  useEffect(() => {
+    setSleeveSel(null);
+    setSleeveData(null);
+    if (!client) {
+      setSleeveOptions([]);
+      return;
+    }
+    getSleeveOptions(client)
+      .then((res) => setSleeveOptions(res.options ?? []))
+      .catch(() => setSleeveOptions([]));
+  }, [client]);
+
+  const managersSignature = portfolioManagers
+    .map((m) => `${m.tab}::${m.matched_name}:${m.current_weight ?? 0}:${m.proposed_weight ?? 0}`)
+    .join("|");
+
+  useEffect(() => {
+    if (!client || !sleeveSel?.sleeve) {
+      setSleeveData(null);
+      return;
+    }
+    const id = ++sleeveReq.current;
+    setSleeveLoading(true);
+    const timer = setTimeout(() => {
+      getPortfolioRiskExposures(client, portfolioManagers, true, sleeveSel.sleeve, sleeveSel.bench)
+        .then((res) => {
+          if (id !== sleeveReq.current) return;
+          setSleeveData(res);
+          setSleeveLoading(false);
+        })
+        .catch(() => {
+          if (id !== sleeveReq.current) return;
+          setSleeveData(null);
+          setSleeveLoading(false);
+        });
+    }, 400);
+    return () => clearTimeout(timer);
+    // managers captured via signature
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, sleeveSel, managersSignature]);
+
+  // What the risk panel actually renders: the sleeve view when one is active.
+  const riskShown = sleeveSel?.sleeve ? sleeveData : riskExposures;
+  const showSleeveBar = Boolean(riskExposures?.sleeve_info) && sleeveOptions.length > 1;
+
   // The overlap endpoints only need name + weights.
   const overlapManagers: OverlapManagerInput[] = portfolioManagers.map((m) => ({
     matched_name: m.matched_name,
@@ -301,9 +367,9 @@ export function PortfolioAnalyticsSections({
   void exposureLabelFor;
 
   const riskMaxAbs = Math.max(
-    ...((riskExposures?.factors ?? []).flatMap((factor) => [
-      Math.abs(riskExposures?.current?.[factor] ?? 0),
-      Math.abs(riskExposures?.proposed?.[factor] ?? 0),
+    ...((riskShown?.factors ?? []).flatMap((factor) => [
+      Math.abs(riskShown?.current?.[factor] ?? 0),
+      Math.abs(riskShown?.proposed?.[factor] ?? 0),
     ])),
     0.01,
   );
@@ -381,20 +447,123 @@ export function PortfolioAnalyticsSections({
           <div className="panel-header" style={{ padding: "8px 12px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <span className="panel-title">FactSet Risk Exposures — Active Style</span>
             <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)", marginLeft: "auto" }}>
-              {riskExposures?.benchmark?.matched_column ? `Active exposures vs ${riskExposures.benchmark.matched_column}` : benchmark}
+              {riskShown?.benchmark?.matched_column ? `Active exposures vs ${riskShown.benchmark.matched_column}` : benchmark}
             </span>
           </div>
-          {loadingAncillary && !riskExposures ? (
+          {showSleeveBar ? (
+            <div
+              style={{
+                padding: "6px 12px",
+                display: "flex",
+                flexWrap: "wrap",
+                gap: 6,
+                alignItems: "center",
+                borderBottom: "1px solid var(--border)",
+              }}
+            >
+              <span
+                style={{
+                  fontFamily: "var(--mono)",
+                  fontSize: 9,
+                  color: "var(--text2)",
+                  textTransform: "uppercase",
+                  letterSpacing: ".06em",
+                  fontWeight: 600,
+                }}
+              >
+                Region
+              </span>
+              <div style={{ display: "inline-flex", border: "1px solid var(--border)", borderRadius: 4, overflow: "hidden" }}>
+                {sleeveOptions.map((opt, i) => {
+                  const active = (sleeveSel?.sleeve ?? null) === opt.sleeve;
+                  return (
+                    <button
+                      key={opt.label}
+                      type="button"
+                      disabled={opt.missing}
+                      title={
+                        opt.missing
+                          ? `Benchmark "${opt.bench}" is not in the uploaded risk file`
+                          : opt.bench ?? undefined
+                      }
+                      onClick={() => setSleeveSel(opt.sleeve ? opt : null)}
+                      style={{
+                        fontFamily: "var(--mono)",
+                        fontSize: 10,
+                        padding: "4px 10px",
+                        background: active ? "var(--accent)" : "var(--surface)",
+                        color: opt.missing ? "var(--text3)" : active ? "#fff" : "var(--text2)",
+                        border: "none",
+                        borderLeft: i > 0 ? "1px solid var(--border)" : "none",
+                        cursor: opt.missing ? "not-allowed" : "pointer",
+                        opacity: opt.missing ? 0.55 : 1,
+                        textDecoration: opt.missing ? "line-through" : "none",
+                      }}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+              {sleeveLoading ? (
+                <span style={{ fontFamily: "var(--mono)", fontSize: 9, color: "var(--text3)" }}>Computing…</span>
+              ) : null}
+              {sleeveSel?.sleeve && sleeveData?.sleeve_info ? (
+                <span style={{ fontFamily: "var(--mono)", fontSize: 9, color: "var(--text3)" }}>
+                  {sleeveData.sleeve_info.sleeve_wt != null
+                    ? `${formatPercent(sleeveData.sleeve_info.sleeve_wt, 1)} of portfolio`
+                    : ""}
+                  {sleeveData.sleeve_info.sleeve_wt_proposed != null
+                    ? ` → ${formatPercent(sleeveData.sleeve_info.sleeve_wt_proposed, 1)} proposed`
+                    : ""}
+                  {sleeveData.sleeve_info.no_country_wt
+                    ? ` · no-country ${formatPercent(sleeveData.sleeve_info.no_country_wt, 1)}`
+                    : ""}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+          {sleeveSel?.sleeve && sleeveData?.sleeve_info?.flags?.length ? (
+            <div
+              style={{
+                padding: "6px 12px",
+                borderBottom: "1px solid var(--border)",
+                fontFamily: "var(--mono)",
+                fontSize: 10,
+                color: "var(--amber, #d68c1f)",
+              }}
+            >
+              {sleeveData.sleeve_info.flags.map((f) => (
+                <div key={f}>⚠ {f}</div>
+              ))}
+            </div>
+          ) : null}
+          {riskShown?.unmatched?.length ? (
+            <div
+              style={{
+                padding: "6px 12px",
+                borderBottom: "1px solid var(--border)",
+                fontFamily: "var(--mono)",
+                fontSize: 10,
+                color: "var(--amber, #d68c1f)",
+              }}
+            >
+              ⚠ No exposure data for: {riskShown.unmatched.join(", ")}
+            </div>
+          ) : null}
+          {(loadingAncillary && !riskExposures) || (sleeveSel?.sleeve && sleeveLoading && !sleeveData) ? (
             <div style={{ padding: 14, textAlign: "center", color: "var(--text3)", fontFamily: "var(--mono)", fontSize: 11 }}>
               Loading risk exposures...
             </div>
-          ) : riskExposures?.error ? (
+          ) : riskShown?.error ? (
             <div style={{ padding: 14, textAlign: "center", color: "var(--amber)", fontFamily: "var(--mono)", fontSize: 11 }}>
-              {riskExposures.error}
+              {riskShown.error}
             </div>
-          ) : !riskExposures ? (
+          ) : !riskShown ? (
             <div style={{ padding: 14, textAlign: "center", color: "var(--text3)", fontFamily: "var(--mono)", fontSize: 11 }}>
-              Upload a FactSet Risk file to see portfolio factor exposures.
+              {riskExposures
+                ? "Loading regional breakdown..."
+                : "Upload a FactSet Risk file to see portfolio factor exposures."}
             </div>
           ) : (
             <div style={{ overflowX: "auto", flex: 1 }}>
@@ -421,10 +590,10 @@ export function PortfolioAnalyticsSections({
                   </tr>
                 </thead>
                 <tbody>
-                  {riskExposures.factors.map((factor) => {
-                    const current = riskExposures.current[factor];
-                    const proposed = riskExposures.proposed[factor];
-                    const delta = riskExposures.delta[factor];
+                  {riskShown.factors.map((factor) => {
+                    const current = riskShown.current[factor];
+                    const proposed = riskShown.proposed[factor];
+                    const delta = riskShown.delta[factor];
                     const bar = (value: number | null | undefined, color: string) => {
                       if (value == null) {
                         return <td />;

@@ -66,6 +66,8 @@ def section_client(section_name):
         return 'NYSTRS'
     if u.startswith('COB'):
         return 'COB'
+    if u.startswith('NEW HAVEN'):
+        return 'New Haven'
     return None
 
 
@@ -283,8 +285,15 @@ def build_section_index(exposures_data, client_rosters=None):
     return _index_section_names(sections, client_rosters)
 
 
-def resolve_manager_section(weights_name, client_name, section_index):
+def resolve_manager_section(weights_name, client_name, section_index,
+                            fallback_class=None):
     """Resolve one held manager to an exposures section.
+
+    fallback_class: (region, size) to use when the manager label itself
+    carries no class tokens — e.g. derived from the buy-list peer tab for
+    managers added via Add Manager, whose label is just the firm name
+    ('Oberweis'). Without it, an UNKNOWN class can never pass the tier-2/3
+    compatibility gate and the manager is unmatchable outside its own client.
 
     Returns {'section', 'tier' ('own'|'peer'|'unmarked'), 'owner',
     'distance'} or None when no acceptable profile exists.
@@ -293,6 +302,10 @@ def resolve_manager_section(weights_name, client_name, section_index):
     if not firm:
         return None
     cls = sleeve_class(weights_name)
+    if cls[0] == 'UNKNOWN' and fallback_class and fallback_class[0] != 'UNKNOWN':
+        # Keep an explicit size token from the label (MICRO/SC); otherwise
+        # take the fallback's size along with its region.
+        cls = (fallback_class[0], cls[1] if cls[1] != 'STD' else fallback_class[1])
     same_firm = [e for e in section_index if _firms_equal(e['firm'], firm)]
 
     # Tier 1 — own client. No class gate (a client's own upload for the firm
@@ -378,13 +391,18 @@ def _resolve_all(managers_with_weights, client_name, index, bench_map):
     for m in managers_with_weights:
         display = m.get('matched_name') or m.get('weight_file_name') or '?'
         match_input = m.get('weight_file_name') or m.get('matched_name')
+        # The peer tab (EAFE/ISC/EM/US/USSC/ACWI) doubles as an asset-class
+        # label when the manager's own name carries none — sleeve_class
+        # already understands every tab token.
+        tab_class = sleeve_class(m.get('tab')) if m.get('tab') else None
         # Passive index sleeve → the benchmark section directly.
         bench = match_index_sleeve(match_input, list(bench_map.keys()))
         if bench:
             res = {'section': bench_map[bench], 'tier': 'index', 'owner': None,
                    'distance': 0}
         else:
-            res = resolve_manager_section(match_input, client_name, index)
+            res = resolve_manager_section(match_input, client_name, index,
+                                          fallback_class=tab_class)
         if res and res['section'] not in taken:
             taken.add(res['section'])
             out[display] = res

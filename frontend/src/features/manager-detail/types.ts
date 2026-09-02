@@ -4,7 +4,14 @@ export type ManagerDirectoryItem = {
   r2_full: number | null;
   vg_full: number;
   ns_z: number | null;
+  // Present on the wire from /all_managers; placeholders have no clone data
+  // so they are excluded from multi-manager comparison.
+  is_placeholder?: boolean;
 };
+
+// Maximum managers in a side-by-side comparison. All must share one asset
+// class (peer tab) — an EAFE manager can't be compared with a US or ISC one.
+export const MAX_COMPARE_MANAGERS = 5;
 
 export type ManagerDirectoryResponse = {
   managers: ManagerDirectoryItem[];

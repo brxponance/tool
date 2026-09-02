@@ -121,11 +121,14 @@ export type RiskExposuresResponse = {
   error?: string;
 };
 
-// One sleeve breakdown option from POST /sleeve_options.
+// One sleeve breakdown option from POST /sleeve_options. `missing` marks an
+// option whose benchmark column is absent from the uploaded risk file — shown
+// disabled in the UI rather than hidden.
 export type SleeveOption = {
   label: string;
   sleeve: string | null;
   bench: string | null;
+  missing?: boolean;
 };
 
 export type SleeveOptionsResponse = {
