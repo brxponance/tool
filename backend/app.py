@@ -896,7 +896,7 @@ def _reload_inputs_core():
     """Core of /reload_inputs — returns a plain dict rather than a Response, so
     the startup auto-refresh (see _auto_reload_stale_inputs) can reuse it."""
     status = {'weights': 'skipped', 'risk': 'skipped', 'exposures': 'skipped',
-              'qualitative': 'skipped'}
+              'security_risk': 'skipped', 'qualitative': 'skipped'}
     errors = {}
 
     # Weights
@@ -934,6 +934,24 @@ def _reload_inputs_core():
         except Exception as e:
             status['exposures'] = 'error'
             errors['exposures'] = str(e)
+
+    # Security-level risk DNA (was the one input /reload_inputs never
+    # refreshed — a workbook updated in place kept serving its stale parse
+    # until re-uploaded or the cache was rebuilt)
+    _p = _input_path('security_risk')
+    if _p:
+        try:
+            from security_risk_engine import parse_security_risk_file
+            parsed = parse_security_risk_file(_p)
+            if parsed.get('managers'):
+                state['security_risk_data'] = parsed
+                status['security_risk'] = 'ok'
+            else:
+                status['security_risk'] = 'error'
+                errors['security_risk'] = 'No manager sections found.'
+        except Exception as e:
+            status['security_risk'] = 'error'
+            errors['security_risk'] = str(e)
 
     # Qualitative firm/strategy data
     _p = _input_path('qualitative')
@@ -4168,6 +4186,7 @@ def portfolio_exposures():
         universe_clone_results=state.get('universe_clone_results'),
         client_name=client_name,
         client_rosters=state.get('weights'),
+        client_benchmarks=state.get('client_benchmarks'),
     )
     return jsonify(result)
 
@@ -4727,6 +4746,10 @@ def export_portfolio_docx():
               'target':  _fpct(tot_tgt)}
 
     # ── New managers (proposed>0 & current==0) → firm write-up ─────────────
+    # The write-up comes from the Firm Data workbook's "Description" tab
+    # (firm in column A, prose in column B); the firm-record 'description'
+    # field is kept as a fallback for older workbook formats.
+    from qualitative_loader import match_description
     qd = state.get('qualitative_data')
     new_managers = []
     for m in managers:
@@ -4736,9 +4759,11 @@ def export_portfolio_docx():
             nm = m.get('matched_name') or m.get('weight_file_name') or '?'
             desc = None
             if qd:
-                _, rec = match_firm(nm, qd)
-                if rec:
-                    desc = rec.get('description')
+                desc = match_description(nm, qd)
+                if not desc:
+                    _, rec = match_firm(nm, qd)
+                    if rec:
+                        desc = rec.get('description')
             new_managers.append({'name': nm, 'description': desc})
 
     # ── Benchmark + ACWI-ex-US dev/EM split flag ───────────────────────────
@@ -4756,7 +4781,9 @@ def export_portfolio_docx():
                 want_split=want_split,
                 factset_aliases=state.get('factset_aliases') or {},
                 clone_results=state.get('clone_results'),
-                universe_clone_results=state.get('universe_clone_results'))
+                universe_clone_results=state.get('universe_clone_results'),
+                client_name=client,
+                client_rosters=state.get('weights'))
     except Exception as e:  # noqa: BLE001 — a memo without exposures still ships
         print(f"[docx] exposures section skipped: {e}")
         exposures = None

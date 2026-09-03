@@ -550,11 +550,109 @@ def _fuzzy_match_manager(name, candidates, threshold=80, benchmark_hint=None):
     return result[0] if result else None
 
 
+def _match_managers_to_sections(managers_with_weights, exposures_data,
+                                client_name=None, client_rosters=None,
+                                by_mgr=None, benchmark_hint=None):
+    """Shared manager → exposure-section matching for every exposures feature
+    (Portfolio tab table, Manager Detail, Word memo — they MUST agree).
+
+    Ownership resolution first: the client's own uploaded sections win; a
+    missing profile borrows another client's section only when the SLEEVE
+    asset class is compatible (see holdings_resolver). With client_name=None
+    (Manager Detail), tier 1 becomes unmarked profiles and tier 2 the
+    sleeve-compatible client sections. Then a safety net for resolver misses
+    (typically managers added from the buy-list directory, whose labels
+    carry no sleeve tokens): Map crosswalk first, then fuzzy — but only over
+    sections that belong to NO client and are not already claimed, so
+    ownership matching stays authoritative for client-labeled sections.
+
+    Returns (matched {matched_name: section_name}, unmatched [names]).
+    """
+    from holdings_resolver import resolve_managers, section_client
+    candidate_names = list((exposures_data.get('managers') or {}).keys())
+    matched, unmatched = {}, []
+    resolution = resolve_managers(managers_with_weights, exposures_data,
+                                  client_name, client_rosters=client_rosters)
+    for m in managers_with_weights:
+        nm = m['matched_name']
+        display = m.get('matched_name') or m.get('weight_file_name') or '?'
+        res = resolution.get(display)
+        if res:
+            matched[nm] = res['section']
+        else:
+            unmatched.append(nm)
+    if unmatched:
+        claimed = set(matched.values())
+        free_pool = [s for s in candidate_names
+                     if s not in claimed and section_client(s) is None]
+        if free_pool:
+            from data_loader import _norm_name as _dl_norm
+            still = []
+            for nm in unmatched:
+                m = next((x for x in managers_with_weights
+                          if x['matched_name'] == nm), {})
+                match_input = m.get('weight_file_name') or nm
+                pool = free_pool
+                if by_mgr:
+                    subset = by_mgr.get(_dl_norm(nm)) or by_mgr.get(_dl_norm(match_input))
+                    if subset:
+                        narrowed = [s for s in subset if s in free_pool]
+                        if narrowed:
+                            pool = narrowed
+                hit = _fuzzy_match_manager(match_input, pool,
+                                           benchmark_hint=benchmark_hint)
+                if hit and hit not in claimed:
+                    matched[nm] = hit
+                    claimed.add(hit)
+                    free_pool = [s for s in free_pool if s != hit]
+                else:
+                    still.append(nm)
+            unmatched = still
+    return matched, unmatched
+
+
+def _resolve_benchmark_name(name, candidates):
+    """Resolve a caller-supplied benchmark label against the exposure file's
+    benchmark section names: exact > normalized (strip punctuation, canonicalise
+    'Small Cap' → 'SC') > fuzzy. Returns the candidate name or None. Mirrors
+    the matching cascade the risk endpoint uses so the user's weights-file
+    label resolves the same way everywhere."""
+    if not name:
+        return None
+    if name in candidates:
+        return name
+
+    # holdings_resolver's benchmark normalizer canonicalises the index-name
+    # spellings that vary across files ('All Country World' / 'AC World' →
+    # ACWI, 'Ex-United States' → ex us); 'USA' → 'US' is added here so
+    # 'MSCI ACWI ex-US SC' finds 'MSCI AC World ex USA Small Cap' by exact
+    # normalized match instead of a WRatio guess (which used to hand CIT the
+    # non-SC ACWI ex-US benchmark). 'World ex US' → 'EAFE Canada' is the
+    # same geographic equivalence _benchmark_region_tokens uses (developed
+    # ex-US), so MD's 'MSCI World ex US SC' finds 'MSCI EAFE + Canada Small
+    # Cap' rather than WRatio's substring pick of plain 'MSCI World'.
+    from holdings_resolver import _norm_bench
+
+    def _bn(s):
+        t = re.sub(r'\busa\b', 'us', _norm_bench(s))
+        return re.sub(r'\bworld ex us\b', 'eafe canada', t)
+
+    target = _bn(name)
+    for cand in candidates:
+        if _bn(cand) == target:
+            return cand
+    cand_orig = list(candidates)
+    m = process.extractOne(target, [_bn(c) for c in cand_orig],
+                           scorer=fuzz.WRatio, score_cutoff=80)
+    return cand_orig[m[2]] if m else None
+
+
 def compute_portfolio_exposures(managers_with_weights, exposures_data, grouping,
                                  benchmark_name=None, sub_grouping=None,
                                  factset_aliases=None, clone_results=None,
                                  universe_clone_results=None,
-                                 client_name=None, client_rosters=None):
+                                 client_name=None, client_rosters=None,
+                                 client_benchmarks=None):
     """
     Compute exposure for a client portfolio to a given grouping.
 
@@ -603,30 +701,8 @@ def compute_portfolio_exposures(managers_with_weights, exposures_data, grouping,
     # 'MSCI EAFE+CANADA' in weights vs 'MSCI EAFE + Canada' in the file
     # silently drops to the file default and the table renders against the
     # wrong benchmark.
-    resolved_bmk_name = None
-    if benchmark_name:
-        if benchmark_name in benchmarks_all:
-            resolved_bmk_name = benchmark_name
-        else:
-            import re as _re
-            def _bn(s):
-                t = str(s or '').lower()
-                for ch in ['+', '-', '/', ',', '.']:
-                    t = t.replace(ch, ' ')
-                t = _re.sub(r'\bsmall\s+cap\b', 'sc', t)
-                return _re.sub(r'\s+', ' ', t).strip()
-            target = _bn(benchmark_name)
-            for cand in benchmarks_all:
-                if _bn(cand) == target:
-                    resolved_bmk_name = cand
-                    break
-            if resolved_bmk_name is None:
-                cand_keys = [_bn(c) for c in benchmarks_all]
-                cand_orig = list(benchmarks_all)
-                m = process.extractOne(target, cand_keys,
-                                       scorer=fuzz.WRatio, score_cutoff=80)
-                if m:
-                    resolved_bmk_name = cand_orig[m[2]]
+    resolved_bmk_name = _resolve_benchmark_name(benchmark_name, benchmarks_all) \
+        if benchmark_name else None
     if resolved_bmk_name is None:
         # Fall back to the default
         resolved_bmk_name = exposures_data.get('benchmark_name')
@@ -657,72 +733,48 @@ def compute_portfolio_exposures(managers_with_weights, exposures_data, grouping,
         by_mgr = factset_candidates_by_manager(
             candidate_names, factset_aliases, clone_results, universe_clone_results)
 
-    matched     = {}   # matched_name -> exposure_file_name
-    unmatched   = []
-    if client_name:
-        # Client-aware ownership resolution: the client's own uploaded
-        # sections win; a missing profile borrows another client's section
-        # only when the SLEEVE asset class is compatible (see
-        # holdings_resolver). Falls back to fuzzy matching when the caller
-        # doesn't know the client.
-        from holdings_resolver import resolve_managers, section_client
-        resolution = resolve_managers(managers_with_weights, exposures_data,
-                                      client_name, client_rosters=client_rosters)
-        for m in managers_with_weights:
-            nm = m['matched_name']
-            display = m.get('matched_name') or m.get('weight_file_name') or '?'
-            res = resolution.get(display)
-            if res:
-                matched[nm] = res['section']
-            else:
-                unmatched.append(nm)
-        # Safety net for resolver misses (typically managers added from the
-        # buy-list directory, whose labels carry no sleeve tokens): Map
-        # crosswalk first, then fuzzy — but only over sections that belong to
-        # NO client and are not already claimed, so ownership matching stays
-        # authoritative for client-labeled sections.
-        if unmatched:
-            claimed = set(matched.values())
-            free_pool = [s for s in candidate_names
-                         if s not in claimed and section_client(s) is None]
-            if free_pool:
-                from data_loader import _norm_name as _dl_norm
-                still = []
-                for nm in unmatched:
-                    m = next((x for x in managers_with_weights
-                              if x['matched_name'] == nm), {})
-                    match_input = m.get('weight_file_name') or nm
-                    pool = free_pool
-                    if by_mgr:
-                        subset = by_mgr.get(_dl_norm(nm)) or by_mgr.get(_dl_norm(match_input))
-                        if subset:
-                            narrowed = [s for s in subset if s in free_pool]
-                            if narrowed:
-                                pool = narrowed
-                    hit = _fuzzy_match_manager(match_input, pool,
-                                               benchmark_hint=resolved_bmk_name)
-                    if hit and hit not in claimed:
-                        matched[nm] = hit
-                        claimed.add(hit)
-                        free_pool = [s for s in free_pool if s != hit]
-                    else:
-                        still.append(nm)
-                unmatched = still
-    else:
-        for m in managers_with_weights:
-            nm = m['matched_name']
-            match_input = m.get('weight_file_name') or nm
-            pool = candidate_names
-            if by_mgr:
-                subset = by_mgr.get(_norm_name(nm)) or by_mgr.get(_norm_name(match_input))
-                if subset:
-                    pool = subset
-            hit = _fuzzy_match_manager(match_input, pool,
-                                        benchmark_hint=resolved_bmk_name)
-            if hit:
-                matched[nm] = hit
-            else:
-                unmatched.append(nm)
+    matched, unmatched = _match_managers_to_sections(
+        managers_with_weights, exposures_data,
+        client_name=client_name, client_rosters=client_rosters,
+        by_mgr=by_mgr, benchmark_hint=resolved_bmk_name)
+
+    # Manager-detail benchmark override (no client context): the caller's
+    # benchmark hint is a generic per-tab guess ('MSCI ACWI ex US Small Cap'
+    # for every ISC manager). When every matched section is owned by one
+    # client AND that client's own benchmark is sleeve-compatible with the
+    # manager, the client benchmark is authoritative — e.g. XPN…AHE sections
+    # are ATL Health's EAFE Small Cap account, so Empiric (ISC tab) renders
+    # vs MSCI EAFE SC, not the tab default. The compatibility gate keeps a
+    # multi-sleeve owner's TOTAL-portfolio benchmark from leaking onto an
+    # unrelated sleeve (New Haven's ACWI-ex-US must not attach to its
+    # 'Empiric EM' sleeve).
+    if client_name is None and matched and client_benchmarks:
+        from holdings_resolver import sleeve_class, class_distance, section_client
+        owners = {section_client(s) for s in matched.values()}
+        owner = next(iter(owners)) if len(owners) == 1 else None
+        owner_bmk = client_benchmarks.get(owner) if owner else None
+        if owner_bmk:
+            bmk_cls = sleeve_class(owner_bmk)
+            compatible = True
+            for m in managers_with_weights:
+                if m['matched_name'] not in matched:
+                    continue
+                mcls = sleeve_class(m.get('weight_file_name')
+                                    or m['matched_name'])
+                if mcls[0] == 'UNKNOWN' and m.get('tab'):
+                    tcls = sleeve_class(m['tab'])
+                    mcls = (tcls[0], mcls[1] if mcls[1] != 'STD' else tcls[1])
+                if class_distance(mcls, bmk_cls) is None:
+                    compatible = False
+                    break
+            resolved_owner_bmk = _resolve_benchmark_name(owner_bmk, benchmarks_all) \
+                if compatible else None
+            if resolved_owner_bmk and resolved_owner_bmk != resolved_bmk_name:
+                resolved_bmk_name  = resolved_owner_bmk
+                benchmark          = benchmarks_all.get(resolved_bmk_name, {})
+                quintile_breaks    = quintile_all.get(resolved_bmk_name, {})
+                benchmark_fallback = bool(benchmark_name
+                                          and benchmark_name != resolved_bmk_name)
 
     # ── Mode C dispatch ────────────────────────────────────────────────────
     # Honored only when grouping is categorical AND sub_grouping is a
@@ -763,6 +815,7 @@ def compute_portfolio_exposures(managers_with_weights, exposures_data, grouping,
         )
         if isinstance(nested, dict):
             nested['cash_warnings'] = cash_warnings
+            nested['matched_sections'] = matched
         return nested
 
     # Benchmark exposure
@@ -858,6 +911,7 @@ def compute_portfolio_exposures(managers_with_weights, exposures_data, grouping,
         'is_categorical':      grouping in CATEGORICAL_COLS,
         'rows':                rows,
         'matched':             list(matched.keys()),
+        'matched_sections':    matched,
         'unmatched':           unmatched,
         'cash_warnings':       cash_warnings,
         'coverage_current':    round(cur_covered_wt * 100, 1),
@@ -1029,6 +1083,7 @@ def _compute_nested_response(managers_with_weights, exposures_data,
         'is_nested':           True,
         'rows':                rows,
         'matched':             list(matched.keys()),
+        'matched_sections':    matched,
         'unmatched':           unmatched,
         'coverage_current':    round(cur_covered_wt * 100, 1),
         'coverage_proposed':   round(prop_covered_wt * 100, 1),
@@ -1101,53 +1156,43 @@ def _memo_fmt(v, spec):
 
 
 def _match_benchmark_section(bmk_str, benchmark_names):
-    """Fuzzy-match a client benchmark string to a benchmark section name."""
+    """Match a client benchmark string to a benchmark section name. Exact >
+    normalized > fuzzy-80 (via _resolve_benchmark_name), with the legacy
+    loose WRatio-55 as a last resort. Without the normalized tier, ATL
+    Health's 'MSCI EAFE SC' WRatio-landed on 'MSCI EAFE' instead of
+    'MSCI EAFE Small Cap' and the memo tables carried the wrong benchmark
+    column (labeled 'EAFE')."""
     if not bmk_str or not benchmark_names:
         return None
     names = list(benchmark_names)
-    low = str(bmk_str).strip().lower()
-    for n in names:                       # exact-ish first
-        if str(n).strip().lower() == low:
-            return n
+    hit = _resolve_benchmark_name(bmk_str, names)
+    if hit:
+        return hit
     try:
-        from rapidfuzz import process, fuzz
         m = process.extractOne(str(bmk_str), names, scorer=fuzz.WRatio, score_cutoff=55)
         return m[0] if m else None
     except Exception:
         return None
 
 
-def _aggregate_holdings(managers, exp_managers, weight_key, benchmark_hint=None,
-                        by_mgr=None):
+def _aggregate_holdings(managers, exp_managers, weight_key, matched):
     """Portfolio holdings by SEDOL for one weight state. Each manager's own
     position weights are renormalised to sum 1, scaled by that manager's
     portfolio allocation (current/proposed), and summed across managers.
-    Returns (agg{sedol:{'w','rec'}}, unmatched[list]).
 
-    by_mgr, when supplied, is the Map crosswalk index {manager_identity:
-    [factset_row, ...]} used to narrow candidates to the held manager's own
-    FactSet rows before the benchmark tiebreak (see compute_portfolio_exposures)."""
-    candidates = list(exp_managers.keys())
-    _nn = None
-    if by_mgr:
-        from data_loader import _norm_name as _nn
-    agg, unmatched, used = {}, [], set()
+    `matched` is the {matched_name: section} map from
+    _match_managers_to_sections — the SAME ownership-based matching the
+    Portfolio tab uses. (The old in-function fuzzy matching landed several
+    ATL Health sleeves on one MD section — first claimant won, the rest
+    were silently dropped — so the memo tables disagreed with the tool.)
+
+    Returns agg {sedol: {'w', 'rec'}}."""
+    agg = {}
     for m in managers:
         alloc = float(m.get(weight_key) or 0)
         if alloc <= 0:
             continue
-        match_input = m.get('weight_file_name') or m.get('matched_name')
-        pool = candidates
-        if by_mgr:
-            subset = by_mgr.get(_nn(m.get('matched_name'))) or by_mgr.get(_nn(match_input))
-            if subset:
-                pool = subset
-        sec = _fuzzy_match_manager(match_input, pool, benchmark_hint=benchmark_hint)
-        if not sec or sec in used:
-            if not sec:
-                unmatched.append(m.get('matched_name') or match_input or '?')
-            continue
-        used.add(sec)
+        sec = matched.get(m.get('matched_name'))
         holds = exp_managers.get(sec) or {}
         tot = sum((r.get('weight') or 0) for r in holds.values())
         if tot <= 0:
@@ -1160,7 +1205,7 @@ def _aggregate_holdings(managers, exp_managers, weight_key, benchmark_hint=None,
             if node is None:
                 node = agg[sedol] = {'w': 0.0, 'rec': r}
             node['w'] += alloc * pw
-    return agg, unmatched
+    return agg
 
 
 def _bench_holdings(bench_secs):
@@ -1201,15 +1246,27 @@ def _memo_active_share(port_agg, bench_hold):
 
 def _group_weights(agg, group_col, market_col):
     """Return (flat{group:pct}, nested{market:{group:pct}}) as % of the
-    portfolio's invested weight."""
+    portfolio's invested weight. Cash/FX lines and missing classifications
+    get explicit 'Cash' / 'Unclassified' buckets (same rules as the
+    Portfolio tab's exposures table) so the memo rows sum to ~100 and
+    reconcile with the on-screen numbers."""
     tot = sum(n['w'] for n in agg.values()) or 1.0
     flat, nested = {}, {}
     for n in agg.values():
-        g = str(n['rec'].get(group_col) or '--').strip() or '--'
+        v = n['rec'].get(group_col)
+        if is_cash_row(n['rec']):
+            g = 'Cash'
+        elif v in (None, '', '--'):
+            g = 'Unclassified'
+        else:
+            g = str(v).strip() or 'Unclassified'
         w = 100.0 * n['w'] / tot
         flat[g] = flat.get(g, 0.0) + w
         if market_col:
-            mk = str(n['rec'].get(market_col) or '--').strip() or '--'
+            if g in ('Cash', 'Unclassified'):
+                mk = g   # keep cash/unclassified out of the market split
+            else:
+                mk = str(n['rec'].get(market_col) or '--').strip() or '--'
             nested.setdefault(mk, {})
             nested[mk][g] = nested[mk].get(g, 0.0) + w
     return flat, nested
@@ -1225,12 +1282,13 @@ def _memo_row_vals(cw, pw, bw):
 
 
 def _assemble_flat(cflat, pflat, bflat):
+    # Alphabetical, with Cash then Unclassified pinned to the bottom —
+    # matching the on-screen exposures table's ordering.
     groups = sorted(set(cflat) | set(pflat) | set(bflat),
-                    key=lambda g: (g == '--', g))
+                    key=lambda g: (g in ('Cash', 'Unclassified'),
+                                   g == 'Unclassified', g))
     rows = []
     for g in groups:
-        if g == '--':
-            continue
         pre, pd, post, ppd, bench = _memo_row_vals(
             cflat.get(g, 0.0), pflat.get(g, 0.0), bflat.get(g, 0.0))
         rows.append({'label': g, 'indent': False, 'header': False,
@@ -1240,10 +1298,13 @@ def _assemble_flat(cflat, pflat, bflat):
 
 
 def _assemble_nested(cnest, pnest, bnest):
-    markets = [m for m in _MARKET_ORDER if m in (set(cnest) | set(pnest) | set(bnest))]
-    for m in sorted(set(cnest) | set(pnest) | set(bnest)):
-        if m not in markets and m != '--':
+    all_mks = set(cnest) | set(pnest) | set(bnest)
+    markets = [m for m in _MARKET_ORDER if m in all_mks]
+    for m in sorted(all_mks):
+        # Cash / Unclassified render as flat rows after the market blocks.
+        if m not in markets and m not in ('--', 'Cash', 'Unclassified'):
             markets.append(m)
+    markets += [m for m in ('Cash', 'Unclassified') if m in all_mks]
     rows = []
     for mk in markets:
         cg, pg, bg = cnest.get(mk, {}), pnest.get(mk, {}), bnest.get(mk, {})
@@ -1253,6 +1314,8 @@ def _assemble_nested(cnest, pnest, bnest):
         rows.append({'label': label, 'indent': False, 'header': True,
                      'pre': pre, 'pre_diff': pd, 'post': post,
                      'post_diff': ppd, 'bench': bench})
+        if mk in ('Cash', 'Unclassified'):
+            continue  # flat rows — the only child would repeat the total
         for g in sorted(set(cg) | set(pg) | set(bg), key=lambda g: (g == '--', g)):
             if g == '--':
                 continue
@@ -1266,7 +1329,8 @@ def _assemble_nested(cnest, pnest, bnest):
 
 def build_memo_exposures(managers, exposures_data, client_benchmark=None,
                          want_split=False, factset_aliases=None,
-                         clone_results=None, universe_clone_results=None):
+                         clone_results=None, universe_clone_results=None,
+                         client_name=None, client_rosters=None):
     """Compute the memo's 'Proposed Portfolio Exposures' section.
 
     Returns None if no exposures data. Otherwise a dict:
@@ -1293,10 +1357,15 @@ def build_memo_exposures(managers, exposures_data, client_benchmark=None,
         by_mgr = factset_candidates_by_manager(
             list(exp_managers.keys()), factset_aliases, clone_results, universe_clone_results)
 
-    cur_agg, unmatched = _aggregate_holdings(managers, exp_managers, 'current_weight',
-                                             client_benchmark, by_mgr=by_mgr)
-    prop_agg, _        = _aggregate_holdings(managers, exp_managers, 'proposed_weight',
-                                             client_benchmark, by_mgr=by_mgr)
+    # Same ownership-based matching as the Portfolio tab's exposures table —
+    # the memo and the on-screen table must reconcile.
+    matched, unmatched = _match_managers_to_sections(
+        managers, exposures_data,
+        client_name=client_name, client_rosters=client_rosters,
+        by_mgr=by_mgr, benchmark_hint=client_benchmark)
+
+    cur_agg  = _aggregate_holdings(managers, exp_managers, 'current_weight',  matched)
+    prop_agg = _aggregate_holdings(managers, exp_managers, 'proposed_weight', matched)
 
     # Detect a Developed/Emerging/Frontier column if present anywhere.
     market_col = None
@@ -1344,6 +1413,7 @@ def build_memo_exposures(managers, exposures_data, client_benchmark=None,
         'split':             split,
         'market_col':        market_col,
         'unmatched':         unmatched,
+        'matched_sections':  matched,
         'characteristics':   chars,
         'regions':           group_table('Region'),
         'sectors':           group_table('GICS Sector'),

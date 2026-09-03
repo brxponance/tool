@@ -413,8 +413,6 @@ def compute_exposures(
     """
     factors    = security_data.get('factors') or STYLE_FACTORS
     mgr_data   = security_data.get('managers', {})
-    bench_abs  = (security_data.get('benchmarks', {}).get(benchmark_name) or {}) \
-                 if benchmark_name else {}
     if has_em_sleeve is None:
         has_em_sleeve = (sleeve == SLEEVE_EM)
     has_em     = has_em_sleeve
@@ -430,47 +428,80 @@ def compute_exposures(
         _by_mgr = factset_candidates_by_manager(
             sec_names, factset_aliases, clone_results, universe_clone_results)
 
-    # Client-aware ownership resolution (same rules as the holdings overlap /
-    # grouping exposures): the client's own risk column wins, borrowing is
-    # gated on sleeve asset-class compatibility, and passive index sleeves
-    # resolve to the benchmark's own bottom-up column ('… vs. DEFAULT').
-    # Column names carry a 'vs. <benchmark>' suffix — stripped before
-    # ownership parsing. Legacy fuzzy matching when the client is unknown.
-    _resolution = None
-    if client_name:
-        from holdings_resolver import (resolve_managers_generic, section_client,
-                                       strip_vs_suffix)
-        _resolution = resolve_managers_generic(
-            portfolio_managers, sec_names, client_name,
-            client_rosters=client_rosters, clean=strip_vs_suffix)
-        # Safety net for resolver misses (typically directory-added managers
-        # whose labels carry no sleeve tokens): Map crosswalk then legacy
-        # matching, restricted to columns owned by NO client and not already
-        # claimed — ownership resolution stays authoritative for client
-        # columns.
-        claimed = {r['section'] for r in _resolution.values()}
-        free = [s for s in sec_names
-                if s not in claimed and section_client(strip_vs_suffix(s)) is None]
-        for m in portfolio_managers:
-            display = m.get('matched_name') or m.get('weight_file_name') or '?'
-            if display in _resolution or not free:
-                continue
-            match_input = (m.get('weight_file_name')
-                           or m.get('matched_name') or m.get('name', ''))
-            pool = free
-            if _by_mgr and _dl_norm:
-                subset = (_by_mgr.get(_dl_norm(m.get('matched_name')))
-                          or _by_mgr.get(_dl_norm(match_input)))
-                if subset:
-                    narrowed = [s for s in subset if s in free]
-                    if narrowed:
-                        pool = narrowed
-            hit = _match_mgr(match_input, pool)
-            if hit:
-                _resolution[display] = {'section': hit, 'tier': 'fallback',
-                                        'owner': None, 'distance': 9}
-                claimed.add(hit)
-                free = [s for s in free if s != hit]
+    # Ownership resolution (same rules as the holdings overlap / grouping
+    # exposures): the client's own risk column wins, borrowing is gated on
+    # sleeve asset-class compatibility, and passive index sleeves resolve to
+    # the benchmark's own bottom-up column ('… vs. DEFAULT'). Column names
+    # carry a 'vs. <benchmark>' suffix — stripped before ownership parsing.
+    # Runs with client_name=None too (Manager Detail): tier 1 becomes
+    # unmarked profiles, tier 2 the sleeve-compatible client sections — so
+    # 'Empiric' on the ISC tab resolves to ATL Health's EAFE SC column
+    # ('XPNEIAHE - Empiric vs. MSCI EAFE Small Cap'), not the New Haven
+    # Empiric EM one that pure fuzzy matching used to pick.
+    from holdings_resolver import (resolve_managers_generic, section_client,
+                                   strip_vs_suffix)
+    _resolution = resolve_managers_generic(
+        portfolio_managers, sec_names, client_name,
+        client_rosters=client_rosters, clean=strip_vs_suffix)
+    # Safety net for resolver misses (typically directory-added managers
+    # whose labels carry no sleeve tokens): Map crosswalk then legacy
+    # matching, restricted to columns owned by NO client and not already
+    # claimed — ownership resolution stays authoritative for client
+    # columns.
+    claimed = {r['section'] for r in _resolution.values()}
+    free = [s for s in sec_names
+            if s not in claimed and section_client(strip_vs_suffix(s)) is None]
+    for m in portfolio_managers:
+        display = m.get('matched_name') or m.get('weight_file_name') or '?'
+        if display in _resolution or not free:
+            continue
+        match_input = (m.get('weight_file_name')
+                       or m.get('matched_name') or m.get('name', ''))
+        pool = free
+        if _by_mgr and _dl_norm:
+            subset = (_by_mgr.get(_dl_norm(m.get('matched_name')))
+                      or _by_mgr.get(_dl_norm(match_input)))
+            if subset:
+                narrowed = [s for s in subset if s in free]
+                if narrowed:
+                    pool = narrowed
+        hit = _match_mgr(match_input, pool)
+        if hit:
+            _resolution[display] = {'section': hit, 'tier': 'fallback',
+                                    'owner': None, 'distance': 9}
+            claimed.add(hit)
+            free = [s for s in free if s != hit]
+
+    # Resolve the requested benchmark against the actual Risk-Summary
+    # columns. The caller's hint can be FactSet-style ('MSCI ACWI ex US
+    # Small Cap') while the columns are file-spelled ('MSCI ACWI ex-US SC');
+    # the old exact-only lookup silently degraded to absolute exposures.
+    # Cascade when the hint is not an exact column: the matched sections'
+    # own 'vs. <benchmark>' suffix when they all name the same index (the
+    # file itself says which benchmark the sleeve is run against — XPN…AHE
+    # sections carry 'vs. MSCI EAFE Small Cap'), then a normalized-name
+    # match on the hint. Exact column hits (client sleeve options) are
+    # never overridden.
+    bench_cols = security_data.get('benchmarks', {}) or {}
+    requested_bench = benchmark_name
+    if benchmark_name and benchmark_name not in bench_cols:
+        from holdings_resolver import _norm_bench
+        by_norm = {_norm_bench(c): c for c in bench_cols}
+        resolved = None
+        suffixes = set()
+        for r in _resolution.values():
+            m_sfx = re.search(r'\svs\.?\s+(.+)$', str(r['section']),
+                              re.IGNORECASE)
+            if m_sfx:
+                suffixes.add(m_sfx.group(1).strip())
+        if len(suffixes) == 1:
+            sfx = next(iter(suffixes))
+            resolved = sfx if sfx in bench_cols else by_norm.get(_norm_bench(sfx))
+        if not resolved:
+            resolved = by_norm.get(_norm_bench(benchmark_name))
+        if resolved:
+            benchmark_name = resolved
+    bench_abs = (bench_cols.get(benchmark_name) or {}) if benchmark_name else {}
 
     def compute_side(weight_key: str):
         totals      = {f: 0.0 for f in factors}
@@ -499,18 +530,9 @@ def compute_exposures(
             match_input = (m.get('weight_file_name')
                            or m.get('matched_name')
                            or m.get('name', ''))
-            if _resolution is not None:
-                display = m.get('matched_name') or m.get('weight_file_name') or '?'
-                res = _resolution.get(display)
-                mgr_key = res['section'] if res else None
-            else:
-                pool = sec_names
-                if _by_mgr:
-                    subset = (_by_mgr.get(_dl_norm(m.get('matched_name')))
-                              or _by_mgr.get(_dl_norm(match_input)))
-                    if subset:
-                        pool = subset
-                mgr_key = _match_mgr(match_input, pool)
+            display = m.get('matched_name') or m.get('weight_file_name') or '?'
+            res = _resolution.get(display)
+            mgr_key = res['section'] if res else None
             if mgr_key is None:
                 unmatched.append(m.get('matched_name') or m.get('name', '?'))
                 continue
@@ -583,7 +605,7 @@ def compute_exposures(
                     if _resolution is not None else None),
         'benchmark': {
             'matched_column':    benchmark_name,
-            'requested':         benchmark_name,
+            'requested':         requested_bench,
             'fallback_absolute': not bool(bench_abs),
             'available_columns': security_data.get('available_benchmarks', []),
         },

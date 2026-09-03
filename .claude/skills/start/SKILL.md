@@ -10,11 +10,17 @@ proxies every API call to it.
 
 ```
 backend   Flask + gunicorn-less dev server   http://127.0.0.1:3001
-frontend  Next.js dev server                 http://127.0.0.1:3000   ← open this one
+frontend  Next.js dev server                 http://localhost:3000   ← open this one
 database  Postgres (optional)                localhost:5432
 ```
 
-Open **http://127.0.0.1:3000**. Port 3001 serves the API, not the UI.
+Open **http://localhost:3000** — `localhost`, NOT `127.0.0.1`. Next 16 blocks
+dev resources for pages opened via `127.0.0.1` (cross-origin), so the app
+renders its empty server-HTML shell and never fetches data — looks like "no
+data" even though every curl check passes. `allowedDevOrigins` could allow it,
+but the decision (journal, 2026-08-04) is to keep the config untouched and use
+`localhost`. curl health checks against `127.0.0.1` are fine — only the
+browser URL matters. Port 3001 serves the API, not the UI.
 
 ## Step 0 — Database (optional, but do it if they want to edit clients)
 

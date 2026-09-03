@@ -10,20 +10,19 @@ import {
   ReportPerfTrailing,
   ReportQtrExcess,
 } from "../components/report-page3";
-import { PptxExportButton } from "../components/pptx-export-button";
 import { ReportExportCards } from "../components/report-export-cards";
 import { useReportScreen } from "../hooks/use-report-screen";
 import { buildReportView } from "../lib/build-report-view";
 
-// Printable portfolio report. Data flow:
-//   1. User picks a client from the dropdown in the report toolbar.
-//   2. Hook fans out fetches: /portfolio_report/<client> (cover + holdings +
-//      V-G + perf + complements), /compute_risk_exposures (FactSet risk),
-//      /market_cycle (Market Cycle), /risk_analysis (MCR),
-//      /portfolio_exposures × 4 (Region / Country / Sector / Industry).
-//   3. View-model layer merges real data with mock fallbacks (so sections
-//      whose backend data isn't loaded yet still render with realistic-
-//      looking placeholder content rather than empty boxes).
+// Report tab: the three export cards (Quarterly Portfolio Report PDF,
+// Dispersion Report, Returns Download).
+//
+// The on-screen "Default Portfolio Report" preview and its toolbar were
+// removed (user request, 2026-09-03) — BUT the report sheet itself must stay
+// mounted: the Quarterly Portfolio Report PDF is assembled by switching the
+// sheet through each selected client and html2canvas-capturing its sections
+// (PPTX_CAPTURE_TARGETS ids). It is therefore rendered off-screen below,
+// invisible to the user but fully laid out for capture.
 
 export function ReportRoute() {
   const { state, selectClient } = useReportScreen();
@@ -59,71 +58,12 @@ export function ReportRoute() {
       data-report-client={selectedClient ?? ""}
       data-report-loading={loading ? "1" : "0"}
     >
-      <div className="rpt-controls">
-        <div className="rpt-title-row">
-          <div>
-            <div className="rpt-title">Default Portfolio Report</div>
-            <div className="rpt-subtitle">
-              Select a client to load real data. Sections without uploaded
-              source files fall back to demo content. Page-3 &ldquo;Actual&rdquo; sections
-              need actual client track records — add a &ldquo;Client&rdquo; sheet to the
-              manager-returns workbook; without one, only &ldquo;Backtested&rdquo; is shown.
-            </div>
-          </div>
-          <div className="rpt-actions">
-            <select
-              value={selectedClient ?? ""}
-              onChange={(e) => e.target.value && selectClient(e.target.value)}
-              style={{
-                fontFamily: "var(--mono)",
-                fontSize: 12,
-                padding: "6px 10px",
-                background: "var(--surface)",
-                border: "1px solid var(--border)",
-                borderRadius: 3,
-                color: "var(--text)",
-              }}
-            >
-              <option value="">-- Select client --</option>
-              {clients.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              className="btn btn-outline btn-sm"
-              onClick={() => window.print()}
-            >
-              Print / Export PDF
-            </button>
-            <PptxExportButton
-              clientName={selectedClient}
-              benchmarkName={r.benchmark ?? null}
-            />
-          </div>
-        </div>
-      </div>
-
       <ReportExportCards
         client={selectedClient}
         clients={clients}
         onSelectClient={selectClient}
       />
 
-      {loading && (
-        <div
-          style={{
-            fontFamily: "var(--mono)",
-            fontSize: 10,
-            color: "var(--text3)",
-            marginBottom: 8,
-          }}
-        >
-          Loading report for {selectedClient}…
-        </div>
-      )}
       {(error || reportErr) && (
         <div
           style={{
@@ -137,6 +77,19 @@ export function ReportRoute() {
         </div>
       )}
 
+      {/* Off-screen capture surface for the Quarterly PDF export — keeps full
+          layout (920px sheet width) so html2canvas renders it correctly, but
+          is invisible and takes no space in the page flow. Do not unmount. */}
+      <div
+        aria-hidden="true"
+        style={{
+          position: "absolute",
+          left: -10000,
+          top: 0,
+          width: 920,
+          pointerEvents: "none",
+        }}
+      >
       <div className="rpt-sheet">
         <ReportCover data={r} />
         <div id="rpt-capture-portfolio-managers">
@@ -185,6 +138,7 @@ export function ReportRoute() {
           </h3>
           <ReportComplements cmp={r.complements_backtested} />
         </section>
+      </div>
       </div>
     </div>
   );

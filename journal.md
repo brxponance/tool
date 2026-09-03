@@ -4,6 +4,13 @@
 
 _Newest first. Add new entries directly below this index._
 
+- [2026-09-03 — Overlap tab removed from the nav (feature lives on in the Portfolio tab)](#2026-09-03--overlap-tab-removed-from-the-nav-feature-lives-on-in-the-portfolio-tab)
+- [2026-09-03 — Report tab reduced to the three export cards; hidden capture sheet kept for the Quarterly PDF](#2026-09-03--report-tab-reduced-to-the-three-export-cards-hidden-capture-sheet-kept-for-the-quarterly-pdf)
+- [2026-09-03 — "Atlantic Health Endowment- IMC" section recognized as ATL Health; stray placeholder eliminated](#2026-09-03--atlantic-health-endowment--imc-section-recognized-as-atl-health-stray-placeholder-eliminated)
+- [2026-09-03 — Memo exposures tables now reconcile with the Portfolio tab (shared matching)](#2026-09-03--memo-exposures-tables-now-reconcile-with-the-portfolio-tab-shared-matching)
+- [2026-09-03 — Word memo: chart-only market cycle, EAFE SC benchmark fixed, Description-tab write-ups](#2026-09-03--word-memo-chart-only-market-cycle-eafe-sc-benchmark-fixed-description-tab-write-ups)
+- [2026-09-03 — Manager Detail showed the wrong Empiric portfolio and benchmark; ownership resolution now runs without a client](#2026-09-03--manager-detail-showed-the-wrong-empiric-portfolio-and-benchmark-ownership-resolution-now-runs-without-a-client)
+- [2026-09-03 — The 127.0.0.1 "no data" gotcha struck again; start skill now says localhost](#2026-09-03--the-127001-no-data-gotcha-struck-again-start-skill-now-says-localhost)
 - [2026-08-13 — New Performance Attribution tab; contribution tables moved out of Portfolio](#2026-08-13--new-performance-attribution-tab-contribution-tables-moved-out-of-portfolio)
 - [2026-08-13 — Peer groups: multi-select; placeholder list cleaned (strategy-level 3yr rule); market-cycle split dots for remaining+added/removed](#2026-08-13--peer-groups-multi-select-placeholder-list-cleaned-strategy-level-3yr-rule-market-cycle-split-dots-for-remainingaddedremoved)
 - [2026-08-13 — Exposures "Unclassified" audit: header-vintage aliasing fixed; CALSTRS's 23% is a terminated cash-only sleeve](#2026-08-13--exposures-unclassified-audit-header-vintage-aliasing-fixed-calstrss-23-is-a-terminated-cash-only-sleeve)
@@ -24,7 +31,297 @@ _Newest first. Add new entries directly below this index._
 
 ---
 
-## 2026-08-13 — New Performance Attribution tab; contribution tables moved out of Portfolio
+## 2026-09-03 — Overlap tab removed from the nav (feature lives on in the Portfolio tab)
+
+The standalone Overlap tab duplicated the holdings-overlap section already
+embedded in the Portfolio tab. Removed: the `/overlap` nav entry
+(`lib/constants.ts` APP_NAV_ITEMS), the page route
+(`app/(workspace)/overlap/page.tsx`) and the standalone screen
+(`features/overlap/routes/overlap-route.tsx`).
+
+**Kept:** the rest of `features/overlap/` (components / api / types) — the
+Portfolio tab imports `OverlapSection` and `OverlapManagerInput` from it,
+per the bounded-feature rule (the Portfolio tab composes the overlap
+feature; only its standalone route was retired).
+
+Verified headed: nav reads Setup / Portfolio / Attribution / Peer Groups /
+Manager Detail / Report; `/overlap` returns 404; the Portfolio tab's
+overlap section still renders for ATL Health. Gotcha: `tsc --noEmit` kept
+failing on `.next/types/validator.ts` referencing the deleted page — a
+stale GENERATED file; deleting it (Next regenerates) cleared the
+typecheck. A fresh `next build` regenerates it from scratch, so deploys
+are unaffected.
+
+## 2026-09-03 — Report tab reduced to the three export cards; hidden capture sheet kept for the Quarterly PDF
+
+User request: keep Quarterly Portfolio Report, Dispersion Report and
+Returns Download untouched; remove the "Default Portfolio Report" toolbar
+at the top (title, client dropdown, Print/Export PDF, PPTX export) and the
+on-screen example report below.
+
+**The trap a future reader must not fall into:** the Quarterly Portfolio
+Report PDF is NOT server-rendered — `report-export-cards.tsx` switches the
+on-screen report sheet through each selected client (polling the route's
+`data-report-client` / `data-report-loading` attributes) and
+html2canvas-captures the sheet's `rpt-capture-*` sections page by page.
+Deleting the sheet kills the Quarterly PDF. So `report-route.tsx` keeps
+the full `.rpt-sheet` mounted but wrapped in an off-screen container
+(`position:absolute; left:-10000px; width:920px` — the sheet's natural
+max-width, so layout/capture geometry is unchanged), `aria-hidden`, no
+pointer events. The toolbar block, its client selector, `window.print()`
+button, `PptxExportButton` and the loading line were removed; the route
+error line stays. `use-report-screen` still auto-selects the first client
+so "None selected — exports the client on screen" keeps working.
+
+Verified headed: tab shows only the three cards; sheet mounted but not
+visible; clicked Download PDF and received a 390 KB
+`Quarterly_Portfolio_Report_2026-09-03.pdf` — off-screen capture works.
+
+## 2026-09-03 — "Atlantic Health Endowment- IMC" section recognized as ATL Health; stray placeholder eliminated
+
+User added an IMC EAFE SC portfolio to both FactSet workbooks as
+**"Atlantic Health Endowment- IMC"** (spelled-out account name, not the
+XPN…AHE coding; note no space before the dash). Two symptoms: the tool
+spawned a placeholder manager named after the section, and 'IMC EAFE SC'
+kept proxying to the standard-cap 'IMC Global' profile.
+
+Root cause was one gap with two effects: `holdings_resolver` didn't know
+the spelled-out prefix. `section_client` returned None (section unowned →
+resolver couldn't own-match it, class unknown) and `_SECTION_PREFIX`
+didn't strip it (firm key came out 'atlantic health endowment imc', so
+firm matching failed AND `_enumerate_placeholder_candidates`' firm
+suppression — which keys on prefix-stripped names — never engaged, so the
+raw section name surfaced as a placeholder).
+
+Fixes in `holdings_resolver.py`:
+- `section_client`: names starting with 'ATLANTIC HEALTH' → 'ATL Health'.
+- `_SECTION_PREFIX`: strips `Atlantic Health (Endowment)? -` decoration.
+- Tier-1 gating: with `client_name=None` (Manager Detail), tier 1 used to
+  treat unmarked profiles as authoritative with NO class gate — a
+  standard-cap 'IMC Global' would shadow the sleeve-compatible ATL
+  section. Tier 1 now applies only to a real client; unmarked profiles go
+  through class-gated tier 3 (plus the fuzzy safety net, so Oberweis /
+  Evolution Global-style solo matches still work — regression-checked).
+
+Verified: placeholder gone from /all_managers; 'IMC EAFE SC' resolves to
+the new section in every context (ATL client flow, Manager Detail, memo,
+risk file) with benchmark MSCI EAFE Small Cap; Empiric and the all-client
+benchmark sweep unchanged. Also caught a NameError my earlier
+`_match_managers_to_sections` refactor introduced (section_client import
+had moved out of compute_portfolio_exposures' override block).
+
+Gotcha for future uploads: new client-account section names must be
+recognizable to `section_client` / `_SECTION_PREFIX` — a spelling the
+resolver doesn't know reverts that section to unowned/UNKNOWN and it can
+resurface as a placeholder.
+
+## 2026-09-03 — Memo exposures tables now reconcile with the Portfolio tab (shared matching)
+
+User reconciled an ATL Health rebalance (terminate Lizard + Redwood,
+Frontier→18%, add Empiric 24.6% + IMC EAFE SC 8%) and the memo's Region /
+Sector weights disagreed wildly with the on-screen Portfolio Exposures
+table (memo pre-trade Pacific Rim 22.90 vs tool 31.5; pre-trade regions
+summed to ~76).
+
+### Root cause
+
+`build_memo_exposures` → `_aggregate_holdings` still did its own raw
+`_fuzzy_match_manager` matching (the memo path was never migrated to the
+ownership resolver). For ATL Health that meant: Ballina, CastleArk,
+Frontier AND Redwood all fuzzy-matched to `MD-CASTLEARK WORLD X US SC` —
+the first claimant won and the other three were **silently dropped**
+(the `sec in used` branch didn't even record them as unmatched); Lizard
+and Mac Alpha landed on MD's sleeves; Empiric on `New Haven - Empiric EM`.
+The memo also folded cash + missing tags into a hidden `--` bucket that
+stayed in the denominator but was skipped from display, so rows couldn't
+sum to 100.
+
+### Fix
+
+- Extracted the Portfolio tab's matching (ownership resolver + free-pool
+  fuzzy safety net) into `_match_managers_to_sections()` in
+  `exposures_engine.py`; `compute_portfolio_exposures` and
+  `build_memo_exposures` now share it verbatim. `_aggregate_holdings`
+  takes the precomputed match map and no longer matches anything itself.
+- `build_memo_exposures` takes `client_name` / `client_rosters` (passed
+  from `/export_portfolio_docx`), and returns `matched_sections` for
+  debuggability.
+- Memo group tables now use the same `Cash` / `Unclassified` buckets as
+  the on-screen table (`is_cash_row`; both pinned to the bottom, and kept
+  out of the Developed/Emerging split in nested mode).
+
+### Verified
+
+Offline side-by-side of both engines on the exact scenario: identical
+section matches, and every region/sector row agrees within ≤0.05
+(residue = the memo renormalises each sleeve to exactly 100% while the
+table uses raw section weights — rounding-level). Regenerated the docx:
+Pacific Rim 31.51 pre / 37.52 post, Industrials 27.75, Cash and
+Unclassified rows present, diffs vs the EAFE SC column correct.
+
+### Data note
+
+'IMC EAFE SC' has no small-cap section in the exposures workbook; both
+engines consistently fall back to the standard-cap 'IMC Global' profile
+(safety net over unowned sections). The 8% sleeve's exposures are IMC's
+standard-cap holdings until an SC portfolio is added to the FactSet pull.
+
+## 2026-09-03 — Word memo: chart-only market cycle, EAFE SC benchmark fixed, Description-tab write-ups
+
+Three user-requested changes to the Word rebalance memo ("Print Memo
+Report" on the Portfolio tab):
+
+1. **Market-cycle image is now the chart alone.** The memo embedded an
+   html2canvas capture of `#market-cycle-section` — the whole panel:
+   border, "Market Cycle Chart" title, benchmark caption top-right, and
+   the placement table below. The chart wrapper now carries its own id
+   (`#market-cycle-chart-only` in `market-cycle-section.tsx`) and
+   `export-docx.ts` captures that node (old id kept as fallback).
+   Verified headed: the element screenshot is the bare chart.
+
+2. **Pre/post-trade tables used the wrong benchmark for ATL Health.**
+   `_match_benchmark_section` was a bare WRatio-55 fuzzy match, so
+   'MSCI EAFE SC' landed on the 'MSCI EAFE' section instead of 'MSCI EAFE
+   Small Cap' — the memo's characteristics / region / sector tables
+   carried the standard-cap benchmark column labeled "EAFE". It now goes
+   through `_resolve_benchmark_name` (exact > normalized > fuzzy-80) with
+   the loose fuzzy only as a last resort. `_short_bench` already handled
+   the label — ATL Health's column header now reads **EAFE SC**.
+
+3. **New Managers write-ups now come from the Firm Data workbook's
+   "Description" tab** (firm in column A, prose in column B).
+   `parse_qualitative_file` only ever read the first sheet, and the
+   `rec.get('description')` the memo relied on was a field nothing ever
+   set — descriptions were always blank. The loader now also parses a
+   sheet named "Description(s)" into `qd['descriptions']`, and a new
+   `match_description()` (same longest-prefix rule as `match_firm`, so
+   'IMC ACWI ex US' finds 'IMC') feeds the memo; the old firm-record
+   field remains as fallback. Requires a Reload Inputs / re-upload for
+   the descriptions to enter the parsed state — done locally.
+
+Verified end-to-end by POSTing `/export_portfolio_docx` for ATL Health
+with Empiric added: docx contains the "EAFE SC" table header, "MSCI EAFE
+Small Cap" in the risk caption, and Empiric's full description under New
+Managers.
+
+## 2026-09-03 — Manager Detail showed the wrong Empiric portfolio and benchmark; ownership resolution now runs without a client
+
+User report: Manager Detail for Empiric (ISC tab — the ATL Health EAFE Small
+Cap account) showed FactSet Risk Exposures "vs MSCI ACWI ex US Small Cap" and
+a Portfolio Exposures table that was visibly a different portfolio, vs "MSCI
+All Country World Ex-United States". Standing user rule recorded here:
+**`XPN…AHE` sections in the FactSet risk/exposures workbooks are ATL Health,
+an EAFE Small Cap account — anything so designated is EAFE SC and belongs
+against the EAFE SC benchmark.**
+
+### Root causes (four, stacked)
+
+1. **Manager Detail bypassed ownership resolution entirely.** Its backend
+   calls pass no `client_name`, so both engines fell back to pure fuzzy
+   matching — which landed "Empiric" on `New Haven - Empiric EM`, a
+   different portfolio (the EM ADR sleeve). The correct sections
+   (`XPNEIAHE - Empiric`) existed in both workbooks.
+2. **Stale parse.** The pickled exposures parse predated the workbook
+   version that added `XPNEIAHE - Empiric`, so the right section wasn't
+   even a candidate until `/reload_inputs`. Related gap: `/reload_inputs`
+   never covered the security-risk file at all — it was the one input that
+   could only refresh via re-upload.
+3. **Hardcoded per-tab benchmark hint.** `mgrBenchmarkHint` (frontend) sends
+   "MSCI ACWI ex US Small Cap" for every ISC manager — right default for
+   most, wrong for a manager whose section is client-owned EAFE SC.
+4. **Risk endpoint used the hint verbatim.** No resolution against actual
+   Risk-Summary columns ("MSCI ACWI ex-US SC" ≠ hint spelling), so
+   `bench_abs` was empty and the panel silently rendered ABSOLUTE exposures
+   labeled as active-vs-benchmark.
+
+### What changed
+
+- `holdings_resolver.py`: new `CLIENT_DEFAULT_CLASS = {'ATL Health':
+  ('EAFE', 'SC')}` — AHE sections get a sleeve class even though neither
+  the coded name nor ATL Health's roster (which has no Empiric entry)
+  supplies one.
+- `exposures_engine.compute_portfolio_exposures` and
+  `security_risk_engine.compute_exposures`: ownership resolution now runs
+  with `client_name=None` too (tier 1 = unmarked profiles, tier 2 =
+  sleeve-compatible client sections), replacing the fuzzy-only no-client
+  path. Empiric/EAFE-tab (standard size, no section anywhere) now correctly
+  reports unmatched instead of borrowing the EM portfolio.
+- Benchmark for manager detail: exposures — when every matched section is
+  owned by one client AND that client's benchmark is sleeve-compatible with
+  the manager, the client benchmark overrides the tab hint (compatibility
+  gate added after the first attempt wrongly attached New Haven's ACWI-ex-US
+  client benchmark to its Empiric EM sleeve). Risk — requested bench now
+  resolves against actual columns: exact > the matched sections' own
+  "vs. <benchmark>" suffix > normalized match; `fallback_absolute` no longer
+  triggers for spelling differences.
+- `app.py`: `/portfolio_exposures` passes `client_benchmarks`;
+  `/reload_inputs` now re-parses the security-risk workbook too.
+- Responses now expose `matched_sections` (exposures) so which section fed a
+  table is checkable.
+
+### Verified
+
+Headed Playwright on Manager Detail for Empiric ISC: risk panel reads "vs
+MSCI EAFE Small Cap" with genuine active values; sector table vs MSCI EAFE
+Small Cap tracks tightly (Industrials 23.9% vs 23.8%) — clearly the right
+portfolio (the EM one had Consumer Staples at 32%). Regression-checked:
+ATL Health client flow unchanged; Empiric EM still resolves to the New Haven
+section; client-context risk path unchanged.
+
+### Follow-up: Portfolio tab checked, one more benchmark bug found and fixed
+
+Simulated "Add Manager → Empiric (ISC)" into MD, ATL Health and CIT
+portfolios: the ownership resolver picks `XPNEIAHE - Empiric` in every
+client context (tier own for ATL Health, tier peer elsewhere), and the
+table correctly stays on the CLIENT's benchmark. But the sweep exposed a
+pre-existing exposures-benchmark resolution bug: the normalizer lacked the
+'All Country World'/'AC World' → ACWI and 'USA' → 'US' canonicalisations,
+so **CIT ('MSCI ACWI ex-US SC') fuzzy-landed on the non-SC 'MSCI All
+Country World Ex-United States'** instead of 'MSCI AC World ex USA Small
+Cap'. Fixed `_resolve_benchmark_name` to build on
+`holdings_resolver._norm_bench` + 'usa'→'us'. First attempt regressed MD
+('MSCI World ex US SC' → WRatio substring pick of plain 'MSCI World');
+added the established World-ex-US ≈ EAFE+Canada equivalence, so MD now
+exact-matches 'MSCI EAFE + Canada Small Cap'. Verified benchmark
+resolution for all 14 clients — every one now lands on the semantically
+right column (exact normalized match everywhere except none).
+
+### Still open
+
+- The exposures file has no MSCI EM benchmark section, so "Empiric EM"'s
+  manager-detail exposures fall back to the file default (flagged
+  `benchmark_fallback`).
+- The user mentioned another suspected issue in the Portfolio Exposures
+  classification — not yet described.
+
+## 2026-09-03 — The 127.0.0.1 "no data" gotcha struck again; start skill now says localhost
+
+Started the app for a dev session; the user reported "no data" even though the
+backend had its full 125-manager cache and every curl check (backend `/status`,
+frontend proxy `/api/backend/clients`) returned 200 with data. Same root cause
+as journaled 2026-08-04: the start skill said to open **http://127.0.0.1:3000**,
+Next 16 treats that origin as cross-origin for dev resources, React never
+hydrates, and the page sits in its empty server-rendered shell. curl can't
+catch it — only a real browser shows it.
+
+### What went wrong on the first attempt
+
+Added `allowedDevOrigins: ["127.0.0.1"]` to `next.config.ts` before finding the
+2026-08-04 entry recording that this exact fix was proposed and **declined** —
+the standing decision is to keep the config untouched and use `localhost`.
+Reverted the config, restarted the dev server, and verified with visible
+Playwright (Edge, headed) that `/portfolio` renders the full manager table at
+**http://localhost:3000** with zero failed requests.
+
+### The durable fix
+
+[.claude/skills/start/SKILL.md](.claude/skills/start/SKILL.md) was the trap:
+it told every future session to open `127.0.0.1:3000`. It now says
+**localhost:3000**, explains why, and notes that curl checks against
+`127.0.0.1` are fine — only the browser URL matters. Also re-learned: a stale
+`next start`-style server can survive on port 3000 from a prior session, and
+killing the npm wrapper doesn't kill the child node process holding the port —
+check `netstat` and kill the actual PID.
 
 New nav tab **Attribution** (`/attribution`, eyebrow "Performance") — the
 future home of the quarterly attribution / benchmark theme discovery work

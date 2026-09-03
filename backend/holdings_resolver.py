@@ -39,6 +39,10 @@ def section_client(section_name):
     u = s.upper()
     if s.startswith('MD-'):
         return 'MD'
+    # Spelled-out ATL Health sections ('Atlantic Health Endowment- IMC') —
+    # newer uploads name the account in full instead of the XPN…AHE code.
+    if u.startswith('ATLANTIC HEALTH'):
+        return 'ATL Health'
     if u.startswith('CALSTRS'):
         return 'CALSTRS'
     if u.startswith('STLOUIS'):
@@ -71,11 +75,20 @@ def section_client(section_name):
     return None
 
 
+# Single-mandate clients: every section they own is this sleeve class, even
+# when neither the coded section name ('XPNEIAHE - Empiric') nor the client's
+# weights roster carries class tokens. User rule (2026-09-03): XPN…AHE =
+# ATL Health, an EAFE Small Cap account — anything with that designation is
+# EAFE SC and belongs against the EAFE SC benchmark.
+CLIENT_DEFAULT_CLASS = {'ATL Health': ('EAFE', 'SC')}
+
+
 # Leading client/account decoration stripped before firm-name extraction.
 _SECTION_PREFIX = re.compile(
     r'^\s*(MD|CALSTRS|STLOUIS|XPN[A-Z0-9]+|Microsoft|IMRF'
     r'|FIS\s+NonUS\s+Small\s+Cap\s+CIT|MASS\s+PRIM|NYSCRF(?:/XPONANCE)?'
-    r'|NYCBERS|NYSTRS|COB|New\s+Haven)\s*-\s*',
+    r'|NYCBERS|NYSTRS|COB|New\s+Haven'
+    r'|Atlantic\s+Health(?:\s+Endowment)?)\s*-\s*',
     re.IGNORECASE,
 )
 
@@ -273,6 +286,8 @@ def _index_section_names(section_names, client_rosters=None, clean=None):
                     if rcls[0] != 'UNKNOWN':
                         cls = rcls
                     break
+        if cls[0] == 'UNKNOWN' and owner in CLIENT_DEFAULT_CLASS:
+            cls = CLIENT_DEFAULT_CLASS[owner]
         index.append({'section': sec, 'cleaned': cleaned, 'owner': owner,
                       'firm': firm, 'class': cls})
     return index
@@ -310,7 +325,12 @@ def resolve_manager_section(weights_name, client_name, section_index,
 
     # Tier 1 — own client. No class gate (a client's own upload for the firm
     # is authoritative); class only disambiguates multiple own sleeves.
-    own = [e for e in same_firm if e['owner'] == client_name]
+    # Only applies to a real client: with client_name=None (Manager Detail),
+    # owner-None sections would match here ungated and a standard-cap
+    # unmarked profile ('IMC Global') would shadow a sleeve-compatible
+    # client section ('Atlantic Health Endowment- IMC', EAFE SC). Unmarked
+    # profiles get their class-gated shot in tier 3.
+    own = [e for e in same_firm if e['owner'] == client_name] if client_name else []
     if own:
         own.sort(key=lambda e: (class_distance(cls, e['class']) is None,
                                 class_distance(cls, e['class']) or 0))

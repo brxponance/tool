@@ -137,7 +137,9 @@ export function MarketCycleSection({ benchmark, loading, data }: MarketCycleSect
                 include them.
               </div>
             )}
-            <div style={{ padding: 12, background: "var(--surface)" }}>
+            {/* The memo export captures this node by id — chart only, no
+                panel chrome (border/title/benchmark) and no placement table. */}
+            <div id="market-cycle-chart-only" style={{ padding: 12, background: "var(--surface)" }}>
               <MarketCycleChart placements={combinedPlacements} portfolioKey="combined" />
             </div>
 

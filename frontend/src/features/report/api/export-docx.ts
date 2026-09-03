@@ -4,7 +4,10 @@ import { BACKEND_PROXY_BASE } from "@/lib/constants";
 // every panel — the memo is real editable text assembled server-side from the
 // loaded FactSet/qualitative files. The ONLY thing captured from the DOM is the
 // market-cycle chart, because it has no tabular equivalent.
-const MARKET_CYCLE_NODE_ID = "market-cycle-section";
+// Chart-only node (no panel border/title/benchmark caption and no placement
+// table); the full section id remains as a fallback for stale bundles.
+const MARKET_CYCLE_NODE_ID = "market-cycle-chart-only";
+const MARKET_CYCLE_FALLBACK_ID = "market-cycle-section";
 
 export type DocxManagerInput = {
   matched_name: string;
@@ -15,7 +18,9 @@ export type DocxManagerInput = {
 };
 
 async function captureMarketCycle(): Promise<string | null> {
-  const el = document.getElementById(MARKET_CYCLE_NODE_ID);
+  const el =
+    document.getElementById(MARKET_CYCLE_NODE_ID) ??
+    document.getElementById(MARKET_CYCLE_FALLBACK_ID);
   if (!el) return null;
   try {
     // Lazy-import so html2canvas stays out of the Portfolio route bundle.

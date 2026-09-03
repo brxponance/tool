@@ -108,6 +108,29 @@ def match_firm(strategy_name, qd):
     return best if best else (None, None)
 
 
+def match_description(manager_name, qd):
+    """Return the Description-tab write-up for a manager, or None.
+
+    Same prefix rule as match_firm: the manager's normalised name equals, or
+    begins with, a Description-tab firm name at a whole-token boundary —
+    'Empiric' matches 'Empiric'; 'IMC ACWI ex US' matches 'IMC'. Longest
+    firm name wins when several match.
+    """
+    descs = (qd or {}).get('descriptions') or {}
+    mn = _norm_name(manager_name)
+    if not descs or not mn:
+        return None
+    best, best_len = None, -1
+    for firm, text in descs.items():
+        fn = _norm_name(firm)
+        if not fn:
+            continue
+        if mn == fn or mn.startswith(fn + ' '):
+            if len(fn) > best_len:
+                best, best_len = text, len(fn)
+    return best
+
+
 def _to_float(v):
     if v is None:
         return None
@@ -132,12 +155,32 @@ def parse_qualitative_file(path, sheet_name=None):
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb[wb.sheetnames[0]]
     rows = list(ws.iter_rows(values_only=True))
+    # Firm write-ups live on a separate "Description" tab: manager/firm name
+    # in column A, prose description in column B. Used by the Word memo's
+    # New Managers section.
+    desc_rows = []
+    for sn in wb.sheetnames:
+        if _norm_hdr(sn) in ('description', 'descriptions'):
+            desc_rows = list(wb[sn].iter_rows(values_only=True))
+            break
     wb.close()
+
+    descriptions = {}
+    for row in desc_rows:
+        if not row or row[0] is None or len(row) < 2 or row[1] is None:
+            continue
+        name, text = str(row[0]).strip(), str(row[1]).strip()
+        if not name or not text:
+            continue
+        if _norm_hdr(text) == 'description':   # header row
+            continue
+        descriptions[name] = text
 
     warnings = []
     if not rows:
         return {'firms': {}, 'strategies': {}, 'columns': [],
                 'n_firms': 0, 'n_strategies': 0,
+                'descriptions': descriptions,
                 'warnings': ['Sheet is empty.']}
 
     # ── Locate the header row (first row that maps a name col + at least one
@@ -176,6 +219,7 @@ def parse_qualitative_file(path, sheet_name=None):
     if header_idx is None:
         return {'firms': {}, 'strategies': {}, 'columns': [],
                 'n_firms': 0, 'n_strategies': 0,
+                'descriptions': descriptions,
                 'warnings': ['Could not find a header row. Expected columns like '
                              '"Firm / Strategy", "Firm AUM", "Ownership", '
                              '"Diverse/Female Ownership %", "Strategy AUM" '
@@ -248,6 +292,7 @@ def parse_qualitative_file(path, sheet_name=None):
         'columns':      list(extra_cols.values()),
         'n_firms':      len(firms),
         'n_strategies': len(strategies),
+        'descriptions': descriptions,
         'warnings':     warnings,
     }
 
