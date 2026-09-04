@@ -182,3 +182,21 @@ export function effectiveManagerVG3F(map: BucketOverrideMap, manager: ManagerLik
 export function isManagerOverridden(map: BucketOverrideMap, manager: ManagerLike): boolean {
   return Boolean(map[overrideKey(manager.tab, manager.matched_name)]);
 }
+
+// Payload builder: the manager list with override-resolved buckets and
+// bucket-derived V-G, for endpoints that aggregate whatever the caller sends
+// (/compute_portfolio_stats — see get-portfolio-screen-data.getPortfolioStats).
+// Non-overridden managers pass through untouched so the server-computed V-G
+// (which includes non-bucket factor contribution) wins for them.
+export function applyBucketOverrides<T extends ManagerLike>(
+  map: BucketOverrideMap,
+  managers: T[],
+): T[] {
+  return managers.map((manager) => {
+    const override = map[overrideKey(manager.tab, manager.matched_name)];
+    if (!override) return manager;
+    const eff = mergeBucketOverride(manager.style_buckets, override);
+    const vg = vgFromBuckets(eff.buckets);
+    return { ...manager, style_buckets: eff.buckets, vg_full: vg, vg_3factor: vg };
+  });
+}

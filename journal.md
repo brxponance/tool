@@ -4,6 +4,11 @@
 
 _Newest first. Add new entries directly below this index._
 
+- [2026-09-04 — Tab switches keep session state: last client + unsaved edits (Portfolio), last selection (Peer Groups)](#2026-09-04--tab-switches-keep-session-state-last-client--unsaved-edits-portfolio-last-selection-peer-groups)
+- [2026-09-04 — Peer Groups bucket overrides now flow to the Portfolio tab (the store existed; the Portfolio side was never wired)](#2026-09-04--peer-groups-bucket-overrides-now-flow-to-the-portfolio-tab-the-store-existed-the-portfolio-side-was-never-wired)
+- [2026-09-04 — '1-yr Momentum' added to the exposures groupings (Portfolio + Manager Detail)](#2026-09-04--1-yr-momentum-added-to-the-exposures-groupings-portfolio--manager-detail)
+- [2026-09-04 — QTD/YTD were both hardcoded to 3 months; period windows now calendar-aware and label-honest](#2026-09-04--qtdytd-were-both-hardcoded-to-3-months-period-windows-now-calendar-aware-and-label-honest)
+- [2026-09-04 — Memo descriptions blank in production: parser change shipped without an INPUT_PARSER_VERSION bump](#2026-09-04--memo-descriptions-blank-in-production-parser-change-shipped-without-an-input_parser_version-bump)
 - [2026-09-03 — Overlap tab removed from the nav (feature lives on in the Portfolio tab)](#2026-09-03--overlap-tab-removed-from-the-nav-feature-lives-on-in-the-portfolio-tab)
 - [2026-09-03 — Report tab reduced to the three export cards; hidden capture sheet kept for the Quarterly PDF](#2026-09-03--report-tab-reduced-to-the-three-export-cards-hidden-capture-sheet-kept-for-the-quarterly-pdf)
 - [2026-09-03 — "Atlantic Health Endowment- IMC" section recognized as ATL Health; stray placeholder eliminated](#2026-09-03--atlantic-health-endowment--imc-section-recognized-as-atl-health-stray-placeholder-eliminated)
@@ -30,6 +35,174 @@ _Newest first. Add new entries directly below this index._
 - [2026-07-07 — Moved project off OneDrive to C:\dev\pc_tool (canonical working copy)](#2026-07-07-moved-project-off-onedrive-to-cdevpc_tool-canonical-working-copy)
 
 ---
+
+## 2026-09-04 — Tab switches keep session state: last client + unsaved edits (Portfolio), last selection (Peer Groups)
+
+Routes unmount on navigation, so the Portfolio tab reset to the first
+client (MD) and Peer Groups to EAFE Growth every time — losing in-progress
+weight edits along the way. User request: keep the last viewed
+portfolio/peer group and unsaved changes "in the cache until the end of my
+session" (not persisted).
+
+Pattern: module-level session stores, same as lib/state/bucket-overrides.
+
+- New `features/portfolio/lib/session-cache.ts`: last selected client +
+  per-client working manager list. `use-portfolio-screen` prefers the
+  remembered client over `clients[0]`, mirrors every portfolio change into
+  the cache (cloned both ways so nothing aliases), and on load restores the
+  cached working copy while `persistedPortfolioManagers` still comes from
+  the FRESH server response — so Save/Discard dirty-detection stays honest.
+  **Discard drops the cache first**, or the reload would restore the very
+  edits being discarded.
+- `use-peer-groups-screen`: module-level `lastSessionSelections` seeds the
+  selection state and is updated on every change.
+
+Scope notes: session-only (full page reload clears both); Manager Detail
+selection not included (not asked). Known edge: after a clone run in the
+same session, a cached working copy carries pre-run analytics values for
+its managers until Discard/reload — same staleness class as bucket
+overrides.
+
+Verified headed: ATL Health + an unsaved Ballina weight edit (20%) survive
+a round trip through Peer Groups; the peer-group selection (ISC Core)
+survives the trip back.
+
+### Follow-up bug (user-reported): client switches stopped switching the lineup
+
+First cut mirrored `state.portfolio` into the cache keyed by
+`state.selectedClient` in a plain effect — but mid-switch, selectedClient
+is already the NEW client while portfolio still holds the OLD one's data,
+so MD's managers got cached under IMRF and the loader faithfully
+"restored" them. Fix: new `portfolioClient` state field records which
+client the loaded portfolio belongs to (set in loadPortfolio's success
+path, nulled on failure), and the mirror writes only when
+`portfolioClient === selectedClient`. Verified headed: MD→IMRF swaps the
+lineup; IMRF's unsaved edit survives a Peer Groups round trip AND an
+MD detour; MD's lineup untouched. Lesson: never key a cache off two state
+fields that update in different render passes.
+
+## 2026-09-04 — Peer Groups bucket overrides now flow to the Portfolio tab (the store existed; the Portfolio side was never wired)
+
+User expectation (with an example: Empiric's 3F V-G reads +100%, they
+disagree and want to re-bucket it toward Core): style-bucket edits on the
+Peer Groups tab should filter through to the Portfolio Managers table.
+
+Finding: `lib/state/bucket-overrides.ts` was BUILT for exactly this — its
+header comment promises the flow to "manager table dots,
+/compute_portfolio_stats payloads, /market_cycle payloads" and it ships
+`effectiveManagerVG/VG3F/applyBucketOverrides`-style helpers — but only
+the Peer Groups feature ever imported it. The Portfolio tab never
+consumed the store; the plumbing stopped at the wall.
+
+### Wired
+
+- `portfolio-table.tsx`: the 3F V-G and FULL V-G cells use
+  `effectiveManagerVG3F` / `effectiveManagerVG` (bucket-derived V-G when an
+  override exists, server value otherwise), with an amber ● + tooltip on
+  overridden rows — same affordance Peer Groups uses.
+- `use-portfolio-screen.ts`: `/compute_portfolio_stats` payload passes
+  through new `applyBucketOverrides()` (store) so the V-G positioning
+  panel reflects the edits; the override map (identity changes per store
+  update) joined the derived-data effect deps, so edits re-fetch live.
+- NOT wired: `/market_cycle` — the endpoint classifies managers
+  server-side from clone data and ignores payload buckets, and the chart
+  has its own per-manager Final Bucket override; the store comment
+  overpromised there.
+
+Semantics: an override replaces BOTH V-G columns with (Value+Yield)−Growth
+of the merged buckets (the store's existing rule — non-overridden managers
+keep the server V-G, which includes non-bucket factor contribution).
+Overrides remain session-only and clear when a clone run completes.
+
+Verified headed end-to-end (and confirmed by the user in their own
+session): Peer Groups → ISC → Empiric → Core →100, then Portfolio →
+ATL Health → Add Manager → Empiric ISC: table row shows ● 0.0% / 0.0%
+V-G, stats recompute. Automation gotcha for future scripts: the override
+store is module-level session state — `page.goto` reloads wipe it, so
+navigate between tabs by clicking nav links.
+
+## 2026-09-04 — '1-yr Momentum' added to the exposures groupings (Portfolio + Manager Detail)
+
+The FactSet grouping-exposures workbook carries a `1-yr Momentum` column
+(percent trailing-12 price return per security) that the tool ignored —
+only RSI 63 / RSI 252 sat under Momentum. Added it to `exposures_engine`'s
+column config (CONTINUOUS_COLS, DISPLAY_LABELS '1yr Momentum', COL_GROUPS
+'Momentum', `_RANGE_FMT` as `x.x%`). One config feeds both tabs — the
+Portfolio tab's exposures table and Manager Detail's panel share the
+`/portfolio_exposures` menu — so no frontend change was needed.
+
+Gotcha encoded in the v3 INPUT_PARSER_VERSION comment: benchmark quintile
+breaks for continuous columns are computed AT PARSE TIME, so adding a
+column to CONTINUOUS_COLS needs a re-parse (locally: Reload Inputs, done;
+production: the pending v3 bump re-parses on deploy).
+
+Verified: menu lists it under Momentum on both tabs; Mode B for ATL Health
+gives sane quintiles (Q1 ≥ 62.7%, Q5 < −6.8%, benchmark coverage 98.2%,
+rows sum to 100 with Cash/Unclassified); Mode C (Sector × 1yr Momentum)
+renders on the Portfolio tab; Manager Detail quintile table renders for
+Empiric.
+
+## 2026-09-04 — QTD/YTD were both hardcoded to 3 months; period windows now calendar-aware and label-honest
+
+Manager Detail's Period Returns showed QTD == YTD. Root cause:
+`compute_manager_period_returns` (data_loader.py) computed BOTH as the
+compound of the latest 3 months, with a comment from when the data ended
+March 2026 ("end of Q1, so YTD = QTD"). Nothing looked at the calendar,
+and the caller never passed the dates it had. The June 2026 upload
+(latest month 2026-06-30) exposed it.
+
+### What changed
+
+- New `calendar_window_months(latest_date)` in `data_loader.py`:
+  QTD window = ((M−1) mod 3) + 1 months, YTD = M months, (3, 3) fallback
+  when no date is supplied. June → (3, 6); April → (1, 4).
+- `compute_manager_period_returns` takes `latest_date` (passed from
+  `/manager_skill_summary`'s inception-trimmed `dates[0]`).
+- Attribution contribution rows (`_build_portfolio_contribution_rows`,
+  app.py) use the same calendar-aware QTD — the old hardcoded 3 was only
+  right when data ended on a quarter boundary.
+- Period definitions tightened per user spec: 1yr = exactly trailing 12
+  months (plain compound — annualization at 12 months is the identity),
+  3yr/5yr = exactly trailing 36/60 annualized — `require_full=True`, so a
+  manager with 18 months no longer shows an annualized 18-month figure
+  labeled "3yr" (was allowed at n//2 months before; now None). QTD/YTD
+  stay lenient for near-inception managers. SI = every month since the
+  manager's own inception (the endpoint already trims manager, clone AND
+  benchmark to that inception), annualized at ≥ 12 months.
+
+### Verified
+
+Empiric ISC vs manual compounds from the raw workbook: QTD 7.91 (Apr–Jun),
+YTD 3.68 (Jan–Jun), 1yr 15.47 — exact match; UI shows QTD 7.9% / YTD 3.7%
+(benchmark 9.0/7.6). Attribution endpoint healthy; June being a
+quarter-end means its QTD numbers are unchanged today, but April/May
+uploads now produce 1- and 2-month QTDs instead of silently reaching into
+the prior quarter.
+
+## 2026-09-04 — Memo descriptions blank in production: parser change shipped without an INPUT_PARSER_VERSION bump
+
+User ran an ATL Health rebalance memo (Empiric + IMC EAFE SC added) on the
+DEPLOYED tool and the New Managers firm write-ups were blank, despite the
+2026-09-03 fix. The code was live (the memo's EAFE SC benchmark fix showed
+correctly) — the DATA wasn't: yesterday's change made
+`parse_qualitative_file` read the Firm Data workbook's "Description" tab,
+which changes the parser's OUTPUT shape, but the deploy didn't bump
+`INPUT_PARSER_VERSION`. Production booted, loaded the pickled cache
+(written by parser v2, matching the current constant), saw nothing stale,
+and served the old qualitative parse with no `descriptions` key.
+
+Fix, both halves:
+- Immediate: POSTed production `/reload_inputs` — all five inputs
+  re-parsed ok; regenerated the memo through the ALB and both write-ups
+  (Empiric Institutional…, Informed Momentum…) now populate.
+- Durable: `INPUT_PARSER_VERSION` bumped 2 → 3 in `backend/app.py` so any
+  environment holding an old cache re-parses automatically on next boot.
+
+**Rule re-learned (now noted at the constant):** bump the version whenever
+a parser's output shape changes — new keys count, not just changes to how
+the input file is read. The 2026-09-03 session also added the
+security-risk file to `/reload_inputs`; that gap plus the missing bump
+were the two halves of the same blind spot.
 
 ## 2026-09-03 — Overlap tab removed from the nav (feature lives on in the Portfolio tab)
 

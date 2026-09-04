@@ -56,12 +56,22 @@ export type Selection = { tab: string; style: PeerStyle };
 
 const selKey = (s: Selection) => `${s.tab}|${s.style}`;
 
+// Session memory: the last viewed peer-group selection survives tab switches
+// (module scope, like lib/state/bucket-overrides — cleared only by a full
+// page reload). Coming back to this tab reopens what was open, instead of
+// resetting to EAFE Growth.
+let lastSessionSelections: Selection[] | null = null;
+
 export function usePeerGroupsScreen() {
   // Multiple peer groups can be viewed at once (e.g. EAFE Growth + EAFE
   // Core). Buttons toggle selections; the tables show the union.
-  const [selections, setSelections] = useState<Selection[]>([
-    { tab: "EAFE", style: "Growth" },
-  ]);
+  const [selections, setSelections] = useState<Selection[]>(
+    () => lastSessionSelections ?? [{ tab: "EAFE", style: "Growth" }],
+  );
+
+  useEffect(() => {
+    lastSessionSelections = selections;
+  }, [selections]);
   const [dataByTab, setDataByTab] = useState<Record<string, PeerGroupsResponse>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);

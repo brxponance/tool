@@ -2,6 +2,19 @@
 
 import { startTransition, useEffect, useEffectEvent, useRef, useState } from "react";
 import type { BackendStatus } from "@/features/setup/types";
+import {
+  applyBucketOverrides,
+  getBucketOverrideMap,
+  useBucketOverrideMap,
+} from "@/lib/state/bucket-overrides";
+
+import {
+  cachePortfolioManagers,
+  dropCachedPortfolioManagers,
+  getCachedPortfolioManagers,
+  getLastPortfolioClient,
+  rememberPortfolioClient,
+} from "../lib/session-cache";
 
 import {
   createClient,
@@ -49,6 +62,11 @@ type PortfolioScreenState = {
   status: BackendStatus | null;
   selectedClient: string | null;
   portfolio: PortfolioResponse | null;
+  // Which client `portfolio` was loaded for. During a client switch,
+  // selectedClient points at the NEW client while portfolio still holds the
+  // OLD one's data — the session-cache mirror must only write when these
+  // match, or one client's lineup gets cached (and restored) under another.
+  portfolioClient: string | null;
   stats: PortfolioStats | null;
   riskExposures: RiskExposuresResponse | null;
   riskAnalysis: RiskAnalysisResponse | null;
@@ -77,6 +95,7 @@ const initialState: PortfolioScreenState = {
   status: null,
   selectedClient: null,
   portfolio: null,
+  portfolioClient: null,
   stats: null,
   riskExposures: null,
   riskAnalysis: null,
@@ -392,7 +411,10 @@ export function usePortfolioScreen() {
         marketCycleResult,
         exposuresResult,
       ] = await Promise.allSettled([
-        getPortfolioStats(portfolio.managers),
+        // Stats aggregate whatever V-G / buckets the payload carries, so send
+        // the override-resolved managers — Peer Groups bucket edits flow into
+        // the V-G positioning numbers (bucket-overrides store).
+        getPortfolioStats(applyBucketOverrides(getBucketOverrideMap(), portfolio.managers)),
         status.has_security_risk || status.has_risk
           ? getPortfolioRiskExposures(client, portfolio.managers, status.has_security_risk)
           : Promise.resolve(null),
@@ -469,7 +491,13 @@ export function usePortfolioScreen() {
         // only the current value; never let it break client loading.
         getBenchmarkCatalog().catch(() => ({ benchmarks: [] as string[] })),
       ]);
-      const selectedClient = clientsData.clients[0] ?? null;
+      // Prefer the client last viewed this session (survives tab switches);
+      // fall back to the roster's first client on a fresh session.
+      const remembered = getLastPortfolioClient();
+      const selectedClient =
+        remembered && clientsData.clients.includes(remembered)
+          ? remembered
+          : clientsData.clients[0] ?? null;
 
       setState((current) => ({
         ...current,
@@ -528,10 +556,19 @@ export function usePortfolioScreen() {
         return;
       }
 
+      // Session cache: restore the working copy (unsaved edits) for this
+      // client if one exists. The persisted snapshot always comes from the
+      // fresh server response, so Save/Discard dirty-detection stays honest.
+      const cachedManagers = getCachedPortfolioManagers(client);
+      const workingPortfolio = cachedManagers
+        ? { ...portfolio, managers: clonePortfolioManagers(cachedManagers) }
+        : portfolio;
+
       setState((current) => ({
         ...current,
         status,
-        portfolio,
+        portfolio: workingPortfolio,
+        portfolioClient: client,
         persistedPortfolioManagers: clonePortfolioManagers(portfolio.managers),
         exposureMenu,
         selectedExposureGrouping,
@@ -543,6 +580,7 @@ export function usePortfolioScreen() {
       setState((current) => ({
         ...current,
         portfolio: null,
+        portfolioClient: null,
         stats: null,
         riskExposures: null,
         riskAnalysis: null,
@@ -603,8 +641,34 @@ export function usePortfolioScreen() {
       return;
     }
 
+    rememberPortfolioClient(state.selectedClient);
     loadSelectedPortfolio(state.selectedClient);
   }, [state.selectedClient]);
+
+  // Mirror the working portfolio into the session cache on every change, so
+  // navigating away and back restores unsaved edits (weights, added/removed
+  // managers). Cloned so later state mutations can't alias the cache. The
+  // portfolioClient guard matters: mid-switch, selectedClient is already the
+  // new client while portfolio still holds the old one's data — writing then
+  // would cache client A's lineup under client B and the loader would
+  // faithfully "restore" it.
+  useEffect(() => {
+    if (
+      state.selectedClient &&
+      state.portfolio &&
+      state.portfolioClient === state.selectedClient
+    ) {
+      cachePortfolioManagers(
+        state.selectedClient,
+        clonePortfolioManagers(state.portfolio.managers),
+      );
+    }
+  }, [state.selectedClient, state.portfolio, state.portfolioClient]);
+
+  // Style-bucket overrides from the Peer Groups tab feed the stats payload;
+  // the map's identity changes on every store update, so using it as a dep
+  // re-runs the derived fetches when an override is added, edited or cleared.
+  const bucketOverrideMap = useBucketOverrideMap();
 
   useEffect(() => {
     if (!state.selectedClient || !state.portfolio || !state.status) {
@@ -630,6 +694,7 @@ export function usePortfolioScreen() {
     state.selectedExposureGrouping,
     state.selectedExposureSubGrouping,
     state.status,
+    bucketOverrideMap,
   ]);
 
   // "Dirty" when the current portfolio differs from what's persisted in the
@@ -675,8 +740,11 @@ export function usePortfolioScreen() {
     },
     discardChanges() {
       // Reload from the backend, dropping in-memory edits back to the saved
-      // version. loadPortfolio resets persistedPortfolioManagers too.
+      // version. loadPortfolio resets persistedPortfolioManagers too. The
+      // session cache must go first or the reload would restore the very
+      // edits being discarded.
       if (state.selectedClient) {
+        dropCachedPortfolioManagers(state.selectedClient);
         void loadPortfolio(state.selectedClient);
       }
     },

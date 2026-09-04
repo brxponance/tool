@@ -56,7 +56,15 @@ os.makedirs(os.path.dirname(app.config['CACHE_FILE']), exist_ok=True)
 #   1 = pre-versioning caches (no stamp)
 #   2 = exposures parse gained Region/Country as categoricals + derived
 #       'Market Development'; weights parse gained client total AUM
-INPUT_PARSER_VERSION = 2
+#   3 = qualitative parse gained the "Description" tab (firm write-ups for
+#       the Word memo's New Managers section). The 2026-09-03 deploy shipped
+#       that parser change WITHOUT bumping this, so production kept serving
+#       the stale cached parse and memo descriptions stayed blank until a
+#       manual /reload_inputs — bump this whenever a parser's OUTPUT shape
+#       changes, not just its input format. Also covers '1-yr Momentum'
+#       joining CONTINUOUS_COLS (its quintile breaks are computed at parse
+#       time, so an old cached parse has none).
+INPUT_PARSER_VERSION = 3
 
 state = {
     'clone_results': None, 'manager_dfs': None, 'weights': None,
@@ -1614,7 +1622,12 @@ def _build_portfolio_contribution_rows(managers):
             'benchmark_name': bench_name,
             'vg_full': m.get('vg_full', d.get('vg_full', 0)),
         }
-        for label, n in [('qtd', 3), ('t1', 12), ('t3', 36)]:
+        # QTD window from the series' own latest month — hardcoding 3 is only
+        # right when the data ends on a quarter boundary (see
+        # data_loader.calendar_window_months).
+        from data_loader import calendar_window_months
+        n_qtd, _ = calendar_window_months(dates[0] if dates else None)
+        for label, n in [('qtd', n_qtd), ('t1', 12), ('t3', 36)]:
             mr, be, ps, sk = period_stats(mgr_rets, clone_rets, bench_rets, n)
             row[f'{label}_mgr'] = round(mr * 100, 4) if mr is not None else None
             row[f'{label}_bench'] = round(be * 100, 4) if be is not None else None
@@ -2177,7 +2190,9 @@ def manager_skill_summary(tab, mgr_name):
 
     skill_periods  = compute_skill_periods(mgr_rets, clone_rets)
     cumulative     = compute_cumulative_skill(mgr_rets, clone_rets)
-    period_returns = compute_manager_period_returns(mgr_rets, clone_rets, bench_rets)
+    period_returns = compute_manager_period_returns(
+        mgr_rets, clone_rets, bench_rets,
+        latest_date=dates[0] if dates else None)
 
     return jsonify({
         'name': mgr_name, 'tab': tab,

@@ -1,6 +1,12 @@
 import { Fragment, useEffect, useState } from "react";
 
 import { useConfirm } from "@/components/layout/confirm-dialog";
+import {
+  effectiveManagerVG,
+  effectiveManagerVG3F,
+  isManagerOverridden,
+  useBucketOverrideMap,
+} from "@/lib/state/bucket-overrides";
 import { formatDollars, formatNumber, formatPercent } from "@/lib/utils";
 
 import type {
@@ -339,6 +345,8 @@ export function PortfolioTable({
 }: PortfolioTableProps) {
   const [draftWeights, setDraftWeights] = useState<Record<string, string>>(() => draftWeightsFor(managers));
   const [editingPlaceholder, setEditingPlaceholder] = useState<PortfolioManager | null>(null);
+  // Peer Groups style-bucket overrides — reactive so V-G cells update live.
+  const bucketOverrides = useBucketOverrideMap();
   // Manager keys whose firm/strategy detail strip is expanded.
   const [openQualRows, setOpenQualRows] = useState<Set<string>>(() => new Set());
   const { confirm, dialog } = useConfirm();
@@ -426,8 +434,11 @@ export function PortfolioTable({
                 </td>
               </tr>
             ) : managers.map((manager) => {
-              const vg3 = manager.vg_3factor ?? 0;
-              const full = manager.vg_full ?? 0;
+              // Style-bucket overrides from the Peer Groups tab: when one is
+              // active, both V-G columns show the bucket-derived value.
+              const vg3 = effectiveManagerVG3F(bucketOverrides, manager);
+              const full = effectiveManagerVG(bucketOverrides, manager);
+              const overridden = isManagerOverridden(bucketOverrides, manager);
               const nsZ = manager.ns_z;
               const managerKey = `${manager.tab}::${manager.matched_name}`;
               const currentDraft = draftWeights[managerKey] ?? proposedWeightLabel(manager);
@@ -568,7 +579,17 @@ export function PortfolioTable({
                       </td>
                     </>
                   ) : null}
-                  <td className={`mono ${vg3Class}`}>{formatPercent(vg3)}</td>
+                  <td className={`mono ${vg3Class}`}>
+                    {overridden && (
+                      <span
+                        title="Style buckets overridden on the Peer Groups tab — V-G recomputed from the edited buckets"
+                        style={{ color: "var(--amber)", marginRight: 3 }}
+                      >
+                        ●
+                      </span>
+                    )}
+                    {formatPercent(vg3)}
+                  </td>
                   <td className={`mono ${fullClass}`}>{formatPercent(full)}</td>
                   <td className={`mono ${nsClass}`}>{nsZ == null ? "--" : `${nsZ >= 0 ? "+" : ""}${formatNumber(nsZ, 2)}`}</td>
                   <td>

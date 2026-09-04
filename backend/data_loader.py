@@ -1774,19 +1774,53 @@ def compute_cumulative_skill(mgr_returns, clone_returns):
     return [round(v * 100, 4) for v in cum_excess]  # in percentage points
 
 
-def compute_manager_period_returns(mgr_returns, clone_returns, benchmark_returns):
+def calendar_window_months(latest_date):
+    """(months_into_quarter, months_into_year) for the month-end date the
+    return series ends on. QTD spans the months since the current quarter
+    began — ((M-1) mod 3) + 1 — and YTD the months since January — M. The
+    two coincide only in Q1. Falls back to (3, 3) when the date is missing
+    or unparseable (the pre-2026-09 hardcode, correct only for Q1 data)."""
+    if latest_date is not None:
+        try:
+            m = int(pd.Timestamp(latest_date).month)
+            return ((m - 1) % 3) + 1, m
+        except (TypeError, ValueError):
+            pass
+    return 3, 3
+
+
+def compute_manager_period_returns(mgr_returns, clone_returns, benchmark_returns,
+                                   latest_date=None):
     """
     Compute standard period returns for manager, clone, and benchmark.
     Returns dict with qtd, ytd, t1, t3, t5, si for each.
     Most recent index = 0. All annualized where >= 12 months.
+
+    latest_date: the month-end date of index 0 — QTD/YTD window lengths are
+    derived from it (June data → QTD = Apr-Jun, YTD = Jan-Jun). Without it
+    both fall back to the last 3 months, which is only right in Q1.
     """
-    def period(rets, n):
+    n_qtd, n_ytd = calendar_window_months(latest_date)
+
+    def period(rets, n, require_full=False):
+        """Compound of the trailing n months. require_full makes the label
+        honest: 'Trailing 3yr' must be exactly 36 months — a manager with a
+        shorter history shows None rather than an 18-month number dressed up
+        as a 3-year one. QTD/YTD stay lenient (a near-inception manager can
+        legitimately have a partial quarter/year). Annualized at >= 12
+        months (identity for the 12-month window)."""
         vals = [v for v in rets[:n] if v is not None and not np.isnan(float(v))]
-        if len(vals) < max(1, n // 2): return None
+        if require_full:
+            if len(vals) < n:
+                return None
+        elif len(vals) < max(1, n // 2):
+            return None
         tot = compound_return(vals)
         return annualize(tot, len(vals)) if len(vals) >= 12 else tot
 
     def si_ret(rets):
+        # Since inception: every month from the series' own start (callers
+        # trim to the manager's inception). Annualized once >= 12 months.
         vals = [v for v in rets if v is not None and not np.isnan(float(v))]
         if not vals: return None
         tot = compound_return(vals)
@@ -1795,11 +1829,11 @@ def compute_manager_period_returns(mgr_returns, clone_returns, benchmark_returns
     result = {}
     for label, rets in [('mgr', mgr_returns), ('clone', clone_returns), ('bench', benchmark_returns)]:
         result[label] = {
-            'qtd': period(rets, 3),
-            'ytd': period(rets, 3),   # Mar 2026 = end of Q1, so YTD = QTD
-            't1':  period(rets, 12),
-            't3':  period(rets, 36),
-            't5':  period(rets, 60),
+            'qtd': period(rets, n_qtd),
+            'ytd': period(rets, n_ytd),
+            't1':  period(rets, 12, require_full=True),
+            't3':  period(rets, 36, require_full=True),
+            't5':  period(rets, 60, require_full=True),
             'si':  si_ret(rets),
         }
     return result
