@@ -83,35 +83,6 @@ export const MACRO_VIEWS: MacroView[] = [
     rationale: "Low-volatility quality is crowded and expensive." },
 ];
 
-// ── Example exposure risks ──────────────────────────────────────────────
-// Shown on a client's risk page when the exposures workbook carries no
-// sector / industry data (true for every client today), so the layout can
-// be agreed. Written the way a real row should read: the bucket where the
-// bet actually sits, not just the country.
-export type ExampleExposureRisk = {
-  label: string; // "United States — Information Technology"
-  kind: "Country" | "Region" | "Sector" | "Industry";
-  portfolio: number; // %
-  benchmark: number; // %
-  detail: string; // what the bet really is
-  drivers: { name: string; contribution: number }[]; // pp
-};
-
-export const EXAMPLE_EXPOSURE_RISKS: ExampleExposureRisk[] = [
-  { label: "United States — Information Technology", kind: "Country",
-    portfolio: 3.2, benchmark: 9.8,
-    detail: "The US underweight (−8.1 pp) is really a tech underweight: −6.6 pp in IT, of which −4.9 pp is semiconductors.",
-    drivers: [{ name: "Mac Alpha", contribution: 2.1 }, { name: "Hillsdale EAFE Small Cap", contribution: 1.1 }] },
-  { label: "Europe Core — Software & Services", kind: "Region",
-    portfolio: 6.9, benchmark: 2.6,
-    detail: "European software overweight concentrated in two managers; +4.3 pp of the +5.0 pp Europe Core overweight.",
-    drivers: [{ name: "Bayard", contribution: 2.4 }, { name: "Osmosis", contribution: 1.9 }] },
-  { label: "Japan — Technology Hardware & Equipment", kind: "Country",
-    portfolio: 1.8, benchmark: 4.9,
-    detail: "Japan is near-benchmark overall (−2.6 pp) but −3.1 pp in tech hardware, offset by +2.0 pp in industrials.",
-    drivers: [{ name: "CastleArk EAFE SC", contribution: 1.2 }, { name: "Ballina", contribution: 0.6 }] },
-];
-
 // ── Illustrative stress assumptions ─────────────────────────────────────
 // Used to put every active bet on one scale. Deliberately simple: a
 // relative move applied to the active weight (weights) or to the active

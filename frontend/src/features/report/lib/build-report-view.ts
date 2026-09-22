@@ -144,29 +144,17 @@ function topOwUw(
   };
 }
 
-export type ExposureGroupKey = "region" | "country" | "sector" | "industry";
+const EMPTY_GROUP = { ow: [], uw: [] };
 
-function realExposures(
-  exposures: ExposuresPack,
-): { data: ReportMockData["exposures"]; example: ExposureGroupKey[] } | null {
-  const r = topOwUw(exposures.Region);
-  const c = topOwUw(exposures.Country);
-  const s = topOwUw(exposures.Sector);
-  const i = topOwUw(exposures.Industry);
-  if (!r && !c && !s && !i) return null;
-  const example: ExposureGroupKey[] = [];
-  if (!r) example.push("region");
-  if (!c) example.push("country");
-  if (!s) example.push("sector");
-  if (!i) example.push("industry");
+// Real data only. A grouping with nothing usable renders as an empty card —
+// never as mock numbers, because a plausible invented exposure in a client
+// report is worse than a blank one.
+function realExposures(exposures: ExposuresPack): ReportMockData["exposures"] {
   return {
-    data: {
-      region:   r ?? REPORT_MOCK.exposures.region,
-      country:  c ?? REPORT_MOCK.exposures.country,
-      sector:   s ?? REPORT_MOCK.exposures.sector,
-      industry: i ?? REPORT_MOCK.exposures.industry,
-    },
-    example,
+    region: topOwUw(exposures.Region) ?? EMPTY_GROUP,
+    country: topOwUw(exposures.Country) ?? EMPTY_GROUP,
+    sector: topOwUw(exposures.Sector) ?? EMPTY_GROUP,
+    industry: topOwUw(exposures.Industry) ?? EMPTY_GROUP,
   };
 }
 
@@ -234,9 +222,6 @@ function realComplements(c: RealComplements | undefined): ReportMockComplements 
 // ── Top-level: merge real data with mock fallbacks ───────────────────────
 export type ReportView = {
   data: ReportMockData;
-  // Exposure cards showing example rows because the client has no data for
-  // that grouping (today: sector + industry for every client).
-  exampleExposures: ExposureGroupKey[];
   // True for sections that fell back to mock content because real data
   // wasn't available (e.g. no FactSet exposures file uploaded yet).
   realSections: {
@@ -300,11 +285,12 @@ export function buildReportView({
   const factset_risk = realRisk ?? REPORT_MOCK.factset_risk;
 
   // Exposures
-  const realExp = realExposures(exposures);
-  const expData = realExp?.data ?? REPORT_MOCK.exposures;
-  const exampleExposures: ExposureGroupKey[] = realExp
-    ? realExp.example
-    : ["region", "country", "sector", "industry"];
+  const expData = realExposures(exposures);
+  const haveExposures =
+    expData.region.ow.length > 0 ||
+    expData.country.ow.length > 0 ||
+    expData.sector.ow.length > 0 ||
+    expData.industry.ow.length > 0;
 
   // Market Cycle
   const realMc = realMarketCycle(marketCycle);
@@ -342,14 +328,13 @@ export function buildReportView({
 
   return {
     data,
-    exampleExposures,
     realSections: {
       holdings: haveReport && (report!.managers?.length ?? 0) > 0,
       portfolio_vg: haveReport,
       portfolio_edge: !!portfolio_edge,
       diverse_ownership: !!diverse_ownership,
       factset_risk: !!realRisk,
-      exposures: !!realExp,
+      exposures: haveExposures,
       market_cycle: !!realMc,
       mcr: !!realM,
       perf_backtested: !!realP,

@@ -1444,6 +1444,7 @@ select:focus {
 #page-reports .rpt-exp-sub.uw { color: var(--green); }
 #page-reports .rpt-exp-sub.ow { color: var(--red); }
 #page-reports .rpt-exp-active { font-weight: 600; }
+#page-reports .rpt-exp-empty { font-family: var(--mono); font-size: 10px; color: var(--text3); padding: 12px 10px; font-style: italic; }
 
 #page-reports .rpt-perf-table,
 #page-reports .rpt-qtr-table,
@@ -1548,3 +1549,5 @@ select:focus {
 /* rev 5 */
 
 /* rev 7 */
+
+/* rev 9 */

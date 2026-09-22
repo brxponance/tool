@@ -4,6 +4,7 @@
 
 _Newest first. Add new entries directly below this index._
 
+- [2026-09-22 — Report exposures were asking for a display label, not a column name (Sector/Industry silently empty)](#2026-09-22--report-exposures-were-asking-for-a-display-label-not-a-column-name-sectorindustry-silently-empty)
 - [2026-09-22 — Interim shared-password gate in front of the whole tool](#2026-09-22--interim-shared-password-gate-in-front-of-the-whole-tool)
 - [2026-09-09 — Quarterly Review build-out: skill + DWBE block, client guidelines, Peer Group report, landscape, risk page, front matter](#2026-09-09--quarterly-review-build-out-skill--dwbe-block-client-guidelines-peer-group-report-landscape-risk-page-front-matter)
 - [2026-09-09 — Quarterly PDF now captures the whole report sheet (two pages; market cycle + MCR dropped), not the five PPTX crops](#2026-09-09--quarterly-pdf-now-captures-the-whole-report-sheet-two-pages-market-cycle--mcr-dropped-not-the-five-pptx-crops)
@@ -38,6 +39,106 @@ _Newest first. Add new entries directly below this index._
 - [2026-07-07 — Moved project off OneDrive to C:\dev\pc_tool (canonical working copy)](#2026-07-07-moved-project-off-onedrive-to-cdevpc_tool-canonical-working-copy)
 
 ---
+
+## 2026-09-22 — Report exposures were asking for a display label, not a column name (Sector/Industry silently empty)
+
+### The bug, and why it cost a fortnight of scaffolding
+
+The Quarterly Report's Sector and Industry cards, and the exposure half of
+the "six largest active risks", had been showing **example content** since
+2026-09-09. I had concluded the FactSet exposures workbook carried no GICS
+data. **That was wrong.** The data was there the whole time; the report was
+asking for it by the wrong name.
+
+`POST /portfolio_exposures` matches `grouping` against the **raw FactSet
+column name** and has no label lookup and no unknown-column guard
+(`backend/exposures_engine.py:427` `_portfolio_exposure`; `CATEGORICAL_COLS`
+at `:37-42`). The real columns are `GICS Sector` / `GICS Industry`;
+`Sector` / `Industry` are display labels only (`DISPLAY_LABELS`, `:86-87`).
+
+Passing `"Sector"` misses the categorical branch, falls through to the
+quintile path, `quintile_breaks.get('Sector')` is None, every security is
+assigned `Unclassified`, the empty quintile buckets are dropped by the
+`< 0.001` filter, and the response is **exactly Cash + Unclassified** with
+`is_categorical: false`. HTTP 200, no error, looks plausible. That is the
+whole failure.
+
+`Region` and `Country` worked only because those *are* the literal column
+names. The Portfolio tab was never affected: it sends the menu's `col`
+field, not `label` (`portfolio-exposures-section.tsx:303-307`).
+
+**Lesson:** when a response is well-formed but semantically empty, check the
+request vocabulary before concluding the data is missing. One `curl` with
+`"GICS Sector"` would have saved the entire example-content detour.
+
+### Second finding: the nested fetch could never have worked
+
+The report also called `{grouping:"Country", sub_grouping:"Sector"}` hoping
+for a country-by-sector breakdown. Nesting requires the sub-grouping to be
+**continuous** (`exposures_engine.py:785-789`); categorical × categorical is
+not implemented anywhere, so children were never produced and the call
+silently degraded to a plain Country table. Deleted. The underlying data
+would support a cross-tab — every security record carries both `GICS Sector`
+and `GICS Industry` (`exposures_engine.py:211-214`) — but that needs new
+engine code and the user deferred it.
+
+### Changed
+
+- `use-report-screen.ts`: sends `"GICS Sector"` / `"GICS Industry"`, for the
+  portfolio-level fetches **and** the per-manager "driven by" fetches (which
+  were also returning nothing for those two groupings). Dead `CountrySector`
+  fetch and its `ExposuresPack` field removed. Comment at the call site says
+  these are column names, not labels — do not "tidy" them.
+- `client-risk.ts`: `nestedExposureRisks` and the `EXAMPLE_EXPOSURE_RISKS`
+  fallback deleted. `topActiveRisks` now returns the three largest real
+  Country / Sector / Industry bets. **Region is excluded** from that ranking
+  because it is a coarser roll-up of Country and would list the same money
+  twice; it still appears in the exposure cards.
+- Factor floor **0.15 → 0.05**. CALSTRS has only two tilts above 0.15, so a
+  section titled "six largest" was rendering five rows and looking broken.
+  The ranking, not the floor, decides relevance; the floor only keeps
+  near-zero noise out. Heading is now count-driven
+  (`{rows.length} Largest Active Risks — {n} FactSet Factor, {m} Exposure`)
+  so it can never over-promise again.
+- `build-report-view.ts` / `report-exposure-cards.tsx`: **no mock fallback
+  for exposures.** An empty grouping renders "No <grouping> data for this
+  client". A plausible invented exposure in a client report is worse than a
+  blank card. The fake rows are gone from `REPORT_MOCK` too.
+- `report-route.tsx`: **new on-screen client selector.** The client list
+  inside the export card only picks clients for the PDF; there was no way to
+  change the report you are looking at, so it was permanently stuck on the
+  first client (MD). Preview-mode only.
+
+### Side effects, all good
+
+Two guideline checks stopped reading "n/a" and started evaluating, because
+they read the same exposure data: **Single sector** and **Single industry**.
+Three house-view rows stopped reading "No data" (Information Technology,
+Industrials, Financials).
+
+CALSTRS now reads: Single sector Financials 18.9% vs 30% OK; Single industry
+Banks 10.5% vs 15% OK; risks Size −0.59, Momentum −0.21, Leverage −0.12,
+Financials −8.2 pp, Canada −7.5 pp, Banks −6.7 pp, each with driving
+managers. Positioning vs house views flags Financials as **Against** — the
+house is overweight Financials, CALSTRS is 8.2 pp under. That is a real
+finding the report could not previously surface.
+
+Note CALSTRS holds **14.9% cash**, which is why it is underweight nearly
+every sector and only Real Estate shows as an overweight. Data, not a bug.
+
+### Verified
+
+Headed Edge on CALSTRS and MD: all four exposure cards populated, six risk
+rows with drivers, no occurrence of the word "example" anywhere in the
+client report. Four-page CALSTRS PDF generated and read end to end.
+`tsc` and `next build` clean.
+
+### Still open
+
+- Per-client restrictions and preferences (`client-guidelines.ts` is still
+  one hardcoded example list for every client) — next piece of work.
+- Categorical × categorical exposure cross-tab, if the "the US underweight
+  is really US tech" phrasing is wanted later.
 
 ## 2026-09-22 — Interim shared-password gate in front of the whole tool
 

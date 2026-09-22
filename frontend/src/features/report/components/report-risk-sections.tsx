@@ -12,7 +12,7 @@ import { STRESS_ASSUMPTIONS } from "../lib/quarterly-review-content";
 import { rptFmtRet, rptFmtSigned } from "../lib/report-format";
 
 // Client-report "Risk & Guidelines" page: compliance against the internal
-// guidelines, the five largest active bets with an illustrative stress, the
+// guidelines, the six largest active bets with an illustrative stress, the
 // worst historical quarters vs benchmark, and positioning vs the house views.
 
 const STATUS_LABEL = { ok: "OK", near: "Near limit", breach: "Breach", na: "n/a" } as const;
@@ -83,10 +83,8 @@ export function TopActiveRisks({ risks }: { risks: ActiveRiskSet }) {
   return (
     <section className="rpt-section">
       <h3 className="rpt-section-title">
-        Six Largest Active Risks — Three FactSet Factor, Three Exposure — Illustrative Stress
-        {risks.exposuresAreExample && (
-          <span className="rpt-flag-count warn">exposure rows are example content</span>
-        )}
+        {rows.length} Largest Active Risks — {risks.factors.length} FactSet Factor,{" "}
+        {risks.exposures.length} Exposure — Illustrative Stress
       </h3>
       <table className="rpt-risk-table">
         <thead>
@@ -103,12 +101,10 @@ export function TopActiveRisks({ risks }: { risks: ActiveRiskSet }) {
         </thead>
         <tbody>
           {rows.map((r, i) => (
-            <tr key={`${r.kind}-${r.label}`} className={r.example ? "is-example" : undefined}>
+            <tr key={`${r.kind}-${r.label}`}>
               <td className="rpt-muted">{i + 1}</td>
               <td>
                 <strong>{r.label}</strong>
-                {r.example && <span className="rpt-example-tag">example</span>}
-                {r.detail && <div className="rpt-risk-detail">{r.detail}</div>}
               </td>
               <td className="rpt-muted">{r.kind}</td>
               <td className="num">{r.portfolio == null ? "—" : `${r.portfolio.toFixed(1)}%`}</td>

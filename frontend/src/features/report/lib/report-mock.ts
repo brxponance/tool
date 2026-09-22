@@ -212,54 +212,14 @@ export const REPORT_MOCK: ReportMockData = {
     ],
   },
   exposures: {
-    region: {
-      ow: [
-        { label: "North America",     port: 0.612, bmk: 0.560, active: 0.052 },
-        { label: "Europe ex-UK",      port: 0.158, bmk: 0.127, active: 0.031 },
-        { label: "Emerging Markets",  port: 0.135, bmk: 0.115, active: 0.020 },
-      ],
-      uw: [
-        { label: "United Kingdom",    port: 0.030, bmk: 0.075, active: -0.045 },
-        { label: "Japan",             port: 0.045, bmk: 0.075, active: -0.030 },
-        { label: "Asia ex-Japan (DM)",port: 0.020, bmk: 0.048, active: -0.028 },
-      ],
-    },
-    country: {
-      ow: [
-        { label: "United States", port: 0.582, bmk: 0.514, active: 0.068 },
-        { label: "France",        port: 0.066, bmk: 0.042, active: 0.024 },
-        { label: "India",         port: 0.038, bmk: 0.019, active: 0.019 },
-      ],
-      uw: [
-        { label: "United Kingdom",port: 0.030, bmk: 0.075, active: -0.045 },
-        { label: "Japan",         port: 0.045, bmk: 0.075, active: -0.030 },
-        { label: "China",         port: 0.014, bmk: 0.040, active: -0.026 },
-      ],
-    },
-    sector: {
-      ow: [
-        { label: "Industrials",             port: 0.242, bmk: 0.198, active: 0.044 },
-        { label: "Information Technology",  port: 0.128, bmk: 0.096, active: 0.032 },
-        { label: "Health Care",             port: 0.094, bmk: 0.071, active: 0.023 },
-      ],
-      uw: [
-        { label: "Financials",  port: 0.072, bmk: 0.118, active: -0.046 },
-        { label: "Real Estate", port: 0.031, bmk: 0.089, active: -0.058 },
-        { label: "Materials",   port: 0.061, bmk: 0.085, active: -0.024 },
-      ],
-    },
-    industry: {
-      ow: [
-        { label: "Software & Services",         port: 0.069, bmk: 0.026, active: 0.043 },
-        { label: "Machinery",                   port: 0.088, bmk: 0.057, active: 0.031 },
-        { label: "Health Care Equipment",       port: 0.052, bmk: 0.031, active: 0.021 },
-      ],
-      uw: [
-        { label: "Real Estate Mgmt & Development", port: 0.019, bmk: 0.061, active: -0.042 },
-        { label: "Banks",                          port: 0.024, bmk: 0.058, active: -0.034 },
-        { label: "Tech Hardware & Equipment",      port: 0.018, bmk: 0.049, active: -0.031 },
-      ],
-    },
+    // Exposure cards never fall back to mock content (2026-09-22): a
+    // plausible invented exposure in a client report is worse than a blank
+    // card, so build-report-view renders empty groups instead. These stay
+    // only to satisfy ReportMockData.
+    region: { ow: [], uw: [] },
+    country: { ow: [], uw: [] },
+    sector: { ow: [], uw: [] },
+    industry: { ow: [], uw: [] },
   },
   perf_actual: {
     name: "Client Track Record",

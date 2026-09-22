@@ -111,6 +111,59 @@ export function ReportRoute() {
         onSelectClient={selectClient}
       />
 
+      {/* The client list inside the export card selects clients for the PDF,
+          not the one rendered below — this picks what you're looking at. */}
+      {preview && clients.length > 0 && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            margin: "16px auto 0",
+            width: 1240,
+            maxWidth: "100%",
+          }}
+        >
+          <label
+            htmlFor="rpt-onscreen-client"
+            style={{
+              fontFamily: "var(--mono)",
+              fontSize: 9,
+              letterSpacing: ".06em",
+              textTransform: "uppercase",
+              color: "var(--text2)",
+            }}
+          >
+            Report shown below
+          </label>
+          <select
+            id="rpt-onscreen-client"
+            value={selectedClient ?? ""}
+            onChange={(e) => selectClient(e.target.value)}
+            style={{
+              fontFamily: "var(--mono)",
+              fontSize: 12,
+              padding: "4px 8px",
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              borderRadius: 3,
+              color: "var(--text)",
+            }}
+          >
+            {clients.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+          {loading && (
+            <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)" }}>
+              Loading…
+            </span>
+          )}
+        </div>
+      )}
+
       {(error || reportErr) && (
         <div
           style={{
@@ -190,7 +243,7 @@ export function ReportRoute() {
         </div>
 
         <div id="rpt-pdf-page-2" className="rpt-pdf-page">
-          <ReportExposureCards exposures={r.exposures} example={view.exampleExposures} />
+          <ReportExposureCards exposures={r.exposures} />
           <section className="rpt-section rpt-section-p3 rpt-section-perf">
             <h3 className="rpt-section-title">
               Performance — Current Portfolio (Backtested)

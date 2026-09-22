@@ -14,7 +14,6 @@ import type {
 
 import type { ExposuresPack } from "../hooks/use-report-screen";
 import {
-  EXAMPLE_EXPOSURE_RISKS,
   INTERNAL_GUIDELINES,
   MACRO_VIEWS,
   STRESS_ASSUMPTIONS,
@@ -170,61 +169,20 @@ export type ActiveRisk = {
   active: number; // pp or exposure units
   impactBps: number; // illustrative, always positive
   drivers: Driver[];
-  // Where the bet really sits ("US underweight is a tech underweight").
-  detail?: string;
-  // True when the row is example content (no sector data for this client).
-  example?: boolean;
 };
 
 export type ActiveRiskSet = {
   factors: ActiveRisk[];
   exposures: ActiveRisk[];
-  exposuresAreExample: boolean;
 };
 
 const bucketImpact = (activePp: number) =>
   Math.abs(activePp) * STRESS_ASSUMPTIONS.bucketShockPct;
 
-// Exposure bets with the sector they actually sit in, from a Country ×
-// Sector nested response: each child row is "<country> — <sector>" and the
-// detail says how much of the country bet that sector explains.
-function nestedExposureRisks(
-  nested: PortfolioExposuresResponse | null | undefined,
-  held: PortfolioManager[],
-  managerExposures: ManagerExposuresPack,
-): ActiveRisk[] {
-  const out: ActiveRisk[] = [];
-  for (const parent of usableRows(nested ?? null)) {
-    const parentActive = parent.delta_current ?? parent.current - parent.benchmark;
-    for (const child of parent.children ?? []) {
-      if (NON_BUCKETS.has(child.label) || child.insufficient_data) continue;
-      const active = child.delta_current ?? child.current - child.benchmark;
-      if (Math.abs(active) < 0.5) continue;
-      const share = parentActive ? Math.min(100, Math.round((100 * active) / parentActive)) : null;
-      const sameSign = parentActive !== 0 && Math.sign(active) === Math.sign(parentActive);
-      const detail =
-        sameSign && share != null && share >= 40
-          ? `${parent.label} is ${parentActive > 0 ? "over" : "under"}weight ${Math.abs(parentActive).toFixed(1)} pp; ${child.label} accounts for ${share}% of it.`
-          : `${parent.label} is ${parentActive > 0 ? "over" : "under"}weight ${Math.abs(parentActive).toFixed(1)} pp overall; this ${child.label} bet runs the other way.`;
-      out.push({
-        kind: "Country",
-        label: `${parent.label} — ${child.label}`,
-        portfolio: child.current,
-        benchmark: child.benchmark,
-        active,
-        impactBps: bucketImpact(active),
-        drivers: driversFor(parent.label, held, managerExposures.Country),
-        detail,
-      });
-    }
-  }
-  return out.sort((a, b) => b.impactBps - a.impactBps);
-}
-
 // Three FactSet factor bets + three exposure bets, each family ranked by
-// illustrative impact. Exposure bets use the Country × Sector breakdown when
-// the client has sector data; otherwise example rows (flagged) so the layout
-// still reads correctly.
+// illustrative impact. Every row is real client data; there is deliberately
+// no example fallback, because a plausible invented exposure in a client
+// report is worse than an empty table.
 export function topActiveRisks(input: {
   exposures: ExposuresPack;
   riskExposures: RiskExposuresResponse | null;
@@ -236,11 +194,16 @@ export function topActiveRisks(input: {
   const held = managers.filter((m) => (m.current_weight || 0) > 0);
 
   // Factors
+  // Floor is deliberately low: the section's job is to name the three
+  // LARGEST factor bets, and the ranking below already handles relevance.
+  // A floor only exists to keep near-zero noise out of a client report —
+  // CALSTRS, for instance, has just two tilts above 0.15 but a real third
+  // at 0.12, and a five-row "six largest" table reads like a bug.
   const factors: ActiveRisk[] = [];
   if (riskExposures?.factors?.length) {
     for (const f of riskExposures.factors) {
       const v = riskExposures.current?.[f];
-      if (v == null || Math.abs(v) < 0.15) continue;
+      if (v == null || Math.abs(v) < 0.05) continue;
       factors.push({
         kind: "Factor",
         label: f,
@@ -254,50 +217,24 @@ export function topActiveRisks(input: {
   }
   factors.sort((a, b) => b.impactBps - a.impactBps);
 
-  // Exposures — detailed (Country × Sector) when sector data exists.
-  const hasSectorData = usableRows(exposures.Sector).length > 0;
-  let exposureRisks: ActiveRisk[] = [];
-  let exposuresAreExample = false;
-  if (hasSectorData) {
-    exposureRisks = nestedExposureRisks(exposures.CountrySector, held, managerExposures);
-    if (!exposureRisks.length) exposureRisks = flatExposureRisks(exposures, held, managerExposures);
-  } else {
-    exposuresAreExample = true;
-    exposureRisks = EXAMPLE_EXPOSURE_RISKS.map((e) => ({
-      kind: e.kind,
-      label: e.label,
-      portfolio: e.portfolio,
-      benchmark: e.benchmark,
-      active: e.portfolio - e.benchmark,
-      impactBps: bucketImpact(e.portfolio - e.benchmark),
-      drivers: e.drivers,
-      detail: e.detail,
-      example: true,
-    }));
-  }
-
   return {
     factors: factors.slice(0, perFamily),
-    exposures: exposureRisks.slice(0, perFamily),
-    exposuresAreExample,
+    exposures: exposureRisks(exposures, held, managerExposures).slice(0, perFamily),
   };
 }
 
-// Top-level country / region / sector / industry bets (no sector detail).
-function flatExposureRisks(
+// Largest real country / sector / industry bets, biggest illustrative impact
+// first. Region is excluded on purpose: it is a coarser roll-up of Country,
+// so including both would list the same money twice.
+function exposureRisks(
   exposures: ExposuresPack,
   held: PortfolioManager[],
   managerExposures: ManagerExposuresPack,
 ): ActiveRisk[] {
   const out: ActiveRisk[] = [];
 
-  // Region rows that are really a single country (United Kingdom, Japan,
-  // Canada…) also appear under Country, where per-manager drivers exist —
-  // keep the Country version only.
-  const countryLabels = new Set(usableRows(exposures.Country).map((r) => r.label));
-  (["Region", "Country", "Sector", "Industry"] as const).forEach((kind) => {
+  (["Country", "Sector", "Industry"] as const).forEach((kind) => {
     for (const r of usableRows(exposures[kind])) {
-      if (kind === "Region" && countryLabels.has(r.label)) continue;
       const active = r.delta_current ?? r.current - r.benchmark;
       if (Math.abs(active) < 0.5) continue;
       out.push({
@@ -307,8 +244,7 @@ function flatExposureRisks(
         benchmark: r.benchmark,
         active,
         impactBps: bucketImpact(active),
-        // Region has no per-manager fetch; Country/Sector/Industry do.
-        drivers: kind === "Region" ? [] : driversFor(r.label, held, managerExposures[kind]),
+        drivers: driversFor(r.label, held, managerExposures[kind]),
       });
     }
   });

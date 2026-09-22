@@ -37,8 +37,6 @@ export type ExposuresPack = {
   Country: PortfolioExposuresResponse | null;
   Sector: PortfolioExposuresResponse | null;
   Industry: PortfolioExposuresResponse | null;
-  // Country with Sector children — for "US underweight is really US tech".
-  CountrySector?: PortfolioExposuresResponse | null;
 };
 
 export type ReportState = {
@@ -72,7 +70,6 @@ const initialExposures: ExposuresPack = {
   Country: null,
   Sector: null,
   Industry: null,
-  CountrySector: null,
 };
 
 const initialManagerExposures: ManagerExposuresPack = {
@@ -266,20 +263,23 @@ export function useReportScreen() {
         const Country = await getPortfolioExposures(client, managers, "Country", null).catch(() => null);
         savePartial({ exposures: { Country } });
 
-        const Sector = await getPortfolioExposures(client, managers, "Sector", null).catch(() => null);
+        // "GICS Sector" / "GICS Industry" are the FactSet COLUMN names the
+        // backend matches on — "Sector" / "Industry" are only display
+        // labels. Passing a label misses the categorical branch in
+        // exposures_engine._portfolio_exposure, buckets every security as
+        // Unclassified, and returns a Cash+Unclassified pair that looks like
+        // a valid response. Do not "tidy" these back to the short names.
+        const Sector = await getPortfolioExposures(client, managers, "GICS Sector", null).catch(() => null);
         savePartial({ exposures: { Sector } });
 
-        const Industry = await getPortfolioExposures(client, managers, "Industry", null).catch(() => null);
+        const Industry = await getPortfolioExposures(client, managers, "GICS Industry", null).catch(() => null);
         savePartial({ exposures: { Industry } });
-
-        const CountrySector = await getPortfolioExposures(client, managers, "Country", "Sector").catch(() => null);
-        savePartial({ exposures: { CountrySector } });
 
         // Per-manager exposures for the "driven by" columns: each held
         // manager alone at weight 1, for the three groupings the guideline
         // and risk checks use. Parallel — ~3 calls per manager.
         const held = managers.filter((m) => (m.current_weight || 0) > 0);
-        const perManager = async (grouping: "Country" | "Sector" | "Industry") => {
+        const perManager = async (grouping: "Country" | "GICS Sector" | "GICS Industry") => {
           const entries = await Promise.all(
             held.map(async (m) => {
               const solo = { ...m, current_weight: 1, proposed_weight: 1 };
@@ -291,8 +291,8 @@ export function useReportScreen() {
         };
         const [Country_m, Sector_m, Industry_m] = await Promise.all([
           perManager("Country"),
-          perManager("Sector"),
-          perManager("Industry"),
+          perManager("GICS Sector"),
+          perManager("GICS Industry"),
         ]);
         if (requestId.current !== id) return;
         savePartial({ managerExposures: { Country: Country_m, Sector: Sector_m, Industry: Industry_m } });
