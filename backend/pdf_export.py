@@ -13,11 +13,12 @@ import io
 
 from PIL import Image
 
-# US Letter portrait at 150 DPI, with a modest margin (matches the old print CSS
-# @page margin of 0.35in).
+# US Letter LANDSCAPE at 150 DPI, with a modest margin (0.35in, as the old
+# print CSS used). Landscape since 2026-09-09 — the report sheet is laid out
+# 1240px wide (see .rpt-sheet) so the wide holdings / exposures tables fit.
 _DPI = 150
-_PAGE_W = int(8.5 * _DPI)
-_PAGE_H = int(11.0 * _DPI)
+_PAGE_W = int(11.0 * _DPI)
+_PAGE_H = int(8.5 * _DPI)
 _MARGIN = int(0.35 * _DPI)
 
 
@@ -39,19 +40,25 @@ def _decode(data_url):
 def build_report_pdf(images, meta=None):
     """Assemble a PDF from an ordered list of PNG data URLs (one per report page).
 
-    Each image is scaled to fit within the printable area (preserving aspect
-    ratio) and placed at the top of its own Letter-portrait page.
+    Each image is scaled to fit the printable area (preserving aspect ratio)
+    and placed at the top of its own Letter-landscape page. Every sheet is
+    captured at the same width, so the width-fit factor is identical for all
+    pages and type size is constant; only a page too tall for the sheet
+    (a long peer-group table) shrinks further. A single common factor across
+    pages was tried (2026-09-09) and reverted (2026-09-10): one tall page
+    shrank the whole document.
 
     Returns the PDF as bytes. Raises ValueError if no image could be decoded.
     """
     avail_w = _PAGE_W - 2 * _MARGIN
     avail_h = _PAGE_H - 2 * _MARGIN
 
+    sources = [img for img in (_decode(u) for u in (images or [])) if img is not None]
+    if not sources:
+        raise ValueError('No report page images could be decoded.')
+
     pages = []
-    for data_url in (images or []):
-        src = _decode(data_url)
-        if src is None:
-            continue
+    for src in sources:
         scale = min(avail_w / src.width, avail_h / src.height)
         new_w = max(1, int(src.width * scale))
         new_h = max(1, int(src.height * scale))
@@ -59,9 +66,6 @@ def build_report_pdf(images, meta=None):
         page = Image.new('RGB', (_PAGE_W, _PAGE_H), 'white')
         page.paste(resized, ((_PAGE_W - new_w) // 2, _MARGIN))
         pages.append(page)
-
-    if not pages:
-        raise ValueError('No report page images could be decoded.')
 
     buf = io.BytesIO()
     pages[0].save(buf, format='PDF', save_all=True,

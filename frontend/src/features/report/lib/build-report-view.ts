@@ -1,12 +1,15 @@
 import type {
+  DiverseOwnershipResponse,
   MarketCycleResponse,
   PortfolioExposuresResponse,
+  PortfolioStats,
   RiskAnalysisResponse,
   RiskExposuresResponse,
 } from "@/features/portfolio/types";
 
 import type { ExposuresPack } from "../hooks/use-report-screen";
 import type {
+  ReportDiverseOwnership,
   ReportMockComplements,
   ReportMockData,
   ReportMockExposureGroup,
@@ -14,6 +17,7 @@ import type {
   ReportMockPerf,
   ReportMockPeriods,
   ReportMockPlacement,
+  ReportPortfolioEdge,
 } from "./report-mock";
 import { REPORT_MOCK } from "./report-mock";
 import type {
@@ -82,15 +86,44 @@ function realMcr(
   };
 }
 
+// ── Portfolio Edge + Diverse / Woman Owned (current weights) ─────────────
+function realEdge(stats: PortfolioStats | null): ReportPortfolioEdge | null {
+  const e = stats?.edge_current;
+  if (!e || e.z == null) return null;
+  // /compute_portfolio_stats reports weights as fractions (0.9998); the
+  // report shows percents, as the Portfolio tab does via formatPercent.
+  return {
+    z: e.z,
+    covered_weight: e.covered_weight * 100,
+    total_weight: e.total_weight * 100,
+  };
+}
+
+function realDiverse(
+  d: DiverseOwnershipResponse | null,
+): ReportDiverseOwnership | null {
+  if (!d?.has_data || !d.current) return null;
+  return {
+    threshold: d.threshold ?? 50,
+    weight_pct: d.current.weight_pct,
+    n_diverse: d.current.n_diverse,
+    n_firms: d.current.n_firms,
+    unknown_weight_pct: d.current.unknown_weight_pct,
+  };
+}
+
 // ── Exposures: pick top 3 OW / UW from real data ─────────────────────────
 function topOwUw(
   data: PortfolioExposuresResponse | null,
 ): ReportMockExposureGroup | null {
   if (!data?.rows?.length) return null;
+  // Cash-only (Sector / Industry when the exposures workbook has no GICS
+  // data) counts as "no data" so the card falls back to example rows.
   const usable = data.rows
     .filter(
       (r) =>
         r.label !== "Unclassified" &&
+        r.label !== "Cash" &&
         !r.insufficient_data &&
         (r.benchmark || r.current),
     )
@@ -111,19 +144,29 @@ function topOwUw(
   };
 }
 
+export type ExposureGroupKey = "region" | "country" | "sector" | "industry";
+
 function realExposures(
   exposures: ExposuresPack,
-): ReportMockData["exposures"] | null {
+): { data: ReportMockData["exposures"]; example: ExposureGroupKey[] } | null {
   const r = topOwUw(exposures.Region);
   const c = topOwUw(exposures.Country);
   const s = topOwUw(exposures.Sector);
   const i = topOwUw(exposures.Industry);
   if (!r && !c && !s && !i) return null;
+  const example: ExposureGroupKey[] = [];
+  if (!r) example.push("region");
+  if (!c) example.push("country");
+  if (!s) example.push("sector");
+  if (!i) example.push("industry");
   return {
-    region:   r ?? REPORT_MOCK.exposures.region,
-    country:  c ?? REPORT_MOCK.exposures.country,
-    sector:   s ?? REPORT_MOCK.exposures.sector,
-    industry: i ?? REPORT_MOCK.exposures.industry,
+    data: {
+      region:   r ?? REPORT_MOCK.exposures.region,
+      country:  c ?? REPORT_MOCK.exposures.country,
+      sector:   s ?? REPORT_MOCK.exposures.sector,
+      industry: i ?? REPORT_MOCK.exposures.industry,
+    },
+    example,
   };
 }
 
@@ -191,11 +234,16 @@ function realComplements(c: RealComplements | undefined): ReportMockComplements 
 // ── Top-level: merge real data with mock fallbacks ───────────────────────
 export type ReportView = {
   data: ReportMockData;
+  // Exposure cards showing example rows because the client has no data for
+  // that grouping (today: sector + industry for every client).
+  exampleExposures: ExposureGroupKey[];
   // True for sections that fell back to mock content because real data
   // wasn't available (e.g. no FactSet exposures file uploaded yet).
   realSections: {
     holdings: boolean;
     portfolio_vg: boolean;
+    portfolio_edge: boolean;
+    diverse_ownership: boolean;
     factset_risk: boolean;
     exposures: boolean;
     market_cycle: boolean;
@@ -207,12 +255,16 @@ export type ReportView = {
 
 export function buildReportView({
   report,
+  stats,
+  diverse,
   riskExposures,
   marketCycle,
   riskAnalysis,
   exposures,
 }: {
   report: ReportPayload | null;
+  stats: PortfolioStats | null;
+  diverse: DiverseOwnershipResponse | null;
   riskExposures: RiskExposuresResponse | null;
   marketCycle: MarketCycleResponse | null;
   riskAnalysis: RiskAnalysisResponse | null;
@@ -236,6 +288,10 @@ export function buildReportView({
     ? report!.portfolio_vg
     : REPORT_MOCK.portfolio_vg;
 
+  // Portfolio Edge + Diverse / Woman Owned — real or dash, never mock
+  const portfolio_edge = realEdge(stats);
+  const diverse_ownership = realDiverse(diverse);
+
   // FactSet Risk
   const realRisk = realFactsetRisk(
     riskExposures,
@@ -245,7 +301,10 @@ export function buildReportView({
 
   // Exposures
   const realExp = realExposures(exposures);
-  const expData = realExp ?? REPORT_MOCK.exposures;
+  const expData = realExp?.data ?? REPORT_MOCK.exposures;
+  const exampleExposures: ExposureGroupKey[] = realExp
+    ? realExp.example
+    : ["region", "country", "sector", "industry"];
 
   // Market Cycle
   const realMc = realMarketCycle(marketCycle);
@@ -269,6 +328,8 @@ export function buildReportView({
     as_of: haveReport ? (report!.as_of ?? REPORT_MOCK.as_of) : REPORT_MOCK.as_of,
     managers: holdings,
     portfolio_vg,
+    portfolio_edge,
+    diverse_ownership,
     factset_risk,
     market_cycle,
     mcr,
@@ -281,9 +342,12 @@ export function buildReportView({
 
   return {
     data,
+    exampleExposures,
     realSections: {
       holdings: haveReport && (report!.managers?.length ?? 0) > 0,
       portfolio_vg: haveReport,
+      portfolio_edge: !!portfolio_edge,
+      diverse_ownership: !!diverse_ownership,
       factset_risk: !!realRisk,
       exposures: !!realExp,
       market_cycle: !!realMc,

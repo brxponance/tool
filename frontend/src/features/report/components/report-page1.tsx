@@ -4,6 +4,7 @@ import {
   rptFmtPct1,
   rptFmtSigned,
 } from "../lib/report-format";
+import type { ClientGuidelines } from "../lib/client-guidelines";
 import type {
   ReportMockData,
   ReportMockHolding,
@@ -28,6 +29,37 @@ export function ReportCover({ data }: { data: ReportMockData }) {
           Managers: <strong>{data.managers.length}</strong>
         </span>
       </div>
+    </div>
+  );
+}
+
+// ── Client Restrictions / Preferences ────────────────────────────────────
+function GuidelineList({ title, items }: { title: string; items: string[] }) {
+  return (
+    <section className="rpt-section">
+      <h3 className="rpt-section-title">{title}</h3>
+      {items.length ? (
+        <ul className="rpt-guideline-list">
+          {items.map((t) => (
+            <li key={t}>{t}</li>
+          ))}
+        </ul>
+      ) : (
+        <div className="rpt-caption">None specified.</div>
+      )}
+    </section>
+  );
+}
+
+export function ReportClientGuidelines({
+  guidelines,
+}: {
+  guidelines: ClientGuidelines;
+}) {
+  return (
+    <div className="rpt-row-2col rpt-guidelines-row">
+      <GuidelineList title="Client Restrictions" items={guidelines.restrictions} />
+      <GuidelineList title="Client Preferences" items={guidelines.preferences} />
     </div>
   );
 }
@@ -129,6 +161,78 @@ export function ReportVGPositioning({
       <h3 className="rpt-section-title">Value–Growth Positioning</h3>
       <VgRow label="3-Factor" value={portfolioVg.vg_3factor} />
       <VgRow label="Full" value={portfolioVg.vg_full} />
+    </section>
+  );
+}
+
+// ── Normalized Skill + Diverse / Woman Owned ─────────────────────────────
+// Sits under Value–Growth Positioning in the report's left column. Mirrors
+// the Portfolio tab's "Portfolio Edge" and "Diverse / Woman Owned" panels
+// (current weights only — the report has no proposed column). Either stat
+// renders a dash when its data isn't loaded; there is intentionally no mock.
+function StatCell({
+  label,
+  value,
+  valueColor,
+  sub,
+}: {
+  label: string;
+  value: string;
+  valueColor?: string;
+  sub: string;
+}) {
+  return (
+    <div className="rpt-stat-cell">
+      <div className="rpt-stat-label">{label}</div>
+      <div className="rpt-stat-value" style={valueColor ? { color: valueColor } : undefined}>
+        {value}
+      </div>
+      <div className="rpt-stat-sub">{sub}</div>
+    </div>
+  );
+}
+
+export function ReportSkillAndOwnership({
+  edge,
+  diverse,
+}: {
+  edge: ReportMockData["portfolio_edge"];
+  diverse: ReportMockData["diverse_ownership"];
+}) {
+  const z = edge?.z ?? null;
+  const skillValue = z == null ? "—" : rptFmtSigned(z);
+  const skillColor =
+    z == null ? "var(--text3)" : z < 0 ? "var(--red)" : "var(--green)";
+  const skillSub =
+    edge && edge.total_weight > 0
+      ? `${edge.covered_weight.toFixed(1)}% of ${edge.total_weight.toFixed(1)}% scored`
+      : "Not scored";
+
+  const divValue = diverse ? `${diverse.weight_pct.toFixed(1)}%` : "—";
+  const divSub = diverse
+    ? `${diverse.n_diverse} / ${diverse.n_firms} firms · ≥${diverse.threshold}% owned` +
+      (diverse.unknown_weight_pct > 0
+        ? ` · unmatched ${diverse.unknown_weight_pct.toFixed(1)}%`
+        : "")
+    : "No qualitative data loaded";
+
+  return (
+    <section className="rpt-section rpt-stat-section">
+      <h3 className="rpt-section-title">Normalized Skill & Diverse / Woman Owned</h3>
+      <div className="rpt-stat-grid">
+        <StatCell
+          label="Normalized Skill (Wtd Avg Z)"
+          value={skillValue}
+          valueColor={skillColor}
+          sub={skillSub}
+        />
+        <StatCell
+          label="Diverse / Woman Owned"
+          value={divValue}
+          valueColor={diverse ? "var(--accent)" : "var(--text3)"}
+          sub={divSub}
+        />
+      </div>
     </section>
   );
 }

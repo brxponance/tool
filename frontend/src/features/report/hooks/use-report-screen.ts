@@ -5,22 +5,31 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { backendJson } from "@/lib/backend";
 import type { BackendStatus } from "@/features/setup/types";
 import {
+  getDiverseOwnership,
   getPortfolio,
   getPortfolioClients,
   getPortfolioExposures,
   getPortfolioMarketCycle,
   getPortfolioRiskAnalysis,
   getPortfolioRiskExposures,
+  getPortfolioStats,
 } from "@/features/portfolio/api/get-portfolio-screen-data";
 import type {
+  DiverseOwnershipResponse,
   MarketCycleResponse,
   PortfolioManager,
   PortfolioExposuresResponse,
+  PortfolioStats,
   RiskAnalysisResponse,
   RiskExposuresResponse,
 } from "@/features/portfolio/types";
 
+// Same majority-ownership cut-off the Portfolio tab's Diverse / Woman Owned
+// panel defaults to; the report has no threshold control.
+export const REPORT_DIVERSE_THRESHOLD = 50;
+
 import { getReportPayload } from "../api/get-report";
+import type { ManagerExposuresPack } from "../lib/client-risk";
 import type { ReportPayload } from "../types";
 
 export type ExposuresPack = {
@@ -28,6 +37,8 @@ export type ExposuresPack = {
   Country: PortfolioExposuresResponse | null;
   Sector: PortfolioExposuresResponse | null;
   Industry: PortfolioExposuresResponse | null;
+  // Country with Sector children — for "US underweight is really US tech".
+  CountrySector?: PortfolioExposuresResponse | null;
 };
 
 export type ReportState = {
@@ -36,10 +47,22 @@ export type ReportState = {
   selectedClient: string | null;
   status: BackendStatus | null;
   report: ReportPayload | null;
+  // Portfolio Edge (weighted-avg Normalized Skill Z) and the diverse /
+  // woman-owned rollup — the same two endpoints the Portfolio tab uses, fed
+  // the same /portfolio managers, so the report agrees with the tab.
+  stats: PortfolioStats | null;
+  diverse: DiverseOwnershipResponse | null;
+  // The /portfolio managers (weights, AUM, qualitative fields) — the
+  // guideline checks need them.
+  managers: PortfolioManager[];
   riskExposures: RiskExposuresResponse | null;
   marketCycle: MarketCycleResponse | null;
   riskAnalysis: RiskAnalysisResponse | null;
   exposures: ExposuresPack;
+  // Each manager's own Country / Sector / Industry exposures (fetched one
+  // manager at a time at weight 1) so the report can say which managers
+  // drive a bucket. Filled after the portfolio-level exposures.
+  managerExposures: ManagerExposuresPack;
   loading: boolean;
   error: string | null;
 };
@@ -49,11 +72,27 @@ const initialExposures: ExposuresPack = {
   Country: null,
   Sector: null,
   Industry: null,
+  CountrySector: null,
+};
+
+const initialManagerExposures: ManagerExposuresPack = {
+  Country: {},
+  Sector: {},
+  Industry: {},
 };
 
 type ClientReportCache = Pick<
   ReportState,
-  "status" | "report" | "riskExposures" | "marketCycle" | "riskAnalysis" | "exposures"
+  | "status"
+  | "report"
+  | "stats"
+  | "diverse"
+  | "managers"
+  | "riskExposures"
+  | "marketCycle"
+  | "riskAnalysis"
+  | "exposures"
+  | "managerExposures"
 >;
 
 type ClientReportPatch =
@@ -66,10 +105,14 @@ export function useReportScreen() {
     selectedClient: null,
     status: null,
     report: null,
+    stats: null,
+    diverse: null,
+    managers: [],
     riskExposures: null,
     marketCycle: null,
     riskAnalysis: null,
     exposures: initialExposures,
+    managerExposures: initialManagerExposures,
     loading: false,
     error: null,
   });
@@ -117,20 +160,28 @@ export function useReportScreen() {
       loading: true,
       error: null,
       report: null,
+      stats: null,
+      diverse: null,
+      managers: [],
       riskExposures: null,
       marketCycle: null,
       riskAnalysis: null,
       exposures: initialExposures,
+      managerExposures: initialManagerExposures,
     }));
 
     const savePartial = (patch: ClientReportPatch) => {
       const current = clientCacheRef.current[client] ?? {
         status: statusRef.current,
         report: null,
+        stats: null,
+        diverse: null,
+        managers: [],
         riskExposures: null,
         marketCycle: null,
         riskAnalysis: null,
         exposures: initialExposures,
+        managerExposures: initialManagerExposures,
       };
       clientCacheRef.current[client] = {
         ...current,
@@ -168,10 +219,14 @@ export function useReportScreen() {
       const baseCache: ClientReportCache = {
         status,
         report,
+        stats: null,
+        diverse: null,
+        managers: [],
         riskExposures: null,
         marketCycle: null,
         riskAnalysis: null,
         exposures: initialExposures,
+        managerExposures: initialManagerExposures,
       };
       clientCacheRef.current[client] = baseCache;
       setState((s) => ({ ...s, ...baseCache, loading: false, error: null }));
@@ -180,7 +235,14 @@ export function useReportScreen() {
       if (!portfolio || requestId.current !== id) return;
 
       const managers: PortfolioManager[] = portfolio.managers;
+      savePartial({ managers });
       const useSecurityRisk = !!status?.has_security_risk;
+
+      const stats = await getPortfolioStats(managers).catch(() => null);
+      savePartial({ stats });
+
+      const diverse = await getDiverseOwnership(managers, REPORT_DIVERSE_THRESHOLD).catch(() => null);
+      savePartial({ diverse });
 
       if (status?.has_risk || status?.has_security_risk) {
         const riskExposures = await getPortfolioRiskExposures(
@@ -209,6 +271,31 @@ export function useReportScreen() {
 
         const Industry = await getPortfolioExposures(client, managers, "Industry", null).catch(() => null);
         savePartial({ exposures: { Industry } });
+
+        const CountrySector = await getPortfolioExposures(client, managers, "Country", "Sector").catch(() => null);
+        savePartial({ exposures: { CountrySector } });
+
+        // Per-manager exposures for the "driven by" columns: each held
+        // manager alone at weight 1, for the three groupings the guideline
+        // and risk checks use. Parallel — ~3 calls per manager.
+        const held = managers.filter((m) => (m.current_weight || 0) > 0);
+        const perManager = async (grouping: "Country" | "Sector" | "Industry") => {
+          const entries = await Promise.all(
+            held.map(async (m) => {
+              const solo = { ...m, current_weight: 1, proposed_weight: 1 };
+              const res = await getPortfolioExposures(client, [solo], grouping, null).catch(() => null);
+              return [m.matched_name, res?.rows ?? []] as const;
+            }),
+          );
+          return Object.fromEntries(entries);
+        };
+        const [Country_m, Sector_m, Industry_m] = await Promise.all([
+          perManager("Country"),
+          perManager("Sector"),
+          perManager("Industry"),
+        ]);
+        if (requestId.current !== id) return;
+        savePartial({ managerExposures: { Country: Country_m, Sector: Sector_m, Industry: Industry_m } });
       }
     } catch (err) {
       if (requestId.current !== id) return;

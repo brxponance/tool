@@ -4,7 +4,7 @@ import { useState } from "react";
 
 import { BACKEND_PROXY_BASE } from "@/lib/constants";
 
-import { PPTX_CAPTURE_TARGETS } from "../api/export-pptx";
+import { PDF_CAPTURE_PAGES } from "../lib/pdf-pages";
 
 // The three server-side report downloads, mirroring the reference tool's
 // Reports tab. Two are plain GETs (the backend builds the workbook from loaded
@@ -161,9 +161,12 @@ export function ReportExportCards({
   }
 
   // Capture the rendered report for every selected client, in order, into one
-  // PDF. Each client is switched in, waited on, then captured — so the PDF is
-  // one report per client rather than one report total.
-  async function downloadPdf() {
+  // PDF. Each client is switched in, waited on, then captured page by page
+  // (PDF_CAPTURE_PAGES) — so the PDF is the full report per client, laid out
+  // like the on-screen sheet, not one report total.
+  // `full` prepends the Quarterly Review front matter and the Peer Group
+  // report (one page per universe) to the per-client pages.
+  async function downloadPdf(full = false) {
     const html2canvas = (await import("html2canvas")).default;
     const targets = effectivePdfClients;
     if (!targets.length) throw new Error("Select at least one client.");
@@ -172,23 +175,39 @@ export function ReportExportCards({
     const images: string[] = [];
     const skipped: string[] = [];
 
-    const capturePages = async () => {
-      for (const target of PPTX_CAPTURE_TARGETS) {
-        const el = document.getElementById(target.id);
-        if (!el) continue;
-        try {
-          const canvas = await html2canvas(el, {
-            scale: 2,
-            backgroundColor: "#ffffff",
-            logging: false,
-            useCORS: true,
-          });
-          images.push(canvas.toDataURL("image/png"));
-        } catch {
-          // a failed capture just drops that page
-        }
+    const captureEl = async (el: HTMLElement) => {
+      try {
+        const canvas = await html2canvas(el, {
+          scale: 2,
+          backgroundColor: "#ffffff",
+          logging: false,
+          useCORS: true,
+        });
+        images.push(canvas.toDataURL("image/png"));
+      } catch {
+        // a failed capture just drops that page
       }
     };
+
+    const capturePages = async () => {
+      for (const pageId of PDF_CAPTURE_PAGES) {
+        const el = document.getElementById(pageId);
+        if (el) await captureEl(el);
+      }
+    };
+
+    if (full) {
+      setBusy("Capturing front matter…");
+      const front = document.getElementById("review-front-matter-page");
+      if (front) await captureEl(front);
+      const pgPages = Array.from(
+        document.querySelectorAll<HTMLElement>("[id^='rpt-pg-page-']"),
+      );
+      for (let i = 0; i < pgPages.length; i += 1) {
+        setBusy(`Capturing peer groups ${i + 1}/${pgPages.length}…`);
+        await captureEl(pgPages[i]);
+      }
+    }
 
     try {
       for (let i = 0; i < targets.length; i += 1) {
@@ -243,7 +262,8 @@ export function ReportExportCards({
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = match?.[1] ?? "Quarterly_Portfolio_Report.pdf";
+    anchor.download =
+      match?.[1] ?? (full ? "Quarterly_Review.pdf" : "Quarterly_Portfolio_Report.pdf");
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
@@ -257,7 +277,7 @@ export function ReportExportCards({
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "stretch" }}>
         <Card
           title="Quarterly Portfolio Report"
-          blurb="One report per selected client, captured page by page into a single PDF. Each client is rendered in turn, so this takes a few seconds each. Sections without loaded source files are captured as shown."
+          blurb="The portfolio report — cover, holdings, positioning, exposures and backtested performance — as four landscape Letter pages per selected client in a single PDF. Each client is rendered in turn, so this takes a few seconds each. Sections without loaded source files are captured as shown."
         >
           <div
             style={{
@@ -308,9 +328,18 @@ export function ReportExportCards({
               type="button"
               className="btn btn-primary btn-sm"
               disabled={busy !== null || effectivePdfClients.length === 0}
-              onClick={() => void guard("Rendering…", downloadPdf)}
+              onClick={() => void guard("Rendering…", () => downloadPdf(false))}
             >
               Download PDF
+            </button>
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              disabled={busy !== null || effectivePdfClients.length === 0}
+              onClick={() => void guard("Rendering…", () => downloadPdf(true))}
+              title="Front matter + Peer Group report + the selected clients' pages, in one PDF"
+            >
+              Full Review PDF
             </button>
             {/* Only the PDF phases belong in this card's status line — the two
                 Excel cards share the same `busy` flag. */}

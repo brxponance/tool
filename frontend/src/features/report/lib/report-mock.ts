@@ -100,12 +100,34 @@ export type ReportMockComplements = {
   factset_risk: ReportMockComplementFactor;
 };
 
+export type ReportPortfolioEdge = {
+  z: number | null;
+  covered_weight: number; // % of portfolio weight with a valid z
+  total_weight: number;
+};
+
+export type ReportDiverseOwnership = {
+  threshold: number; // majority-ownership cut-off, %
+  weight_pct: number; // % of portfolio weight in diverse / woman-owned firms
+  n_diverse: number;
+  n_firms: number;
+  unknown_weight_pct: number; // % of weight in managers with no firm match
+};
+
 export type ReportMockData = {
   client: string;
   benchmark: string;
   as_of: string;
   managers: ReportMockHolding[];
   portfolio_vg: { vg_3factor: number; vg_full: number };
+  // Weighted-average Normalized Skill Z over current weights ("Portfolio
+  // Edge" on the Portfolio tab). null = not computed; rendered as a dash —
+  // deliberately NO mock fallback, a made-up skill number must never land in
+  // a client PDF.
+  portfolio_edge: ReportPortfolioEdge | null;
+  // Diverse / woman-owned rollup at REPORT_DIVERSE_THRESHOLD. null = no
+  // qualitative workbook loaded; rendered as a dash for the same reason.
+  diverse_ownership: ReportDiverseOwnership | null;
   factset_risk: {
     factors: string[];
     current: Record<string, number>;
@@ -144,6 +166,8 @@ export const REPORT_MOCK: ReportMockData = {
     { name: "Vontobel Emerging Markets",                 tab: "EM",    weight: 0.090, vg_3factor: -0.8, vg_full: -0.5, ns_z: 1.0 },
   ],
   portfolio_vg: { vg_3factor: -0.85, vg_full: -0.62 },
+  portfolio_edge: null,
+  diverse_ownership: null,
   factset_risk: {
     factors: [
       "Beta", "Book-to-Price", "Earnings Yield", "Dividend Yield", "Sales-to-Price",
@@ -214,26 +238,26 @@ export const REPORT_MOCK: ReportMockData = {
     },
     sector: {
       ow: [
-        { label: "Information Technology", port: 0.286, bmk: 0.238, active: 0.048 },
-        { label: "Health Care",            port: 0.156, bmk: 0.124, active: 0.032 },
-        { label: "Consumer Discretionary", port: 0.131, bmk: 0.115, active: 0.016 },
+        { label: "Industrials",             port: 0.242, bmk: 0.198, active: 0.044 },
+        { label: "Information Technology",  port: 0.128, bmk: 0.096, active: 0.032 },
+        { label: "Health Care",             port: 0.094, bmk: 0.071, active: 0.023 },
       ],
       uw: [
-        { label: "Financials", port: 0.114, bmk: 0.149, active: -0.035 },
-        { label: "Energy",     port: 0.014, bmk: 0.042, active: -0.028 },
-        { label: "Materials",  port: 0.020, bmk: 0.041, active: -0.021 },
+        { label: "Financials",  port: 0.072, bmk: 0.118, active: -0.046 },
+        { label: "Real Estate", port: 0.031, bmk: 0.089, active: -0.058 },
+        { label: "Materials",   port: 0.061, bmk: 0.085, active: -0.024 },
       ],
     },
     industry: {
       ow: [
-        { label: "Software",       port: 0.118, bmk: 0.084, active: 0.034 },
-        { label: "Biotechnology",  port: 0.061, bmk: 0.039, active: 0.022 },
-        { label: "Semiconductors", port: 0.082, bmk: 0.063, active: 0.019 },
+        { label: "Software & Services",         port: 0.069, bmk: 0.026, active: 0.043 },
+        { label: "Machinery",                   port: 0.088, bmk: 0.057, active: 0.031 },
+        { label: "Health Care Equipment",       port: 0.052, bmk: 0.031, active: 0.021 },
       ],
       uw: [
-        { label: "Banks",                          port: 0.046, bmk: 0.077, active: -0.031 },
-        { label: "Oil & Gas Exploration & Prod.",  port: 0.005, bmk: 0.029, active: -0.024 },
-        { label: "Insurance",                      port: 0.018, bmk: 0.033, active: -0.015 },
+        { label: "Real Estate Mgmt & Development", port: 0.019, bmk: 0.061, active: -0.042 },
+        { label: "Banks",                          port: 0.024, bmk: 0.058, active: -0.034 },
+        { label: "Tech Hardware & Equipment",      port: 0.018, bmk: 0.049, active: -0.031 },
       ],
     },
   },

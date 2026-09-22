@@ -4,6 +4,8 @@
 
 _Newest first. Add new entries directly below this index._
 
+- [2026-09-09 — Quarterly Review build-out: skill + DWBE block, client guidelines, Peer Group report, landscape, risk page, front matter](#2026-09-09--quarterly-review-build-out-skill--dwbe-block-client-guidelines-peer-group-report-landscape-risk-page-front-matter)
+- [2026-09-09 — Quarterly PDF now captures the whole report sheet (two pages; market cycle + MCR dropped), not the five PPTX crops](#2026-09-09--quarterly-pdf-now-captures-the-whole-report-sheet-two-pages-market-cycle--mcr-dropped-not-the-five-pptx-crops)
 - [2026-09-04 — Tab switches keep session state: last client + unsaved edits (Portfolio), last selection (Peer Groups)](#2026-09-04--tab-switches-keep-session-state-last-client--unsaved-edits-portfolio-last-selection-peer-groups)
 - [2026-09-04 — Peer Groups bucket overrides now flow to the Portfolio tab (the store existed; the Portfolio side was never wired)](#2026-09-04--peer-groups-bucket-overrides-now-flow-to-the-portfolio-tab-the-store-existed-the-portfolio-side-was-never-wired)
 - [2026-09-04 — '1-yr Momentum' added to the exposures groupings (Portfolio + Manager Detail)](#2026-09-04--1-yr-momentum-added-to-the-exposures-groupings-portfolio--manager-detail)
@@ -35,6 +37,190 @@ _Newest first. Add new entries directly below this index._
 - [2026-07-07 — Moved project off OneDrive to C:\dev\pc_tool (canonical working copy)](#2026-07-07-moved-project-off-onedrive-to-cdevpc_tool-canonical-working-copy)
 
 ---
+
+## 2026-09-09 — Quarterly Review build-out: skill + DWBE block, client guidelines, Peer Group report, landscape, risk page, front matter
+
+One long iterative session on the Report tab, working towards a single
+quarterly document (design: `docs/quarterly-review-design.md`). Everything
+below is on `main`, uncommitted at the time of writing.
+
+### What the Report tab now shows (top to bottom)
+
+1. The three export cards (unchanged).
+2. **Quarterly Review front matter** — cover, Internal Guidelines table,
+   Macro Views (thesis bullets + a house-view vector). Authored content in
+   `report/lib/quarterly-review-content.ts` — EXAMPLE values.
+3. **Peer Group report** (`components/peer-group-report.tsx`,
+   `hooks/use-peer-group-report.ts`) — one table per Peer Groups-tab button
+   (6 universes × Growth/Core/Value + Placeholder = 19), managers sorted by
+   Normalized Skill Z, total AUM we hold in the strategy, wide empty Notes
+   column. Flags: "High skill · no assets — justify" (z ≥ +0.5, no AUM) and
+   "Assets · weak skill — review" (z ≤ −0.5 with AUM).
+4. **Quarterly Portfolio Report** for the on-screen client, four landscape
+   pages: cover + Client Restrictions / Preferences (placeholder bullets,
+   `lib/client-guidelines.ts`) + holdings + V-G + **Normalized Skill & Diverse
+   / Woman Owned** + FactSet risk; exposures (four cards across) + trailing
+   perf + calendar; quarterly excess + complements; **Risk & Guidelines**
+   (guideline compliance with driving managers, five largest active risks
+   with an illustrative stress, worst quarters vs benchmark, positioning vs
+   house views). Market cycle and MCR were removed from the report entirely.
+
+The sheets render on the page by default now (`?hidden=1` restores the
+off-screen mode); the reports are being iterated on visually.
+
+### Data sources and formulas
+
+- Skill + DWBE block: `/compute_portfolio_stats` (edge_current) and
+  `/diverse_ownership` at threshold 50, fed the same `/portfolio` managers
+  the Portfolio tab uses — so the report agrees with the tab. Weights from
+  `/compute_portfolio_stats` are fractions; ×100 for display. No mock
+  fallback for either: a dash, never an invented number in a client PDF.
+- Peer Group AUM = Σ over clients of `/portfolio` `aum_current`
+  (= current weight × client total AUM from the weights workbook). Clients
+  without a client total (New Haven) are excluded and named in a caption.
+- "Driven by" (guideline + risk pages) = manager weight × the manager's own
+  bucket exposure, obtained by calling `/portfolio_exposures` with the
+  manager alone at weight 1 — three calls per held manager (Country,
+  Sector, Industry), in parallel, after the portfolio-level exposures.
+- Illustrative stress = |active pp| × 10 % for weight bets, |active
+  exposure| × 3 % per unit for FactSet factors (`STRESS_ASSUMPTIONS`). The
+  top-5 list forces at least two weight bets and two factor bets because the
+  two scales are not comparable — a pure sort was five factor tilts.
+- Guideline limits (single country 35 / sector 30 / industry 15 / manager
+  35, client share of product AUM 25, DWBE ≥ 50) are EXAMPLE numbers.
+
+### PDF
+
+`PDF_CAPTURE_PAGES` (`lib/pdf-pages.ts`) lists the `rpt-pdf-page-N` ids the
+Quarterly PDF captures; `backend/pdf_export.py` emits 11×8.5in landscape
+pages and scales every page by one common factor so type size is constant
+across pages. Backend runs `debug=False` — restart after touching it.
+
+### Gotchas (cost real time today)
+
+- **Turbopack (Next 16.2.4) applies `globals.css` changes one content edit
+  behind.** A CSS edit is not served until the *next* content change to the
+  file; `touch` does not count, a restart does not help, and clearing
+  `.next/dev` + restart does. Symptom: new classes render unstyled while
+  `.tsx` hot reloads fine. Workaround used: append a harmless comment after
+  a CSS change. Check with
+  `curl <first .css href in /report HTML> | grep -c <new-class>`.
+- A stale dev server left over from a previous session returned 500 on
+  every route (`TurbopackInternalError … creating new process`). Kill the
+  PID on :3000 and restart.
+- MD's Sector / Industry exposures carry only Cash, so those guideline rows
+  and exposure cards are n/a / empty for MD. Data, not a bug.
+- Playwright is not in the repo; installed into the session scratchpad and
+  driven headed via `channel: 'msedge'`.
+
+### 2026-09-10 follow-up (same entry)
+
+- Internal Guidelines table shows firm-scope rows only, no Scope column;
+  the client compliance panel still checks the client-preference rows.
+- Sector / Industry exposure cards fall back to example rows (tagged
+  "example") when a grouping has only Cash / Unclassified — the exposures
+  workbook carries no GICS data for any client today, so this is every
+  client. Example rows re-written to look international (was US-centric).
+- Risk list is now six rows: three FactSet factors + three exposure bets,
+  each family ranked by illustrative impact. Exposure bets use the Country ×
+  Sector nested response (`exposures.CountrySector`, new fetch in the hook)
+  so a row reads "United States — Information Technology" with a detail line
+  saying how much of the country bet that sector explains. With no sector
+  data the three exposure rows are `EXAMPLE_EXPOSURE_RISKS` from the content
+  file, tagged "example" and flagged in the section title.
+
+- **Full Review PDF** button (Quarterly card): captures the front matter,
+  then one page per peer group (`rpt-pg-page-<n>`, 19 pages), then the
+  selected clients' four pages, through the existing `/export_report_pdf`
+  pipeline. First attempt used one page per universe — EAFE is 55 rows and
+  shrank the whole document because the builder used one common scale.
+  Fixed both: one page per group, and `pdf_export.py` back to per-page fit
+  (all sheets share a width, so type size is constant anyway; only over-tall
+  pages shrink). 24 pages for one client. Example saved to the user's
+  Downloads as `Quarterly_Review_example_2026-09-10.pdf`.
+- `.rpt-pg-name` lost `overflow:hidden`: html2canvas clipped glyph tops on
+  baseline-aligned flex items.
+
+### 2026-09-11 follow-up (same entry)
+
+- Peer Group tables: new **Ave Inv Score** column between Total AUM and
+  Notes. PLACEHOLDER — the scoresheet isn't in the tool; values are
+  1.0–5.0 in 0.5 steps, pseudo-random but seeded from the manager name
+  (`placeholderInvScore`) so they are stable across renders and match
+  between screen and PDF. Header carries an "example" tag.
+
+### Open
+
+- Notes column: needs an editable, persisted note per manager.
+- Ave Inv Score: wire to the real scoresheet average.
+- Front matter and Peer Group report have no PDF yet; then one combined PDF.
+- Client Restrictions are text; encode them as checks like the firm
+  guidelines. Pending-changes page, attribution line, quarterly snapshots
+  for trend views — see the design doc.
+
+## 2026-09-09 — Quarterly PDF now captures the whole report sheet (two pages; market cycle + MCR dropped), not the five PPTX crops
+
+User: "when I run a Quarterly Portfolio Report it produces something
+completely different from the report that is now hidden. I want it identical
+and with the same data." They were right — the two had never matched.
+
+### Root cause
+
+`downloadPdf` in `report-export-cards.tsx` reused `PPTX_CAPTURE_TARGETS`, the
+five element ids the **PowerPoint** memo export crops (holdings table, V-G
+positioning, FactSet risk, MCR, market cycle). Each crop became one Letter
+page. So the PDF was five loose panels — no cover, no exposures cards, none of
+the four backtested-performance sections — while the (now off-screen) sheet
+renders all of that. The 2026-09-03 journal entry described the PDF as
+"page by page", which was true of the mechanics but not of the content.
+
+### Fix
+
+- New `frontend/src/features/report/lib/pdf-pages.ts` → `PDF_CAPTURE_PAGES`.
+  `report-route.tsx` wraps the sheet's sections in `div.rpt-pdf-page`
+  containers split where the old `@media print` CSS put its
+  `break-before: page` rules (`.rpt-section-mc`, `.rpt-section-perf`):
+  `rpt-pdf-page-1` cover · holdings · V-G + FactSet · exposures;
+  `rpt-pptx-only` market cycle · MCR; `rpt-pdf-page-2` trailing perf ·
+  calendar years · quarterly excess · complements. Initially all three were
+  PDF pages; the same day the user asked to **drop the market cycle chart and
+  MCR from the PDF**, so `PDF_CAPTURE_PAGES` lists only page-1 and page-2 and
+  the middle block is mounted purely for the PPTX export (its
+  `rpt-capture-market-cycle` / `rpt-capture-mcr` crops). The `rpt-capture-*`
+  ids stay nested inside every block — both id sets must survive any future
+  re-layout.
+- `downloadPdf` iterates `PDF_CAPTURE_PAGES` instead of the PPTX targets.
+  Multi-client loop / `waitForRender` untouched.
+- `backend/pdf_export.py` now scales every page by ONE common factor (the
+  smallest per-page fit) instead of fitting each page independently. Without
+  this the tall page 1 (846×1313 CSS px for MD) came out visibly smaller than
+  pages 2–3, so type size jumped between pages. Backend runs `debug=False`
+  (no reloader) — restart it after touching this file; the first PDF call
+  already cached the module.
+- Card blurb reworded to say what the PDF contains.
+
+### Verified
+
+Headed Edge via Playwright (`channel: 'msedge'` — the `playwright` npm
+package is not in the repo; installed into the session scratchpad), client
+MD: Report tab still shows only the three cards, sheet off-screen; Download
+PDF → `Quarterly_Portfolio_Report_2026-09-09.pdf`, extracted each page image
+with pypdf and eyeballed them — content and order identical to the hidden
+sheet (first as 3 pages, then re-verified as 2 pages after the market cycle /
+MCR removal). `npx tsc --noEmit` clean.
+
+### Gotchas
+
+- The stale Next dev server left over from a previous session was returning
+  500 on every route (`TurbopackInternalError … creating new process`) before
+  any edit was made. Confirmed by stashing the change — still 500. Kill the
+  PID on :3000 and restart `npm run dev`; not a code problem.
+- For MD the Sector / Industry exposure cards show only a Cash overweight and
+  an empty underweights list. That is what the data returns, not a capture
+  truncation — the page container's bounding box includes the full cards.
+- Pages are fixed at two; a client with a very long holdings table will
+  shrink page 1 (and, via the common scale, page 2) rather than flow onto an
+  extra page.
 
 ## 2026-09-04 — Tab switches keep session state: last client + unsaved edits (Portfolio), last selection (Peer Groups)
 
