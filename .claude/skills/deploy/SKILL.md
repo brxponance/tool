@@ -109,16 +109,26 @@ aws ecr describe-images --repository-name pc-tool-backend --region us-east-1 \
 
 # c) the app answers through the load balancer
 ALB=pc-tool-alb-149658130.us-east-1.elb.amazonaws.com
-curl -s -o /dev/null -w '%{http_code}\n' http://$ALB/api/backend/status
+# Mimic the ALB health checker — that user agent is the only one the password
+# gate lets through unauthenticated (see frontend/src/middleware.ts).
+curl -s -A 'ELB-HealthChecker/2.0' -o /dev/null -w '%{http_code}\n' http://$ALB/api/backend/status
+# Any other caller must be refused: this proves the gate is actually on.
 curl -s -o /dev/null -w '%{http_code}\n' http://$ALB/api/backend/clients
 ```
 
 Green means: `rollout=COMPLETED`, `failed=0`, `running=desired`, the two digests
-**match**, and both endpoints return `200`.
+**match**, `/status` returns **200**, and `/clients` returns **401**.
 
-`/clients` returning 200 is the meaningful one — the container only reaches
-gunicorn after `alembic upgrade head` succeeds, so it proves the database
-connection works rather than silently falling back.
+`/status` returning 200 through the health-checker user agent is the meaningful
+one — that request goes ALB → frontend → proxy → backend, and the container only
+reaches gunicorn after `alembic upgrade head` succeeds, so a 200 proves the whole
+chain including the database connection is up.
+
+**`/clients` returning 401 is correct, not a failure.** A shared-password gate
+sits in front of the app (interim, until ALB sign-in lands — see
+`frontend/src/lib/gate.ts`). A `200` there would mean the gate is broken and the
+tool is publicly readable again. To check data actually loads, open the site in a
+browser, enter the password, and confirm the client list renders.
 
 ## Diagnosing a failed deploy
 

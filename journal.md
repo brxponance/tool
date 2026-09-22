@@ -4,6 +4,7 @@
 
 _Newest first. Add new entries directly below this index._
 
+- [2026-09-22 — Interim shared-password gate in front of the whole tool](#2026-09-22--interim-shared-password-gate-in-front-of-the-whole-tool)
 - [2026-09-09 — Quarterly Review build-out: skill + DWBE block, client guidelines, Peer Group report, landscape, risk page, front matter](#2026-09-09--quarterly-review-build-out-skill--dwbe-block-client-guidelines-peer-group-report-landscape-risk-page-front-matter)
 - [2026-09-09 — Quarterly PDF now captures the whole report sheet (two pages; market cycle + MCR dropped), not the five PPTX crops](#2026-09-09--quarterly-pdf-now-captures-the-whole-report-sheet-two-pages-market-cycle--mcr-dropped-not-the-five-pptx-crops)
 - [2026-09-04 — Tab switches keep session state: last client + unsaved edits (Portfolio), last selection (Peer Groups)](#2026-09-04--tab-switches-keep-session-state-last-client--unsaved-edits-portfolio-last-selection-peer-groups)
@@ -37,6 +38,95 @@ _Newest first. Add new entries directly below this index._
 - [2026-07-07 — Moved project off OneDrive to C:\dev\pc_tool (canonical working copy)](#2026-07-07-moved-project-off-onedrive-to-cdevpc_tool-canonical-working-copy)
 
 ---
+
+## 2026-09-22 — Interim shared-password gate in front of the whole tool
+
+### Why
+
+The live deployment had **no authentication of any kind**: the ALB is
+internet-facing HTTP:80, and the same open API serves reads, uploads,
+portfolio saves and deletes. Anyone with the URL had full read/write access
+to every client portfolio. Already recorded in DEPLOYMENT.md section 13 as a
+known gap; confirmed live this session with an unauthenticated curl that
+returned the full client roster.
+
+The real fix is Microsoft (Entra) sign-in on an ALB HTTPS listener. That is
+blocked on two things the app owner cannot do: a DNS subdomain such as
+`pctool.xponance.com` (ACM will not issue a cert for the `amazonaws.com` ALB
+name) and AWS console access. So this is a stopgap that ships through the
+normal deploy while that request is in flight.
+
+### What
+
+One shared password in front of everything, implemented entirely in the
+Next.js layer.
+
+- `frontend/src/lib/gate.ts` — PBKDF2-SHA256 (600k iterations) password hash
+  + HMAC-SHA256 cookie signing, both via Web Crypto so the code runs on the
+  Edge runtime (middleware) *and* Node (the login route).
+- `frontend/src/middleware.ts` — checks the cookie on every request.
+- `frontend/src/app/login/page.tsx` — the form. Outside the `(workspace)`
+  group so it renders with no nav and leaks nothing.
+- `frontend/src/app/api/login/route.ts` — verifies, sets the cookie,
+  in-memory rate limit (10 attempts / 15 min / IP, then 429).
+
+**Why the Next.js layer and not Flask:** every request hits Next first —
+through the ALB *or* straight at the container on port 3000 — and the
+backend is only reachable through the proxy at `/api/backend/*`. One check
+covers both the screens and the data API, with zero backend change.
+
+### Decisions worth knowing
+
+- **Hash is a constant in the repo, not an env var.** An env var means
+  editing the ECS task definition, which needs AWS access we don't have. Repo
+  is private; a PBKDF2 hash is not the password. Deliberate interim tradeoff.
+- **Cookie `secure: false`.** Must stay false while the ALB is HTTP-only —
+  browsers silently discard Secure cookies over plain HTTP and nobody would
+  ever stay signed in. **Flip it to true the moment HTTPS lands.**
+- **Production only** (`NODE_ENV === "production"`), so `npm run dev` and the
+  `start` skill are untouched. Verified both ways.
+- **No bcrypt/scrypt** — neither exists on the Edge runtime. PBKDF2 + HMAC do.
+
+### The trap: the ALB health check
+
+The ALB calls `/api/backend/status` every 30s and ECS kills the task after
+~2.5 min of failures. Gating that path would have restart-looped the
+container. The middleware exempts it **only** when the `User-Agent` starts
+with `ELB-HealthChecker`, so a browser still gets the prompt. Verified both
+branches: browser UA → 401, `-A 'ELB-HealthChecker/2.0'` → 200.
+
+Knock-on: the `deploy` skill's verification expected HTTP 200 from
+`/api/backend/clients`. That is now **401 and that is the correct result** —
+a 200 would mean the gate is broken. Skill updated to curl `/status` with the
+health-checker UA and to assert 401 on `/clients`.
+
+### Gotcha hit on the way
+
+`tsc` rejected `new Uint8Array(n)` where Web Crypto wants `BufferSource`:
+under TS 5.7+ that infers `Uint8Array<ArrayBufferLike>`, and `SharedArrayBuffer`
+isn't assignable. Fixed by backing it with an explicit `new ArrayBuffer(n)`
+and returning `Uint8Array<ArrayBuffer>`.
+
+### Verified
+
+Production build served locally with the real backend: unauthenticated `/`
+and `/portfolio` 307 to `/login`, `/api/backend/clients` 401, wrong password
+401, correct password 200 + HttpOnly cookie, then every page and API call
+normal. Headed Edge via Playwright: login screen leaks no client data, wrong
+password shows the error, correct password lands on `/portfolio` and
+navigation is free afterwards. Rate limit trips at attempt 11. `npm run dev`
+shows no prompt.
+
+### Still open
+
+- **No encryption.** The password crosses the internet in clear text until
+  HTTPS. This stops casual/accidental access, not traffic interception.
+- **No accountability** — one shared password, so still no record of who
+  changed a portfolio.
+- **Confirm the task SG does not expose port 3001.** DEPLOYMENT.md only
+  mentions 3000. If 3001 were open, Flask could be called directly and this
+  gate bypassed entirely.
+- Delete all four files + the skill edit once ALB sign-in is live.
 
 ## 2026-09-09 — Quarterly Review build-out: skill + DWBE block, client guidelines, Peer Group report, landscape, risk page, front matter
 
