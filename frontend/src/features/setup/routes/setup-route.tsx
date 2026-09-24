@@ -75,7 +75,6 @@ type UploadSlot = {
     | "manager_returns"
     | "factor_returns"
     | "weights"
-    | "risk_summary"
     | "security_risk"
     | "exposures"
     | "qualitative"
@@ -111,14 +110,6 @@ const UPLOAD_SLOTS: UploadSlot[] = [
     label: "Portfolio Weights",
     hint: "Optional",
     icon: "⚖️",
-  },
-  {
-    key: "risk_summary",
-    endpoint: "upload_risk",
-    field: "risk_summary",
-    label: "FactSet Risk Summary",
-    hint: "Manager-level active exposures (legacy)",
-    icon: "📉",
   },
   {
     key: "security_risk",
@@ -157,10 +148,6 @@ const UPLOAD_SLOTS: UploadSlot[] = [
 function hasStagedFile(status: BackendStatus | undefined, key: UploadSlot["key"]) {
   if (!status) {
     return false;
-  }
-
-  if (key === "risk_summary") {
-    return status.has_risk || Boolean(status.files[key]);
   }
 
   if (key === "security_risk") {
@@ -296,7 +283,7 @@ export function SetupRoute() {
   const requiredUploadsReady = Boolean(status?.files.manager_returns && status?.files.factor_returns);
   const universeReady = Boolean(status?.files.factor_returns) && Boolean(status?.universe_files_staged.length);
   const reloadInputsVisible = Boolean(
-    status?.has_results && (status.has_weights || status.has_risk || status.has_exposures),
+    status?.has_results && (status.has_weights || status.has_security_risk || status.has_exposures),
   );
   const progressVisible = Boolean(progress?.running || progress?.done || progress?.error || progress?.messages.length);
 
@@ -881,7 +868,7 @@ export function SetupRoute() {
                 className="btn btn-outline btn-sm"
                 onClick={() => void handleReloadInputs()}
                 disabled={busyAction !== null || Boolean(progress?.running)}
-                title="Re-read weights, FactSet Risk Summary, and FactSet Exposures files without re-running clones"
+                title="Re-read weights, FactSet Security-Level Risk, and FactSet Exposures files without re-running clones"
               >
                 {busyAction === "reload_inputs" ? "Reloading…" : "Reload Inputs"}
               </button>

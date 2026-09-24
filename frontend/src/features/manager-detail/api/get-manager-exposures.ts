@@ -7,35 +7,24 @@ import type {
 } from "../types";
 
 // Compute one manager's active style factor exposures, mirroring the
-// /compute_risk_exposures or /compute_security_risk_exposures endpoints
+// /compute_security_risk_exposures endpoint
 // the Portfolio tab uses — but with a single manager at 100% weight so
 // the response represents the manager's own active exposures.
 export async function getManagerRiskExposures(
   name: string,
   tab: string,
   benchmarkHint: string | null,
-  useSecurityRisk: boolean,
 ): Promise<ManagerRiskExposuresResponse> {
-  const path = useSecurityRisk
-    ? "compute_security_risk_exposures"
-    : "compute_risk_exposures";
-
   const payload: Record<string, unknown> = {
     managers: [
       { matched_name: name, tab, current_weight: 1.0, proposed_weight: 1.0 },
     ],
   };
   if (benchmarkHint) {
-    // Different endpoints expect different field names — match the legacy
-    // contract so the existing backend resolvers find the right benchmark.
-    if (useSecurityRisk) {
-      payload.bench = benchmarkHint;
-    } else {
-      payload.benchmark_name = benchmarkHint;
-    }
+    payload.bench = benchmarkHint;
   }
 
-  return backendJson<ManagerRiskExposuresResponse>(path, {
+  return backendJson<ManagerRiskExposuresResponse>("compute_security_risk_exposures", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),

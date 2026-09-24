@@ -461,8 +461,7 @@ export function ManagerDetailRoute({
               ) : null}
               <ManagerRiskExposuresPanel
                 managers={managerRefs}
-                useSecurityRisk={!!status?.has_security_risk}
-                hasRiskFile={!!status?.has_risk || !!status?.has_security_risk}
+                hasRiskFile={!!status?.has_security_risk}
               />
             </div>
             <div

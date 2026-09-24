@@ -132,15 +132,43 @@ def classify_market_development(country):
     return 'Other'
 
 
+# Index names arrive in two vocabularies: the house short style used in the
+# weights file and in _SLEEVES ('MSCI ACWI ex-US SC'), and FactSet's full
+# export names ('MSCI AC World ex USA Small Cap'). These collapse both onto
+# one key so a client benchmark matches a section derived from the
+# security-level file.
+#
+# ORDER MATTERS. The ACWI spellings must collapse BEFORE the ex-US rules,
+# or 'all country world ex us' gets caught by the world-ex-us equivalence
+# at the end and mangled into 'all country eafe canada'.
+_BENCH_ALIASES = (
+    (r'\ball country world\b', 'acwi'),
+    (r'\bac world\b',          'acwi'),
+    (r'\bex united states\b',  'ex us'),
+    (r'\bex usa\b',            'ex us'),
+    (r'\bemerging markets\b',  'em'),
+    # MSCI World ex US is the same universe as EAFE + Canada, so MD's
+    # 'MSCI World ex US SC' must find the 'MSCI EAFE + Canada Small Cap'
+    # section. Never reduce this to a bare 'world' rule — plain 'MSCI World'
+    # is a different index and must not be rewritten.
+    (r'\bworld ex us\b',       'eafe canada'),
+)
+
+
 def _norm_bench(s):
     """Normalize a benchmark name for cross-file matching.
-    Strips punctuation (`+ - / , .`) and collapses whitespace, then
-    canonicalises 'Small Cap' → 'sc' so 'MSCI EAFE Small Cap' and 'MSCI
-    EAFE SC' resolve to the same key. Used both for _SLEEVES lookups and
-    for matching client benchmark strings against the available column
-    list in the uploaded risk file."""
-    t = re.sub(r'[\s\+\-/,\.]+', ' ', (s or '').lower()).strip()
+    Strips punctuation (`+ - / , . ( )`) and collapses whitespace,
+    canonicalises 'Small Cap' -> 'sc', then applies _BENCH_ALIASES so
+    FactSet's full index names and the house short names resolve to the same
+    key. Used both for _SLEEVES lookups and for matching client benchmark
+    strings against the available column list in the uploaded risk file."""
+    t = re.sub(r'[\s\+\-/,\.\(\)]+', ' ', (s or '').lower()).strip()
     t = re.sub(r'\bsmall\s+cap\b', 'sc', t)
+    for pattern, replacement in _BENCH_ALIASES:
+        t = re.sub(pattern, replacement, t)
+    # 'MSCI EM (Emerging Markets) Small Cap' becomes 'msci em em sc' once
+    # 'emerging markets' collapses — drop the repeated token.
+    t = re.sub(r'\b(\w+)( \1\b)+', r'\1', t)
     return re.sub(r'\s+', ' ', t).strip()
 
 

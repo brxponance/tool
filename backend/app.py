@@ -84,7 +84,6 @@ state = {
     # each client-header row in the weights workbook. Drives the "Client Total
     # AUM" banner, the per-manager AUM columns, and redemption sizing.
     'client_aum': {},
-    'risk_data': None,
     'universe_clone_results': None, 'universe_dfs': None,
     'exposures_data': None,
     'norm_skill_by_tab': {},
@@ -121,7 +120,6 @@ def save_cache():
                 'weights':                 state['weights'],
                 'client_benchmarks':       state['client_benchmarks'],
                 'client_aum':              state.get('client_aum') or {},
-                'risk_data':               state['risk_data'],
                 'universe_clone_results':  state['universe_clone_results'],
                 'exposures_data':          state['exposures_data'],
                 'norm_skill_by_tab':       state['norm_skill_by_tab'],
@@ -375,7 +373,6 @@ def load_cache():
         state['weights']                = data.get('weights')
         state['client_benchmarks']      = data.get('client_benchmarks') or {}
         state['client_aum']             = data.get('client_aum') or {}
-        state['risk_data']              = data.get('risk_data')
         state['clone_run_files']        = data.get('clone_run_files') or {}
         state['security_risk_data']     = data.get('security_risk_data')
         state['universe_clone_results'] = data.get('universe_clone_results')
@@ -709,7 +706,6 @@ def status():
     return jsonify({
         'has_results':   state['clone_results'] is not None,
         'has_weights':   state['weights'] is not None,
-        'has_risk':      state['risk_data'] is not None,
         'has_security_risk': state.get('security_risk_data') is not None,
         'has_universe':  len(uni_tabs_cached) > 0,
         'universe_tabs': uni_tabs_cached,
@@ -921,16 +917,6 @@ def _reload_inputs_core():
         except Exception as e:
             status['weights'] = 'error'
             errors['weights'] = str(e)
-
-    # Risk summary
-    _p = _input_path('risk_summary')
-    if _p:
-        try:
-            state['risk_data'] = parse_risk_summary(_p)
-            status['risk'] = 'ok'
-        except Exception as e:
-            status['risk'] = 'error'
-            errors['risk'] = str(e)
 
     # Exposures
     _p = _input_path('exposures')
@@ -1922,8 +1908,6 @@ def _enumerate_placeholder_candidates():
     raw = []
     ed = state.get('exposures_data') or {}
     raw += [(n, 1) for n in (ed.get('managers') or {}).keys()]
-    rd = state.get('risk_data') or {}
-    raw += [(n, 1) for n in rd.get('manager_names', []) or []]
     srd = state.get('security_risk_data') or {}
     raw += [(n, 0) for n in (srd.get('managers') or {}).keys()
             if _re.search(r'\svs\.?\s', str(n), _re.IGNORECASE)]
@@ -2328,158 +2312,6 @@ def _is_risk_bench_name(nm):
     return up.startswith(_RISK_BENCH_PREFIXES) or any(k in up for k in _RISK_BENCH_KEYWORDS)
 
 
-def parse_risk_summary(filepath):
-    """Parse a FactSet Risk Summary export into a structured dict.
-
-    The export is expected to list managers AND candidate benchmarks as
-    columns on the same sheet (in the 'Active vs USD' configuration, which
-    is equivalent to absolute exposure for our purposes — see risk doc).
-    Row structure:
-      Row ~7:  column header names (managers + benchmarks mixed)
-      Row 10:  'Active Risk Factor Decomp'
-      Row 11:  'Active Exposure'
-      Rows 12+: Market / Global Market / Style (aggregate) / 11 style factors
-               / Industry (aggregate) + individual industries
-               / Country (aggregate) + individual countries
-               / Currency (aggregate) + individual currencies
-
-    Returns:
-      {
-        'manager_names':   [str, ...],              # in file order
-        'benchmark_names': [str, ...],              # ditto
-        'style_factors':   {factor: {col_name: float or None}},
-        'industries':      {industry: {col_name: float or None}},
-        'countries':       {country:  {col_name: float or None}},
-        'currencies':      {currency: {col_name: float or None}},
-      }
-    Downstream code combines managers' absolute exposures by weight and
-    subtracts the client benchmark's absolute exposures to produce true
-    portfolio-vs-benchmark active exposures (the 'bottom-up' computation).
-    """
-    from openpyxl import load_workbook
-    wb = load_workbook(filepath, read_only=True)
-    ws = wb.active
-    rows = list(ws.iter_rows(values_only=True))
-    wb.close()
-
-    # Find the header row: first row where col B is a non-empty string
-    # other than 'Data'. The FactSet export repeats the header — use the
-    # first occurrence.
-    col_names = []
-    for row in rows:
-        if len(row) < 2 or not row[1]:
-            continue
-        if str(row[1]).strip().lower() == 'data':
-            continue
-        non_none = [x for x in row[1:] if x is not None and str(x).strip() != '']
-        if non_none and isinstance(non_none[0], str):
-            col_names = [str(x).strip() if x is not None else None
-                         for x in row[1:]]
-            # Trim trailing Nones (columns past the last named one)
-            while col_names and not col_names[-1]:
-                col_names.pop()
-            break
-
-    if not col_names:
-        return {'manager_names': [], 'benchmark_names': [],
-                'style_factors': {}, 'industries': {}, 'countries': {},
-                'currencies': {}}
-
-    # Classify each column
-    manager_names   = [c for c in col_names if c and not _is_risk_bench_name(c)]
-    benchmark_names = [c for c in col_names if c and _is_risk_bench_name(c)]
-
-    def _coerce(v):
-        if v is None or v == '':
-            return None
-        try:
-            return float(v)
-        except (ValueError, TypeError):
-            return None
-
-    def _row_to_map(row):
-        """Given a data row, return {col_name: float or None} keyed by the
-        column headers (skipping unlabelled columns)."""
-        out = {}
-        # row[0] is the label, row[1:] align with col_names
-        vals = list(row[1:1 + len(col_names)])
-        for name, v in zip(col_names, vals):
-            if not name:
-                continue
-            out[name] = _coerce(v)
-        return out
-
-    # Walk the file, tracking which section we're in. The aggregate rows
-    # labelled exactly 'Style'/'Industry'/'Country'/'Currency' flip the
-    # section; every subsequent non-empty label until the next marker is a
-    # member row of that section.
-    style_factors = {}
-    industries    = {}
-    countries     = {}
-    currencies    = {}
-
-    section = None
-    buckets = {
-        'Style':    style_factors,
-        'Industry': industries,
-        'Country':  countries,
-        'Currency': currencies,
-    }
-
-    for row in rows:
-        if not row or row[0] is None:
-            continue
-        label = str(row[0]).strip()
-        if label in _RISK_SECTIONS:
-            # Start of a new section; skip the aggregate row itself.
-            section = label
-            continue
-        if section is None:
-            continue
-        # Ignore section-level aggregate labels that repeat header text.
-        if label in ('Market', 'Global Market', 'Active Exposure',
-                     'Active Risk Factor Decomp'):
-            continue
-        # If the row has no numeric data under any column, treat it as
-        # stray padding and skip.
-        data_map = _row_to_map(row)
-        if not any(v is not None for v in data_map.values()):
-            continue
-        buckets[section][label] = data_map
-
-    return {
-        'manager_names':   manager_names,
-        'benchmark_names': benchmark_names,
-        'style_factors':   style_factors,
-        'industries':      industries,
-        'countries':       countries,
-        'currencies':      currencies,
-    }
-
-
-@app.route('/upload_risk', methods=['POST'])
-def upload_risk():
-    if 'risk_summary' not in request.files:
-        return jsonify({'status': 'error', 'message': 'No file'})
-    f = request.files['risk_summary']
-    if not f.filename:
-        return jsonify({'status': 'error', 'message': 'No filename'})
-    path = save_uploaded_file(f, secure_filename(f.filename), app.config['UPLOAD_FOLDER'])
-    try:
-        local = resolve_path(path, app.config['UPLOAD_FOLDER'], suffix='.xlsx')
-        parsed = parse_risk_summary(local)
-        state['risk_data'] = parsed
-        state['files']['risk_summary'] = path
-        save_cache()
-        return jsonify({
-            'status':    'ok',
-            'managers':  parsed['manager_names'],
-            'benchmarks': parsed['benchmark_names'],
-            'factors':   list(parsed['style_factors'].keys()),
-        })
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)})
-
 @app.route('/upload_security_risk', methods=['POST'])
 def upload_security_risk():
     """Upload a FactSet Security-Level Risk DNA workbook. Parses manager
@@ -2525,14 +2357,9 @@ def sleeve_options():
     data = request.get_json(silent=True) or {}
     client_name = data.get('client_name')
     bench_str   = (state.get('client_benchmarks') or {}).get(client_name or '')
-    # Union, mirroring /compute_security_risk_exposures: benchmarks derived
-    # from the security file's own index sections, plus any the legacy
-    # Benchmark Risk Summaries upload uniquely provides (Russell 1000,
-    # MSCI EM, MSCI EM SC today — the sleeve targets with no section).
+    # Benchmarks come from the security file's own index sections — see
+    # security_risk_engine.benchmark_section_name.
     available = list((state.get('security_risk_data') or {}).get('available_benchmarks') or [])
-    for bn in ((state.get('risk_data') or {}).get('benchmark_names') or []):
-        if bn not in available:
-            available.append(bn)
     from security_risk_engine import get_sleeve_options
     options = get_sleeve_options(bench_str or '', available)
     return jsonify({'options': options, 'benchmark': bench_str})
@@ -2548,7 +2375,7 @@ def compute_security_risk_exposures():
     sleeve is one of: null (full portfolio), 'US', 'Non-US', 'EM'
     bench is the exact benchmark column name from the Risk Summary tab.
 
-    Returns the same response shape as /compute_risk_exposures so the
+    Returns the response shape the risk panel expects so the
     frontend's renderRiskExposures() works unchanged, with an extra
     'sleeve_info' key carrying coverage % and country flags.
     """
@@ -2569,40 +2396,12 @@ def compute_security_risk_exposures_core(managers, client_name, sleeve=None,
         return {'error': 'No security risk data loaded. Upload a '
                          'Security-Level Risk DNA file on the Setup tab.'}
 
-    # Benchmarks normally come from the security file itself: the parser
-    # derives them from the index sections FactSet exports alongside the
-    # managers (see security_risk_engine.benchmark_section_name).
-    #
-    # The legacy Benchmark Risk Summaries upload is merged in for any index
-    # the security file has NO section for — today that is Russell 1000,
-    # MSCI EM and MSCI EM SC, which the sleeve breakdowns use. Additive, not
-    # replace: a benchmark derived from holdings is computed the same way as
-    # the portfolio side, so it wins where both exist. Once the security
-    # export includes those three sections this whole block is dead and the
-    # Risk Summary upload can be removed.
+    # Benchmarks come from the security file itself: the parser derives them
+    # from the index sections FactSet exports alongside the managers — see
+    # security_risk_engine.benchmark_section_name. The separate Risk Summary
+    # upload that used to supply them was removed on 2026-09-24 once the
+    # export included every index the sleeves need.
     sec_data = state['security_risk_data']
-    rd = state.get('risk_data') or {}
-    rd_bench_names   = rd.get('benchmark_names', [])
-    rd_style_factors = rd.get('style_factors', {})  # {factor: {col: val}}
-    missing = [bn for bn in rd_bench_names
-               if bn not in (sec_data.get('benchmarks') or {})]
-    if missing:
-        from security_risk_engine import STYLE_FACTORS as _SF
-        merged = dict(sec_data.get('benchmarks') or {})
-        for bn in missing:
-            merged.setdefault(bn, {})
-        for factor, col_map in rd_style_factors.items():
-            if factor not in _SF:
-                continue
-            for bn in missing:
-                v = (col_map or {}).get(bn)
-                if v is not None:
-                    merged[bn][factor] = v
-        sec_data = dict(sec_data)
-        sec_data['benchmarks'] = merged
-        sec_data['available_benchmarks'] = (
-            list(sec_data.get('available_benchmarks') or []) + missing
-        )
 
     # Always look up the breakdown's sleeve set so we know whether an EM
     # sleeve exists for this client's benchmark. classify_country needs
@@ -2639,294 +2438,6 @@ def compute_security_risk_exposures_core(managers, client_name, sleeve=None,
     except Exception as e:
         import traceback
         return {'error': str(e), 'detail': traceback.format_exc()}
-
-
-@app.route('/compute_risk_exposures', methods=['POST'])
-def compute_risk_exposures():
-    """
-    Compute portfolio-vs-client-benchmark active style exposures from the
-    bottom up, using the new FactSet Risk Summary format where both managers
-    AND candidate benchmarks sit side-by-side as absolute exposures
-    (active vs USD, which is mathematically equivalent to absolute for
-    our purposes).
-
-    For each style factor:
-      portfolio_current_abs  = Σ(w_current_i  × manager_i_abs)
-      portfolio_proposed_abs = Σ(w_proposed_i × manager_i_abs)
-      benchmark_abs          = risk_file[factor][client_benchmark]
-      current_active  = portfolio_current_abs  − benchmark_abs
-      proposed_active = portfolio_proposed_abs − benchmark_abs
-      delta           = proposed_active − current_active    (same as
-                        proposed_abs − current_abs — benchmark cancels)
-
-    The client benchmark is resolved from state['client_benchmarks'] (the
-    weights file). If that benchmark doesn't match a column in the risk
-    file, we fall back to computing without a benchmark (i.e. raw portfolio
-    absolute) and flag the condition so the UI can show a warning.
-
-    Weights are renormalised across the managers that DID match the risk
-    file, so a portfolio with one un-matched manager still produces a
-    meaningful active number for the rest — matching the old endpoint's
-    behaviour.
-    """
-    data = request.json or {}
-    return jsonify(compute_risk_exposures_core(
-        data.get('managers', []), data.get('client_name')))
-
-
-def compute_risk_exposures_core(managers, client_name, benchmark_name=None):
-    """Core of /compute_risk_exposures — returns a plain dict rather than a
-    Response, so the Word-memo export can reuse it directly. `benchmark_name`
-    overrides the benchmark resolved from the weights file."""
-    if not state['risk_data']:
-        return {'error': 'No risk data loaded'}
-
-    rd = state['risk_data']
-
-    # Backwards compat: if the loaded cache is from the OLD parser (which
-    # returned {'managers': [...], 'style_factors': {factor: [list]}}),
-    # refuse to run rather than produce garbage. User needs to re-upload.
-    if 'manager_names' not in rd:
-        return {'error': 'Risk summary cache is in the old format. '
-                         'Re-upload the Risk Summary file to use the '
-                         'new bottom-up computation.'}
-
-    mgr_cols   = rd.get('manager_names', [])
-    bench_cols = rd.get('benchmark_names', [])
-    factors    = rd.get('style_factors', {})   # {factor: {col_name: value}}
-
-    # ── Manager-name matching ────────────────────────────────────────────
-    # Matching is a three-tier cascade designed to handle two situations
-    # the previous implementation got wrong:
-    #   (1) The risk file may contain BOTH 'Mgr EAFE' and 'Mgr EAFE SC' for
-    #       the same firm's LC and SC sleeves — our normaliser strips
-    #       'eafe sc' and 'eafe' both to nothing, so naive dict-comprehension
-    #       lookups silently dropped one variant and returned the wrong
-    #       sleeve's data. Client 1's size exposure flipped from -0.32 to
-    #       +0.17 because of this.
-    #   (2) A buy-list manager's name may differ in its regional tag from
-    #       the risk-file column ('Ballina ISC' in the buy-list vs 'Ballina
-    #       EAFE SC' in the risk file).
-    #
-    # The fix: keep a LIST of candidates per normalised key (not a dict that
-    # overwrites collisions) and break ties by the manager's peer tab. ISC
-    # and USSC tabs prefer risk columns whose name carries a small-cap
-    # marker; EAFE/US/ACWI/EM tabs prefer columns without one.
-    import re
-    def norm(s):
-        s = str(s).lower().strip()
-        s = re.sub(r'\([^)]*\)', '', s)
-        s = re.sub(r'[\./\-_,]+', ' ', s)
-        suffixes = [
-            'international small cap equity',
-            'international small cap',
-            'international small company',
-            'non us small cap',
-            'non us equity',
-            'international equity',
-            'smid cap', 'small/mid cap', 'small mid cap', 'small cap',
-            'small company', 'micro cap', 'emerging markets', 'emerging mkts',
-            'eafe sc', 'acwi sc', 'xus sc', 'em sc',
-            'eafe', 'acwi', 'xus', 'em', 'us', 'global', 'isc',
-            'non us', 'international',
-            'equity', 'equities',
-            'composite', 'portfolio', 'strategy', 'fund',
-            'mid cap', 'large cap',
-            'growth', 'value', 'blend', 'core',
-            'sc', 'lc',
-        ]
-        for suffix in suffixes:
-            s = re.sub(r'\b' + re.escape(suffix) + r'\b', '', s)
-        return re.sub(r'\s+', ' ', s).strip()
-
-    # Normalised key → LIST of candidate column names (not just the last one)
-    mgr_key_to_cols = {}
-    for c in mgr_cols:
-        mgr_key_to_cols.setdefault(norm(c), []).append(c)
-    mgr_raw_lower = [(n, str(n).lower().strip()) for n in mgr_cols]
-
-    _SC_TOKENS = (' sc', ' small cap', ' smallcap', ' small-cap', ' isc')
-
-    def _col_is_smallcap(col):
-        """Is this risk-file column a small-cap sleeve? Token-match on the
-        column name so 'Ballina EAFE SC' → True, 'Ballina EAFE' → False."""
-        c = ' ' + str(col).lower() + ' '
-        return any(tok + ' ' in c or tok == c.rstrip() for tok in _SC_TOKENS)
-
-    def _pick_by_tab(candidates, tab):
-        """When a normalised key has multiple candidate columns, use the
-        manager's peer tab to pick the right one. Falls back to the first
-        candidate if the tab doesn't disambiguate."""
-        if len(candidates) == 1:
-            return candidates[0]
-        prefer_sc = tab in ('ISC', 'USSC')
-        sc_cands    = [c for c in candidates if _col_is_smallcap(c)]
-        nonsc_cands = [c for c in candidates if not _col_is_smallcap(c)]
-        if prefer_sc and sc_cands:
-            return sc_cands[0]
-        if (not prefer_sc) and nonsc_cands:
-            return nonsc_cands[0]
-        return candidates[0]
-
-    def match_manager_col(mgr):
-        """Return the exact manager-column name in the risk file that best
-        matches this buy-list manager, or None. `mgr` is the dict from the
-        frontend, with 'matched_name' (or 'name') and 'tab' fields."""
-        name = mgr.get('matched_name') or mgr.get('name', '')
-        tab  = mgr.get('tab')
-        if not name:
-            return None
-        raw_lower = str(name).lower().strip()
-
-        # (1) Exact raw (case-insensitive) match — preserves LC/SC distinction
-        # in the common case where buy-list and risk-file use identical names.
-        for orig, rl in mgr_raw_lower:
-            if rl == raw_lower:
-                return orig
-
-        # (2) Normalised-key match with collision-aware selection
-        key = norm(name)
-        cands = mgr_key_to_cols.get(key)
-        if cands:
-            return _pick_by_tab(cands, tab)
-
-        # (3) Short-stem prefix / word-boundary match
-        if key and len(key) <= 5:
-            hits = []
-            for orig, rl in mgr_raw_lower:
-                if rl.startswith(key + ' ') or rl == key \
-                   or (' ' + key + ' ') in (' ' + rl + ' '):
-                    hits.append(orig)
-            if hits:
-                return _pick_by_tab(hits, tab)
-
-        # (4) Fuzzy fallback — WRatio handles partial/length-asymmetric matches
-        from rapidfuzz import process, fuzz
-        candidates = [k for k in mgr_key_to_cols.keys() if k]
-        if candidates and key:
-            m = process.extractOne(key, candidates,
-                                   scorer=fuzz.WRatio, score_cutoff=75)
-            if m:
-                return _pick_by_tab(mgr_key_to_cols[m[0]], tab)
-        return None
-
-    # ── Benchmark-column matching ────────────────────────────────────────
-    # Client's benchmark comes from the weights file (state['client_benchmarks']).
-    # Risk-file benchmark columns are things like 'MSCI EAFE', 'MSCI EAFE SC',
-    # 'MSCI EAFE + Canada' etc. Names in the weights file may differ slightly
-    # ('MSCI EAFE+CANADA' vs 'MSCI EAFE + Canada') — normalise whitespace and
-    # punctuation before matching.
-    def _bench_norm(s):
-        t = str(s or '').lower()
-        for ch in ['+', '-', '/', ',', '.']:
-            t = t.replace(ch, ' ')
-        return re.sub(r'\s+', ' ', t).strip()
-
-    bench_lookup = {_bench_norm(b): b for b in bench_cols}
-
-    client_bench_str = (benchmark_name
-                        or (state.get('client_benchmarks') or {}).get(client_name or ''))
-    matched_bench_col = None
-    if client_bench_str:
-        key = _bench_norm(client_bench_str)
-        matched_bench_col = bench_lookup.get(key)
-        if matched_bench_col is None:
-            # Fuzzy fallback — handles 'MSCI EAFE SC' vs 'MSCI EAFE Small Cap'
-            from rapidfuzz import process, fuzz
-            cand = list(bench_lookup.keys())
-            if cand:
-                m = process.extractOne(key, cand, scorer=fuzz.WRatio,
-                                        score_cutoff=80)
-                if m:
-                    matched_bench_col = bench_lookup[m[0]]
-
-    # Per-factor benchmark absolute values (None if benchmark not found)
-    def bench_val(factor):
-        if not matched_bench_col:
-            return None
-        return factors.get(factor, {}).get(matched_bench_col)
-
-    # ── Per-manager factor lookups ───────────────────────────────────────
-    def mgr_val(mgr, factor):
-        col = match_manager_col(mgr)
-        if not col:
-            return None
-        return factors.get(factor, {}).get(col)
-
-    # ── Bottom-up sumproduct → active ────────────────────────────────────
-    def sumproduct(weight_key):
-        """Weighted-average absolute exposures across matched managers.
-        Weights are renormalised across matched managers only — an
-        unmatched manager doesn't poison the aggregate."""
-        out = {}
-        for factor in STYLE_FACTORS:
-            matched_pairs = []   # list of (w, value) for matched managers
-            for m in managers:
-                w = m.get(weight_key, 0) or 0
-                if w <= 0:
-                    continue
-                v = mgr_val(m, factor)
-                if v is None:
-                    continue
-                matched_pairs.append((w, v))
-            total_w = sum(w for w, _ in matched_pairs)
-            if total_w <= 0:
-                out[factor] = None
-                continue
-            out[factor] = sum((w / total_w) * v for w, v in matched_pairs)
-        return out
-
-    cur_abs  = sumproduct('current_weight')
-    prop_abs = sumproduct('proposed_weight')
-
-    # Active = absolute − benchmark_absolute. When benchmark is unavailable
-    # we fall back to absolute (matches legacy behaviour and keeps the UI
-    # responsive — warning is surfaced separately).
-    current  = {}
-    proposed = {}
-    for f in STYLE_FACTORS:
-        b = bench_val(f)
-        if cur_abs[f] is None:
-            current[f] = None
-        elif b is None:
-            current[f] = round(cur_abs[f], 6)
-        else:
-            current[f] = round(cur_abs[f] - b, 6)
-        if prop_abs[f] is None:
-            proposed[f] = None
-        elif b is None:
-            proposed[f] = round(prop_abs[f], 6)
-        else:
-            proposed[f] = round(prop_abs[f] - b, 6)
-    delta = {f: round(proposed[f] - current[f], 6)
-             if proposed[f] is not None and current[f] is not None else None
-             for f in STYLE_FACTORS}
-
-    # Flag managers with non-zero weight whose exposures couldn't be matched
-    unmatched = []
-    for m in managers:
-        if (m.get('current_weight', 0) or 0) > 0 or (m.get('proposed_weight', 0) or 0) > 0:
-            display_name = m.get('matched_name') or m.get('name', '?')
-            if mgr_val(m, 'Beta') is None:
-                unmatched.append(display_name)
-
-    # Benchmark-resolution notes for the UI
-    benchmark_info = {
-        'requested':         client_bench_str,
-        'matched_column':    matched_bench_col,
-        'available_columns': bench_cols,
-        'fallback_absolute': bool(client_bench_str and not matched_bench_col),
-    }
-
-    return {
-        'factors':     STYLE_FACTORS,
-        'current':     current,
-        'proposed':    proposed,
-        'delta':       delta,
-        'unmatched':   unmatched,
-        'rd_managers': mgr_cols,
-        'benchmark':   benchmark_info,
-    }
 
 
 # ── Actual client track records ('Client' sheet of the returns workbook) ──
@@ -4822,10 +4333,6 @@ def export_portfolio_docx():
             risk = compute_security_risk_exposures_core(managers, client)
             if risk and risk.get('error'):
                 risk = None
-        if risk is None and state.get('risk_data'):
-            risk = compute_risk_exposures_core(managers, client, benchmark_name=bench_str)
-            if risk and risk.get('error'):
-                risk = None
     except Exception as e:  # noqa: BLE001
         print(f"[docx] risk section skipped: {e}")
         risk = None
@@ -5428,8 +4935,7 @@ def export_dispersion_xlsx():
     from openpyxl.utils import get_column_letter
 
     sec = state.get('security_risk_data') or {}
-    risk = state.get('risk_data') or {}
-    available = sec.get('available_benchmarks') or list(risk.get('benchmark_names', []))
+    available = sec.get('available_benchmarks') or []
     FACTORS = sec.get('factors') or STYLE_FACTORS
     have_risk = bool(sec.get('managers'))
 

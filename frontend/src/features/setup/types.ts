@@ -1,7 +1,6 @@
 export type BackendStatus = {
   has_results: boolean;
   has_weights: boolean;
-  has_risk: boolean;
   has_security_risk: boolean;
   has_universe: boolean;
   universe_tabs: string[];

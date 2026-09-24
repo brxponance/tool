@@ -390,7 +390,7 @@ export function usePortfolioScreen() {
         setState((current) => ({
           ...current,
           stats: emptyPortfolioStats(),
-          riskExposures: status.has_security_risk || status.has_risk ? emptyRiskExposures() : null,
+          riskExposures: status.has_security_risk ? emptyRiskExposures() : null,
           riskAnalysis: null,
           contribution: emptyContribution(),
           marketCycle: null,
@@ -415,8 +415,8 @@ export function usePortfolioScreen() {
         // the override-resolved managers — Peer Groups bucket edits flow into
         // the V-G positioning numbers (bucket-overrides store).
         getPortfolioStats(applyBucketOverrides(getBucketOverrideMap(), portfolio.managers)),
-        status.has_security_risk || status.has_risk
-          ? getPortfolioRiskExposures(client, portfolio.managers, status.has_security_risk)
+        status.has_security_risk
+          ? getPortfolioRiskExposures(client, portfolio.managers)
           : Promise.resolve(null),
         getPortfolioRiskAnalysis(client, portfolio.managers),
         contributionRequest,
@@ -438,7 +438,7 @@ export function usePortfolioScreen() {
         riskExposures:
           isFulfilled(riskExposuresResult) && riskExposuresResult.value
             ? riskExposuresResult.value
-            : status.has_security_risk || status.has_risk
+            : status.has_security_risk
               ? emptyRiskExposures(
                   riskExposuresResult.status === "rejected"
                     ? toErrorMessage(riskExposuresResult.reason, "Unable to load risk exposures.")

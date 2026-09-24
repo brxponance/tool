@@ -144,27 +144,28 @@ export async function getPortfolioStats(managers: PortfolioResponse["managers"])
   });
 }
 
+// Bottom-up (stock-level) active factor exposures. The old top-down
+// /compute_risk_exposures endpoint and its Risk Summary upload were removed
+// on 2026-09-24 — benchmarks now come from the security file's own index
+// sections, so there is only one path.
 export async function getPortfolioRiskExposures(
   client: string,
   managers: PortfolioResponse["managers"],
-  useSecurityRisk: boolean,
   sleeve?: string | null,
   bench?: string | null,
 ) {
-  return backendJson<RiskExposuresResponse>(
-    useSecurityRisk ? "compute_security_risk_exposures" : "compute_risk_exposures",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(
-        useSecurityRisk
-          ? { client_name: client, managers, sleeve: sleeve ?? null, bench: bench ?? null }
-          : { client_name: client, managers },
-      ),
+  return backendJson<RiskExposuresResponse>("compute_security_risk_exposures", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
     },
-  );
+    body: JSON.stringify({
+      client_name: client,
+      managers,
+      sleeve: sleeve ?? null,
+      bench: bench ?? null,
+    }),
+  });
 }
 
 // Sleeve breakdown options for the FactSet Risk Exposures panel (security-

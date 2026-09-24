@@ -4,6 +4,7 @@
 
 _Newest first. Add new entries directly below this index._
 
+- [2026-09-24 — FactSet Risk Summary upload removed entirely; benchmark name aliases added](#2026-09-24--factset-risk-summary-upload-removed-entirely-benchmark-name-aliases-added)
 - [2026-09-24 — Benchmarks now derived from the security file's own MSCI sections (Risk Summary demoted to a stopgap)](#2026-09-24--benchmarks-now-derived-from-the-security-files-own-msci-sections-risk-summary-demoted-to-a-stopgap)
 - [2026-09-22 — Report exposures were asking for a display label, not a column name (Sector/Industry silently empty)](#2026-09-22--report-exposures-were-asking-for-a-display-label-not-a-column-name-sectorindustry-silently-empty)
 - [2026-09-22 — Interim shared-password gate in front of the whole tool](#2026-09-22--interim-shared-password-gate-in-front-of-the-whole-tool)
@@ -40,6 +41,89 @@ _Newest first. Add new entries directly below this index._
 - [2026-07-07 — Moved project off OneDrive to C:\dev\pc_tool (canonical working copy)](#2026-07-07-moved-project-off-onedrive-to-cdevpc_tool-canonical-working-copy)
 
 ---
+
+## 2026-09-24 — FactSet Risk Summary upload removed entirely; benchmark name aliases added
+
+Follow-on from the entry below. The user re-ran the FactSet security-level
+export with the three missing indices included, so the file is now
+self-sufficient and the whole legacy path is gone.
+
+### The export now carries every benchmark
+
+99 sections (was 96), 11 of them indices. The three that were missing arrived
+under FactSet's full names, not the house short names:
+
+| House name | Section in the export |
+|---|---|
+| `Russell 1000` | `Russell 1000` |
+| `MSCI EM` | `MSCI Emerging Markets` |
+| `MSCI EM SC` | `MSCI EM (Emerging Markets) Small Cap` |
+
+### The blocker: `_norm_bench` had no abbreviation rules
+
+Only 3 of 9 client-benchmark pairings matched. `_norm_bench` stripped
+punctuation and folded `Small Cap` → `sc` and nothing else, so
+`MSCI ACWI` never met `MSCI All Country World`. Every ACWI-family client was
+still silently resolving through `risk_data`, which is exactly the failure I
+warned about — deleting the upload at that point would have flipped eight
+clients to absolute exposures with no error.
+
+Added `_BENCH_ALIASES` in `security_risk_engine.py`:
+
+```
+all country world -> acwi      ex united states -> ex us
+ac world          -> acwi      ex usa           -> ex us
+emerging markets  -> em        world ex us      -> eafe canada
+```
+
+**Order matters and is load-bearing.** The ACWI rules must run BEFORE the
+ex-US rules: otherwise `all country world ex us` gets caught by the
+world-ex-us equivalence and mangled into `all country eafe canada`. There is
+a comment saying so; do not reorder.
+
+`world ex us -> eafe canada` encodes a real financial identity (MSCI World
+ex US is the same universe as EAFE + Canada) and is what lets MD's
+`MSCI World ex US SC` find the `MSCI EAFE + Canada Small Cap` section. Never
+reduce it to a bare `world` rule — plain `MSCI World` is a different index.
+
+A repeated-token collapse handles `MSCI EM (Emerging Markets) Small Cap`,
+which becomes `msci em em sc` once `emerging markets` folds.
+
+Verified all 11 pairings match, five near-miss pairs stay distinct
+(`MSCI World` vs `MSCI World ex US SC`, `MSCI EM` vs `MSCI EM SC`, …), and
+every `_SLEEVES` key is still in normal form.
+
+### Removed
+
+Backend (`app.py`): `parse_risk_summary` (129 lines), `/upload_risk`,
+`/compute_risk_exposures` + `compute_risk_exposures_core` (255 lines),
+`state['risk_data']` and its cache save/load, the `has_risk` status field,
+the risk-summary branch of `_reload_inputs_core`, the placeholder-candidate
+contribution, the docx-export fallback, the firmwide-XLSX benchmark
+fallback, and the benchmark unions in both
+`compute_security_risk_exposures_core` and `/sleeve_options`.
+
+Frontend: the Setup upload slot and its `risk_summary` key, `has_risk` from
+`BackendStatus` and all six consumers, and the `useSecurityRisk` branch from
+`getPortfolioRiskExposures` and `getManagerRiskExposures` — with the legacy
+endpoint deleted there is only one path, so the flag and its prop drilling
+through `manager-risk-exposures-panel` went too.
+
+### Verified
+
+Backend restarted. `/status` no longer carries `has_risk`. Checked eight
+clients spanning every benchmark family (CALSTRS, MD, COB, STL, CIT,
+Microsoft, ATL Health, New Haven): all resolve a benchmark,
+`fallback_absolute` false on every one, and **no sleeve option missing on any
+of the 14 clients**. Setup tab shows 7 slots with no "Risk Summary". Report
+tab reads "Active exposures vs MSCI EAFE + Canada" for CALSTRS. Portfolio
+risk panel renders. `tsc` and `next build` clean.
+
+### Leftover
+
+`backend/_audit_uploads.py` still names `risk_data` / `risk_summary` in its
+diagnostic output and filename map. Harmless — it only prints whether a cache
+key exists — but it will read as stale to the next person.
 
 ## 2026-09-24 — Benchmarks now derived from the security file's own MSCI sections (Risk Summary demoted to a stopgap)
 

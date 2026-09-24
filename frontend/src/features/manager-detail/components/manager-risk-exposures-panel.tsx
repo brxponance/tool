@@ -10,7 +10,6 @@ type ManagerRef = { name: string; tab: string };
 
 type Props = {
   managers: ManagerRef[];
-  useSecurityRisk: boolean;
   hasRiskFile: boolean;
 };
 
@@ -44,7 +43,6 @@ function shortName(name: string, max: number) {
 // only (the single-manager diverging bars don't scale to five columns).
 export function ManagerRiskExposuresPanel({
   managers,
-  useSecurityRisk,
   hasRiskFile,
 }: Props) {
   const [state, setState] = useState<LoadState>({
@@ -68,7 +66,6 @@ export function ManagerRiskExposuresPanel({
           m.name,
           m.tab,
           mgrBenchmarkHint(m.name, m.tab),
-          useSecurityRisk,
         ).catch(() => null),
       ),
     ).then((results) => {
@@ -80,7 +77,7 @@ export function ManagerRiskExposuresPanel({
     };
     // managers captured via signature
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [signature, useSecurityRisk, hasRiskFile]);
+  }, [signature, hasRiskFile]);
 
   const results = state.data;
   const firstWithData = results.find((r) => r?.factors?.length);

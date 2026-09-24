@@ -233,7 +233,6 @@ export function useReportScreen() {
 
       const managers: PortfolioManager[] = portfolio.managers;
       savePartial({ managers });
-      const useSecurityRisk = !!status?.has_security_risk;
 
       const stats = await getPortfolioStats(managers).catch(() => null);
       savePartial({ stats });
@@ -241,11 +240,10 @@ export function useReportScreen() {
       const diverse = await getDiverseOwnership(managers, REPORT_DIVERSE_THRESHOLD).catch(() => null);
       savePartial({ diverse });
 
-      if (status?.has_risk || status?.has_security_risk) {
+      if (status?.has_security_risk) {
         const riskExposures = await getPortfolioRiskExposures(
           client,
           managers,
-          useSecurityRisk,
         ).catch(() => null);
         savePartial({ riskExposures });
       }

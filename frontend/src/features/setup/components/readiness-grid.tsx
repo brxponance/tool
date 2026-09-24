@@ -53,9 +53,7 @@ export function ReadinessGrid({ snapshot, loading }: ReadinessGridProps) {
         {
           title: "Risk and exposures",
           ready:
-            snapshot.status.has_risk ||
-            snapshot.status.has_security_risk ||
-            snapshot.status.has_exposures,
+            snapshot.status.has_security_risk || snapshot.status.has_exposures,
           detail:
             snapshot.status.has_security_risk || snapshot.status.has_exposures
               ? "FactSet risk or exposure inputs are available for richer analytics."

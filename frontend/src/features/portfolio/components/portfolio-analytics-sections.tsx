@@ -329,7 +329,7 @@ export function PortfolioAnalyticsSections({
     const id = ++sleeveReq.current;
     setSleeveLoading(true);
     const timer = setTimeout(() => {
-      getPortfolioRiskExposures(client, portfolioManagers, true, sleeveSel.sleeve, sleeveSel.bench)
+      getPortfolioRiskExposures(client, portfolioManagers, sleeveSel.sleeve, sleeveSel.bench)
         .then((res) => {
           if (id !== sleeveReq.current) return;
           setSleeveData(res);
