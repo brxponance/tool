@@ -23,6 +23,22 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: projectRoot,
   },
+  experimental: {
+    // The password gate added on 2026-09-22 introduced middleware, and Next
+    // buffers every request body so middleware and the route handler can
+    // both read it. That buffer defaults to 10MB and SILENTLY TRUNCATES:
+    // the backend then sees a half-finished multipart body and the upload
+    // dies with a bare "Internal Server Error". It cost an afternoon to
+    // find, because the FactSet exposures workbook had been sitting just
+    // under 10MB and only broke when three benchmarks were added to it.
+    //
+    // Set above Flask's own MAX_CONTENT_LENGTH (200MB, backend/app.py) so
+    // the backend stays the single authority on upload size and can return
+    // a real error instead of a truncated body.
+    // Renamed to proxyClientMaxBodySize in Next 16.3+; this key is what
+    // 16.2.4 reads — check the runtime warning text if you upgrade.
+    middlewareClientMaxBodySize: "256mb",
+  },
   // Emit a self-contained server bundle (.next/standalone) so the production
   // Docker image can run `node server.js` without shipping the full
   // node_modules tree — smaller, faster-starting image.

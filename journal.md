@@ -4,6 +4,7 @@
 
 _Newest first. Add new entries directly below this index._
 
+- [2026-09-24 — Uploads over 10MB broke: the password gate's middleware silently truncates request bodies](#2026-09-24--uploads-over-10mb-broke-the-password-gates-middleware-silently-truncates-request-bodies)
 - [2026-09-24 — FactSet Risk Summary upload removed entirely; benchmark name aliases added](#2026-09-24--factset-risk-summary-upload-removed-entirely-benchmark-name-aliases-added)
 - [2026-09-24 — Benchmarks now derived from the security file's own MSCI sections (Risk Summary demoted to a stopgap)](#2026-09-24--benchmarks-now-derived-from-the-security-files-own-msci-sections-risk-summary-demoted-to-a-stopgap)
 - [2026-09-22 — Report exposures were asking for a display label, not a column name (Sector/Industry silently empty)](#2026-09-22--report-exposures-were-asking-for-a-display-label-not-a-column-name-sectorindustry-silently-empty)
@@ -41,6 +42,84 @@ _Newest first. Add new entries directly below this index._
 - [2026-07-07 — Moved project off OneDrive to C:\dev\pc_tool (canonical working copy)](#2026-07-07-moved-project-off-onedrive-to-cdevpc_tool-canonical-working-copy)
 
 ---
+
+## 2026-09-24 — Uploads over 10MB broke: the password gate's middleware silently truncates request bodies
+
+### Symptom
+
+User added Russell 1000, MSCI EM and MSCI EM Small Cap to the FactSet Group
+Exposures workbook — no other change — and the Setup tab returned a bare
+**"Internal Server Error"**. The backend log showed `POST /upload_exposures
+400`, returned in under a second, with no traceback.
+
+### Root cause: a regression I introduced on 2026-09-22
+
+`frontend/src/middleware.ts` (the interim shared-password gate) is the first
+middleware this app has ever had. **Next buffers every request body when
+middleware exists**, so both the middleware and the route handler can read
+it, and that buffer defaults to **10MB**. Over the limit it does not fail —
+it **silently truncates and logs a warning**:
+
+```
+Request body exceeded 10MB for /api/backend/upload_exposures.
+Only the first 10MB will be available unless configured.
+```
+
+Flask then receives a half-finished multipart body. Werkzeug's form parser
+raises before the view runs — which is why the 400 appears with no traceback,
+`/upload_exposures` catching every exception notwithstanding — and the
+truncated stream shows up on the Next side as `ECONNRESET` / socket hang up,
+surfaced to the browser as "Internal Server Error".
+
+The exposures workbook had been sitting at **9.4MB**, just under the limit.
+Adding three benchmark sections pushed it over. Nothing about the file was
+wrong.
+
+### Diagnosis path (worth repeating)
+
+Bisecting with dummy files of increasing size, **direct to Flask vs through
+the proxy**, is what cracked it:
+
+| Size | Direct to :3001 | Through :3000 proxy |
+|---|---|---|
+| 8MB | 200 | 200 |
+| 10MB+ | 200 | **500** |
+
+Direct-to-Flask worked at 48MB, which ruled out `MAX_CONTENT_LENGTH` and the
+parser and pointed squarely at the proxy layer. The Next dev log then named
+the config key outright.
+
+### Fix
+
+`frontend/next.config.ts`:
+
+```ts
+experimental: { middlewareClientMaxBodySize: "256mb" }
+```
+
+Set **above** Flask's own `MAX_CONTENT_LENGTH` (200MB, `app.py:32`) so the
+backend stays the single authority on upload size and can return a real
+error rather than receiving a truncated body. Renamed to
+`proxyClientMaxBodySize` in Next 16.3+; 16.2.4 reads the `middleware*`
+spelling — check the runtime warning text after any Next upgrade.
+
+Verified 10 / 16 / 24 / 40MB all reach the backend through the proxy, and the
+real 9.4MB exposures file re-uploads and parses.
+
+### Second bug found on the way (NOT fixed)
+
+`/upload_exposures` writes `state['files']['exposures'] = path` **before**
+parsing, so a failed upload repoints the staged-file pointer at a file that
+never parsed. My dummy `.bin` test uploads clobbered it; restored by
+re-uploading the real workbook. `_reload_inputs_core` would have re-read the
+bad path on the next refresh. Same shape in the other upload routes — worth
+moving the assignment inside the try, after a successful parse.
+
+### Reminder
+
+Any upload over 10MB was broken for two days by a middleware I added for an
+unrelated reason. When adding middleware to a Next app that accepts file
+uploads, set this limit in the same commit.
 
 ## 2026-09-24 — FactSet Risk Summary upload removed entirely; benchmark name aliases added
 
