@@ -2525,13 +2525,14 @@ def sleeve_options():
     data = request.get_json(silent=True) or {}
     client_name = data.get('client_name')
     bench_str   = (state.get('client_benchmarks') or {}).get(client_name or '')
-    available   = (state.get('security_risk_data') or {}).get('available_benchmarks', [])
-    if not available:
-        # Mirror the fallback in /compute_security_risk_exposures: the
-        # Security-Level Risk DNA file may have no embedded 'Risk Summary'
-        # sheet, in which case the benchmark side comes from the separate
-        # Benchmark Risk Summaries upload.
-        available = list((state.get('risk_data') or {}).get('benchmark_names', []))
+    # Union, mirroring /compute_security_risk_exposures: benchmarks derived
+    # from the security file's own index sections, plus any the legacy
+    # Benchmark Risk Summaries upload uniquely provides (Russell 1000,
+    # MSCI EM, MSCI EM SC today — the sleeve targets with no section).
+    available = list((state.get('security_risk_data') or {}).get('available_benchmarks') or [])
+    for bn in ((state.get('risk_data') or {}).get('benchmark_names') or []):
+        if bn not in available:
+            available.append(bn)
     from security_risk_engine import get_sleeve_options
     options = get_sleeve_options(bench_str or '', available)
     return jsonify({'options': options, 'benchmark': bench_str})
@@ -2568,31 +2569,40 @@ def compute_security_risk_exposures_core(managers, client_name, sleeve=None,
         return {'error': 'No security risk data loaded. Upload a '
                          'Security-Level Risk DNA file on the Setup tab.'}
 
-    # Use security_risk_data as-is, but if the security file has no
-    # embedded 'Risk Summary' sheet (so available_benchmarks is empty),
-    # splice in benchmarks from the separately-uploaded Benchmark Risk
-    # Summaries file. Without this fallback the active-vs-benchmark math
-    # silently degrades to 'absolute portfolio exposures' even when the
-    # user has clearly uploaded benchmark data — they just put it in the
-    # second file rather than as a sheet inside the security file.
+    # Benchmarks normally come from the security file itself: the parser
+    # derives them from the index sections FactSet exports alongside the
+    # managers (see security_risk_engine.benchmark_section_name).
+    #
+    # The legacy Benchmark Risk Summaries upload is merged in for any index
+    # the security file has NO section for — today that is Russell 1000,
+    # MSCI EM and MSCI EM SC, which the sleeve breakdowns use. Additive, not
+    # replace: a benchmark derived from holdings is computed the same way as
+    # the portfolio side, so it wins where both exist. Once the security
+    # export includes those three sections this whole block is dead and the
+    # Risk Summary upload can be removed.
     sec_data = state['security_risk_data']
-    if not sec_data.get('available_benchmarks'):
-        rd = state.get('risk_data') or {}
-        rd_bench_names   = rd.get('benchmark_names', [])
-        rd_style_factors = rd.get('style_factors', {})  # {factor: {col: val}}
-        if rd_bench_names:
-            from security_risk_engine import STYLE_FACTORS as _SF
-            merged = {bn: {} for bn in rd_bench_names}
-            for factor, col_map in rd_style_factors.items():
-                if factor not in _SF:
-                    continue
-                for bn in rd_bench_names:
-                    v = (col_map or {}).get(bn)
-                    if v is not None:
-                        merged[bn][factor] = v
-            sec_data = dict(sec_data)
-            sec_data['benchmarks']           = merged
-            sec_data['available_benchmarks'] = list(rd_bench_names)
+    rd = state.get('risk_data') or {}
+    rd_bench_names   = rd.get('benchmark_names', [])
+    rd_style_factors = rd.get('style_factors', {})  # {factor: {col: val}}
+    missing = [bn for bn in rd_bench_names
+               if bn not in (sec_data.get('benchmarks') or {})]
+    if missing:
+        from security_risk_engine import STYLE_FACTORS as _SF
+        merged = dict(sec_data.get('benchmarks') or {})
+        for bn in missing:
+            merged.setdefault(bn, {})
+        for factor, col_map in rd_style_factors.items():
+            if factor not in _SF:
+                continue
+            for bn in missing:
+                v = (col_map or {}).get(bn)
+                if v is not None:
+                    merged[bn][factor] = v
+        sec_data = dict(sec_data)
+        sec_data['benchmarks'] = merged
+        sec_data['available_benchmarks'] = (
+            list(sec_data.get('available_benchmarks') or []) + missing
+        )
 
     # Always look up the breakdown's sleeve set so we know whether an EM
     # sleeve exists for this client's benchmark. classify_country needs

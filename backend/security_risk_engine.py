@@ -213,6 +213,32 @@ def get_sleeve_options(client_bench_str: str, available_benchmarks: list) -> lis
     return result
 
 
+# ── Benchmark sections ────────────────────────────────────────────────────
+# FactSet exports the benchmarks alongside the managers in the same sheet,
+# each as a section whose weights also total 100 — so the parser cannot tell
+# an index from a portfolio by shape, only by name. Anything named after an
+# index provider is a benchmark.
+#
+# Do NOT use the 'vs. DEFAULT' suffix for this: it only means no benchmark
+# was assigned in the export, and at least one real manager
+# ('Evolution Global International Small Cap vs. DEFAULT') carries it.
+_BENCHMARK_PREFIXES = (
+    'MSCI', 'RUSSELL', 'S&P', 'FTSE', 'BLOOMBERG', 'NASDAQ',
+    'DOW JONES', 'STOXX', 'SOLACTIVE', 'NIKKEI', 'TOPIX',
+)
+
+
+def benchmark_section_name(section: str):
+    """Clean index name if `section` is a benchmark section, else None.
+
+    'MSCI EAFE + Canada vs. DEFAULT'            -> 'MSCI EAFE + Canada'
+    'CALSTRS - BALLINA EAFE+Canada vs. MSCI...' -> None  (client portfolio)
+    """
+    base = re.split(r'\s+vs\.?\s+', str(section), maxsplit=1)[0].strip()
+    up = base.upper()
+    return base if any(up.startswith(p) for p in _BENCHMARK_PREFIXES) else None
+
+
 # ── Parser ────────────────────────────────────────────────────────────────
 def _coerce(v):
     if v is None or v == '': return None
@@ -288,6 +314,30 @@ def parse_security_risk_file(filepath: str) -> dict:
                     v = _coerce(row[ci]) if ci < len(row) else None
                     if v is not None:
                         result['benchmarks'][bname][label] = v
+
+    # Benchmark exposures derived from the index sections' own holdings.
+    # Runs last and takes precedence over the optional 'Risk Summary' sheet:
+    # computing both sides of the active calculation the same way (weighted
+    # average over holdings) keeps portfolio and benchmark comparable.
+    # Additive — a Risk Summary sheet can still contribute benchmarks that
+    # have no section of their own.
+    derived = {}
+    for section, stocks in result['managers'].items():
+        clean = benchmark_section_name(section)
+        if not clean or not stocks:
+            continue
+        exposures = _mgr_abs(stocks, result['factors'])
+        if exposures:
+            derived[clean] = exposures
+    if derived:
+        result['benchmarks'].update(derived)
+        for name in derived:
+            if name not in result['available_benchmarks']:
+                result['available_benchmarks'].append(name)
+
+    # Benchmark sections deliberately stay in result['managers'] too: a client
+    # can hold an index fund whose weights-file name matches the index, and
+    # the exposure match for that holding relies on the section being there.
 
     wb.close()
     return result

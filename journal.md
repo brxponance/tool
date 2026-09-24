@@ -4,6 +4,7 @@
 
 _Newest first. Add new entries directly below this index._
 
+- [2026-09-24 — Benchmarks now derived from the security file's own MSCI sections (Risk Summary demoted to a stopgap)](#2026-09-24--benchmarks-now-derived-from-the-security-files-own-msci-sections-risk-summary-demoted-to-a-stopgap)
 - [2026-09-22 — Report exposures were asking for a display label, not a column name (Sector/Industry silently empty)](#2026-09-22--report-exposures-were-asking-for-a-display-label-not-a-column-name-sectorindustry-silently-empty)
 - [2026-09-22 — Interim shared-password gate in front of the whole tool](#2026-09-22--interim-shared-password-gate-in-front-of-the-whole-tool)
 - [2026-09-09 — Quarterly Review build-out: skill + DWBE block, client guidelines, Peer Group report, landscape, risk page, front matter](#2026-09-09--quarterly-review-build-out-skill--dwbe-block-client-guidelines-peer-group-report-landscape-risk-page-front-matter)
@@ -39,6 +40,93 @@ _Newest first. Add new entries directly below this index._
 - [2026-07-07 — Moved project off OneDrive to C:\dev\pc_tool (canonical working copy)](#2026-07-07-moved-project-off-onedrive-to-cdevpc_tool-canonical-working-copy)
 
 ---
+
+## 2026-09-24 — Benchmarks now derived from the security file's own MSCI sections (Risk Summary demoted to a stopgap)
+
+### What prompted it
+
+User asked me to confirm the "FactSet Risk Summary" upload was dead and
+delete the slot. I checked and said no, it is load-bearing: it was the only
+source of benchmark exposures, because `security_risk_data.available_
+benchmarks` was empty and `app.py` fell back to `risk_data`.
+
+The user then corrected me: **the security-level file contains the
+benchmarks** — every section whose name starts with MSCI. They were right.
+96 parsed sections, 8 of them indices with full holdings (MSCI EAFE + Canada
+has 755, MSCI AC World ex USA Small Cap has 4,070).
+
+The tool ignored them because `parse_security_risk_file` only populated
+`benchmarks` from an optional **'Risk Summary' worksheet**, which this export
+does not contain. The index sections fell through the manager loop instead —
+a section is detected purely by its weight row totalling 100, and a benchmark
+totals 100 exactly like a portfolio does.
+
+### The discriminator (do not get this wrong)
+
+All 8 MSCI sections end in `vs. DEFAULT`, which looks like a clean marker.
+**It is not.** `vs. DEFAULT` only means no benchmark was assigned in the
+export, and a real manager carries it too:
+`Evolution Global International Small Cap vs. DEFAULT`. Matching on it would
+have turned that manager into a benchmark.
+
+The rule is the **index-provider prefix**, exactly as the user described it:
+`security_risk_engine.benchmark_section_name()` strips the ` vs. …` suffix
+and matches MSCI / RUSSELL / S&P / FTSE / BLOOMBERG / NASDAQ / DOW JONES /
+STOXX / SOLACTIVE / NIKKEI / TOPIX.
+
+### Changed
+
+- `security_risk_engine.py`: new `_BENCHMARK_PREFIXES` +
+  `benchmark_section_name()`, and `parse_security_risk_file` now derives each
+  index section's factor exposures with the existing `_mgr_abs()` helper and
+  merges them into `benchmarks` / `available_benchmarks`. Derived values win
+  over a 'Risk Summary' sheet where both exist — computing both sides of the
+  active calculation the same way (weighted average over holdings) keeps
+  portfolio and benchmark comparable.
+- Benchmark sections **stay in `managers` as well**. Deliberate: a client can
+  hold an index fund whose weights-file name matches the index, and the
+  exposure match for that holding needs the section present.
+- `app.py` `compute_security_risk_exposures_core`: the risk_data merge was
+  "only if available_benchmarks is empty" — now a **union**, filling only the
+  names the security file has no section for. Without this the change would
+  have silently dropped Russell 1000 / MSCI EM / MSCI EM SC.
+- `app.py` `/sleeve_options`: same union, was the same empty-check fallback.
+
+### Sanity check: the two sources agree
+
+Derived vs Risk Summary for MSCI EAFE + Canada, 11 style factors: 9 agree
+within 0.023 (Dividend Yield 0.342 vs 0.344, Momentum 0.127 vs 0.124, Size
+0.325 vs 0.307). Only Beta (−0.392 vs −0.295) and Volatility (−0.341 vs
+−0.197) differ materially. Net effect on a client's active exposures is
+small — CALSTRS Size moved 0.018.
+
+### Still needed before the slot can go
+
+The security export has **no section** for Russell 1000, MSCI EM or MSCI
+EM SC. Those are nobody's primary benchmark, but the sleeve breakdowns use
+them (`_SLEEVES`) for the ACWI / World family — COB, NYC, NYSTRS, New Haven,
+Mass PRIM FI, STL, Microsoft, CIT. The user is re-running the FactSet export
+with those three included; once they are present the union in `app.py` goes
+dead and the Risk Summary upload, its `/upload_risk` route, `parse_risk_
+summary`, and the Setup slot can all be deleted. **Slot deliberately left in
+place until then.**
+
+### Unrelated discovery, worth knowing
+
+Re-parsing via `/reload_inputs` also re-read the **weights** file, which had
+changed on disk. CALSTRS no longer holds `CastleArk EAFE+Canada
+Concentrated` (21.6%); it now holds `Polen International EAFE + Canada
+Concentrated` (22.6%), and the other six weights shifted. Any cached client
+payload from before today is stale — that cost me a confusing half hour
+chasing a number change I had wrongly attributed to the benchmark work.
+
+### Verified
+
+Backend restarted (no reloader), `/reload_inputs` re-parsed with the new
+code. 15 benchmarks available (8 derived + 7 unique from Risk Summary).
+CALSTRS reports active vs MSCI EAFE + Canada with `fallback_absolute` false.
+Sleeve options intact for CALSTRS, COB, STL, Microsoft and CIT — every option
+"ok", none missing. Report tab verified headed on CALSTRS.
 
 ## 2026-09-22 — Report exposures were asking for a display label, not a column name (Sector/Industry silently empty)
 
