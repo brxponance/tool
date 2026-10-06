@@ -8,6 +8,10 @@ export type BackendStatus = {
   has_exposures: boolean;
   exposures_benchmark: string;
   exposures_managers: string[];
+  has_attribution: boolean;
+  attribution_periods: string[];
+  attribution_quarter: string;
+  attribution_benchmarks: string[];
   has_qualitative: boolean;
   qualitative_firms: number;
   qualitative_strategies: number;

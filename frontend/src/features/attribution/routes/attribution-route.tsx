@@ -2,13 +2,20 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { getClients, getPortfolioContribution } from "../api/get-attribution-data";
+import {
+  getClients,
+  getPortfolioContribution,
+  getThemes,
+} from "../api/get-attribution-data";
 import { ContributionSections } from "../components/contribution-sections";
-import type { ContributionResponse } from "../types";
+import { ThemeDiscoverySection } from "../components/theme-discovery-section";
+import type { ContributionResponse, ThemeDiscoveryResponse } from "../types";
 
-// Performance Attribution tab. Currently hosts the portfolio-contribution
-// tables (moved from the Portfolio tab); the quarterly attribution / theme
-// identification work will land here next.
+// Performance Attribution tab. Hosts benchmark theme discovery (P1) above the
+// portfolio-contribution tables that were moved here from the Portfolio tab.
+// Theme discovery reads its own uploaded FactSet Contribution file and is
+// independent of the client selector — it describes the BENCHMARK, not a
+// portfolio, so it renders whether or not a client is chosen.
 export function AttributionRoute() {
   const [clients, setClients] = useState<string[]>([]);
   const [benchmarks, setBenchmarks] = useState<Record<string, string>>({});
@@ -17,6 +24,11 @@ export function AttributionRoute() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const requestRef = useRef(0);
+
+  const [themes, setThemes] = useState<ThemeDiscoveryResponse | null>(null);
+  const [themeBenchmark, setThemeBenchmark] = useState<string>("");
+  const [themePeriod, setThemePeriod] = useState<string>("");
+  const themeRef = useRef(0);
 
   useEffect(() => {
     getClients()
@@ -28,6 +40,24 @@ export function AttributionRoute() {
         setError(err instanceof Error ? err.message : "Unable to load clients.");
       });
   }, []);
+
+  useEffect(() => {
+    const id = ++themeRef.current;
+    getThemes({
+      benchmark: themeBenchmark || undefined,
+      period: themePeriod || undefined,
+    })
+      .then((resp) => {
+        if (id !== themeRef.current) return;
+        setThemes(resp);
+      })
+      .catch((err: unknown) => {
+        if (id !== themeRef.current) return;
+        setThemes({
+          error: err instanceof Error ? err.message : "Unable to load themes.",
+        } as ThemeDiscoveryResponse);
+      });
+  }, [themeBenchmark, themePeriod]);
 
   useEffect(() => {
     if (!selectedClient) {
@@ -91,6 +121,17 @@ export function AttributionRoute() {
           </span>
         )}
       </div>
+
+      <ThemeDiscoverySection
+        data={themes}
+        loading={themes === null}
+        onSelectBenchmark={(b) => {
+          setThemeBenchmark(b);
+          // The period list is per-file, not per-benchmark, so it survives a
+          // benchmark switch; clearing it would drop back to the quarter.
+        }}
+        onSelectPeriod={setThemePeriod}
+      />
 
       <ContributionSections contribution={contribution} />
     </div>

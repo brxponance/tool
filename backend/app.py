@@ -109,6 +109,12 @@ state = {
     # capture computation). Precomputed at /run_universe, consumed by
     # /market_cycle, invalidated when a new factor_returns file is uploaded.
     'mc_universe_cache': {},
+    # Parsed FactSet contribution file carrying per-security Average Weight and
+    # Contribution To Return — the input to benchmark theme discovery on the
+    # Attribution tab. Distinct from 'exposures_data': that file describes
+    # current positioning (ending weight), this one describes what happened
+    # over a period. Populated by /upload_attribution.
+    'attribution_data': None,
 }
 
 # ── Cache helpers ──────────────────────────────────────────────────────────
@@ -129,6 +135,7 @@ def save_cache():
                 'placeholder_buckets':     state.get('placeholder_buckets') or {},
                 'qualitative_data':        state.get('qualitative_data'),
                 'mc_universe_cache':       state.get('mc_universe_cache') or {},
+                'attribution_data':        state.get('attribution_data'),
                 # Which parser wrote this cache — see INPUT_PARSER_VERSION.
                 'input_parser_version':    INPUT_PARSER_VERSION,
             }, f)
@@ -381,6 +388,7 @@ def load_cache():
         state['placeholder_buckets']    = data.get('placeholder_buckets') or {}
         state['qualitative_data']       = data.get('qualitative_data')
         state['mc_universe_cache']      = data.get('mc_universe_cache') or {}
+        state['attribution_data']       = data.get('attribution_data')
         cached_files                    = data.get('files', {})
 
         # Resolve each cached path. Drop entries whose files can no longer be
@@ -713,6 +721,10 @@ def status():
         'has_exposures': state['exposures_data'] is not None,
         'exposures_benchmark': (state['exposures_data'] or {}).get('benchmark_name', ''),
         'exposures_managers':  (state['exposures_data'] or {}).get('manager_names', []),
+        'has_attribution': state.get('attribution_data') is not None,
+        'attribution_periods':    (state.get('attribution_data') or {}).get('periods', []),
+        'attribution_quarter':    (state.get('attribution_data') or {}).get('quarter_period') or '',
+        'attribution_benchmarks': (state.get('attribution_data') or {}).get('benchmark_names', []),
         'has_qualitative': state.get('qualitative_data') is not None,
         'qualitative_firms':      (state.get('qualitative_data') or {}).get('n_firms', 0),
         'qualitative_strategies': (state.get('qualitative_data') or {}).get('n_strategies', 0),
@@ -3657,6 +3669,89 @@ def upload_exposures():
         import traceback
         return jsonify({'status': 'error', 'message': str(e),
                         'traceback': traceback.format_exc()})
+
+
+# ── Attribution: benchmark theme discovery (P1) ───────────────────────────
+@app.route('/upload_attribution', methods=['POST'])
+def upload_attribution():
+    """Accept a FactSet Contribution XLSX that carries per-security Average
+    Weight and Contribution To Return, parse it, cache it.
+
+    This is a SEPARATE upload from /upload_exposures on purpose. The exposures
+    file answers 'what do we hold now' (ending weight); this one answers 'what
+    happened over the period' (average weight + contribution). One workbook can
+    legitimately serve both if it carries all the columns, but they are stored
+    and versioned independently so re-pulling one never invalidates the other.
+    """
+    from attribution_engine import parse_attribution_file
+    f = request.files.get('attribution')
+    if not f:
+        return jsonify({'status': 'error', 'message': 'No file provided.'})
+    fname = secure_filename(f.filename)
+    path  = save_uploaded_file(f, fname, app.config['UPLOAD_FOLDER'])
+    try:
+        local = resolve_path(path, app.config['UPLOAD_FOLDER'], suffix='.xlsx')
+        data = parse_attribution_file(local)
+    except Exception as e:
+        import traceback
+        return jsonify({'status': 'error', 'message': str(e),
+                        'traceback': traceback.format_exc()})
+
+    state['files']['attribution'] = path
+    state['attribution_data'] = data
+    save_cache()
+    return jsonify({
+        'status':          'ok',
+        'periods':         data['periods'],
+        'quarter_period':  data['quarter_period'],
+        'benchmarks':      data['benchmark_names'],
+        'managers':        data['manager_names'],
+        'n_blocks':        data['n_blocks'],
+        'n_benchmark_securities': {b: len(v) for b, v in data['benchmarks'].items()},
+    })
+
+
+@app.route('/attribution_themes')
+def attribution_themes():
+    """Ranked benchmark themes for one benchmark + period.
+
+    Query: benchmark, period, min_weight (decimal), top_n, max_cardinality.
+    With no benchmark/period, falls back to the first benchmark and the
+    quarterly (widest-span) block.
+    """
+    from attribution_engine import discover_themes
+    data = state.get('attribution_data')
+    if not data:
+        return jsonify({'error': 'No attribution data loaded. Upload a FactSet '
+                                 'Contribution file (with Average Weight and '
+                                 'Contribution To Return) on the Setup tab.'})
+
+    def _num(name, default, cast=float):
+        raw = request.args.get(name)
+        if raw in (None, ''):
+            return default
+        try:
+            return cast(raw)
+        except (TypeError, ValueError):
+            return default
+
+    try:
+        result = discover_themes(
+            data,
+            benchmark_name=request.args.get('benchmark') or None,
+            period=request.args.get('period') or None,
+            min_weight=_num('min_weight', 0.01),
+            top_n=_num('top_n', 10, int),
+            max_cardinality=_num('max_cardinality', 2, int),
+        )
+    except ValueError as e:
+        return jsonify({'error': str(e)})
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'traceback': traceback.format_exc()})
+
+    result['available_benchmarks'] = data['benchmark_names']
+    return jsonify(result)
 
 
 # Per-client FactSet-exposures benchmark override. The exposures file is a

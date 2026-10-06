@@ -77,6 +77,7 @@ type UploadSlot = {
     | "weights"
     | "security_risk"
     | "exposures"
+    | "attribution"
     | "qualitative"
     | "universe_returns";
   endpoint: string;
@@ -128,6 +129,14 @@ const UPLOAD_SLOTS: UploadSlot[] = [
     icon: "📊",
   },
   {
+    key: "attribution",
+    endpoint: "upload_attribution",
+    field: "attribution",
+    label: "FactSet Contribution (Attribution)",
+    hint: "Needs Average Weight + Contribution To Return columns",
+    icon: "🎯",
+  },
+  {
     key: "qualitative",
     endpoint: "upload_qualitative",
     field: "qualitative",
@@ -158,6 +167,10 @@ function hasStagedFile(status: BackendStatus | undefined, key: UploadSlot["key"]
     return status.has_exposures || Boolean(status.files[key]);
   }
 
+  if (key === "attribution") {
+    return status.has_attribution || Boolean(status.files[key]);
+  }
+
   if (key === "qualitative") {
     return status.has_qualitative || Boolean(status.files[key]);
   }
@@ -184,6 +197,12 @@ function fileLabel(status: BackendStatus | undefined, key: UploadSlot["key"]) {
 
   if (key === "exposures" && status.has_exposures && status.exposures_benchmark) {
     return `${status.exposures_benchmark} — ${status.exposures_managers.length} managers loaded`;
+  }
+
+  if (key === "attribution" && status.has_attribution) {
+    const n = status.attribution_benchmarks?.length ?? 0;
+    const per = status.attribution_quarter || `${status.attribution_periods?.length ?? 0} periods`;
+    return `${per} — ${n} benchmark${n === 1 ? "" : "s"} loaded`;
   }
 
   if (key === "qualitative" && status.has_qualitative) {
