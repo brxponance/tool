@@ -317,19 +317,21 @@ export function ManagerExposuresCompareTable({
                   const parentRow = (
                     <tr key={`p::${row.label}`}>
                       <td className="exp-label-cell" style={labelStyle}>
-                        {hasChildren ? (
-                          <span
-                            className={`exp-chevron${isExpanded ? " expanded" : ""}`}
-                            onClick={() => toggleRow(row.label)}
-                            role="button"
-                            aria-label={isExpanded ? "Collapse" : "Expand"}
-                          >
-                            ▸
-                          </span>
-                        ) : (
-                          <span className="exp-chevron-spacer" />
-                        )}
-                        <span>{row.label}</span>
+                        <div className="exp-label-inner">
+                          {hasChildren ? (
+                            <span
+                              className={`exp-chevron${isExpanded ? " expanded" : ""}`}
+                              onClick={() => toggleRow(row.label)}
+                              role="button"
+                              aria-label={isExpanded ? "Collapse" : "Expand"}
+                            >
+                              ▸
+                            </span>
+                          ) : (
+                            <span className="exp-chevron-spacer" />
+                          )}
+                          <span>{row.label}</span>
+                        </div>
                       </td>
                       <ValueCell value={row.benchmark} fillClass="exp-bmk-fill" maxAbs={maxValue} />
                       {managers.map((m, i) => (
@@ -352,8 +354,10 @@ export function ManagerExposuresCompareTable({
                       data-parent={row.label}
                     >
                       <td className="exp-label-cell">
-                        {c.label}
-                        {c.range_label ? <span className="exp-q-range">{c.range_label}</span> : null}
+                        <div className="exp-label-inner">
+                          {c.label}
+                          {c.range_label ? <span className="exp-q-range">{c.range_label}</span> : null}
+                        </div>
                       </td>
                       <ValueCell value={c.benchmark || 0} fillClass="exp-bmk-fill" maxAbs={maxValue} />
                       {managers.map((m, i) => (

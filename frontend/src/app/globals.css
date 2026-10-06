@@ -997,11 +997,19 @@ select:focus {
 #exp-table .exp-delta-fill.neg { background: var(--accent); }
 
 /* Portfolio Exposures — nested rows (Mode C: categorical × continuous) */
+/* The label cell must stay a real table-cell. `display: flex` on a <td> takes
+   it out of table layout: it no longer stretches to the row height, so its
+   border-bottom lands at a different y than the value cells' and the row
+   divider visibly breaks at the column boundary. Flex goes on an inner
+   wrapper instead, mirroring .exp-cell / .exp-cell-inner. */
 #exp-table td.exp-label-cell {
+  vertical-align: middle;
+  padding: 6px 8px;
+}
+#exp-table .exp-label-inner {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 8px;
 }
 #exp-table .exp-chevron {
   display: inline-flex;

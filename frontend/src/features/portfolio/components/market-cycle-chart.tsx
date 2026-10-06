@@ -41,27 +41,98 @@ function waveY(x: number): number {
   return -0.05 + 0.05 * (3 * t * t - 2 * t * t * t);
 }
 
-function labelOffsets(placements: MarketCyclePlacement[], xScale: (x: number) => number) {
-  const offsets = placements.map(() => ({ dx: 0, dy: 20 }));
-  const order = placements
-    .map((p, i) => ({ i, px: xScale(p.x ?? 0) }))
-    .sort((a, b) => a.px - b.px);
-  let lastPx = -999;
-  let sign = 1;
-  let stack = 0;
-  for (const o of order) {
-    if (o.px - lastPx < 42) {
-      stack++;
-      offsets[o.i].dy = sign > 0 ? 20 + stack * 14 : -(6 + stack * 14);
-      sign = -sign;
-    } else {
-      stack = 0;
-      sign = 1;
-      offsets[o.i].dy = 20;
-      lastPx = o.px;
+// Sleeve descriptors (region / size / style / vehicle) that follow the firm
+// name on a manager label. Mirrors backend holdings_resolver._CLASS_TOKENS,
+// but this copy is display-only: it keeps the original casing and never
+// touches matching. Corporate forms ('Capital', 'Partners') are deliberately
+// NOT here — they are part of the firm's name.
+const MC_STRATEGY_TOKENS = new Set([
+  "eafe", "acwi", "acwixus", "em", "us", "usa", "xus", "ex", "non", "nonus",
+  "international", "intl", "global", "world", "developed", "emerging",
+  "canada", "can", "europe", "japan", "asia", "pacific", "frontier",
+  "small", "large", "mid", "micro", "cap", "sc", "lc", "mc", "smid",
+  "isc", "ussc", "value", "growth", "core", "blend", "yield", "quality",
+  "dividend", "concentrated", "fund", "composite",
+  "portfolio", "strategy", "plus", "adr", "opportunities", "opportunity",
+  "select", "focused", "focus",
+  // 'equity'/'equities' and 'alpha' are deliberately absent: they read as
+  // sleeve words but are load-bearing in real firm names ('Select Equity
+  // Group', 'Global Alpha'), and trimming them produced 'Select' / 'Global'.
+]);
+
+// 'Hillsdale EAFE Small Cap' → 'Hillsdale';
+// 'Polen International EAFE + Canada Concentrated' → 'Polen';
+// 'Gilman Hill' → 'Gilman Hill' (neither token is a descriptor).
+// The first token is always kept, so a firm actually called 'Global Alpha'
+// survives. The untouched name still shows in the dot's tooltip.
+export function mcFirmLabel(name: string): string {
+  const raw = String(name ?? "").trim();
+  if (!raw) return raw;
+  // '+' and '/' glue descriptors onto the name ('EAFE+Canada'), so treat
+  // them as separators or the descriptor is never recognised.
+  const tokens = raw.split(/[\s+\/]+/).filter(Boolean);
+  let cut = tokens.length;
+  for (let i = 1; i < tokens.length; i++) {
+    if (MC_STRATEGY_TOKENS.has(tokens[i].toLowerCase().replace(/[^a-z]/g, ""))) {
+      cut = i;
+      break;
     }
   }
-  return offsets;
+  return tokens.slice(0, cut).join(" ") || raw;
+}
+
+const MC_CHAR_W = 6.0;      // ≈0.55em at font-size 11 — enough for hit tests
+const MC_LABEL_PAD = 6;     // breathing room so neighbours never kiss
+const MC_ROW_H = 13;        // vertical step when a lane is already taken
+const MC_DY_BELOW = 20;     // first lane under the dot (dot r = 9)
+const MC_DY_ABOVE = -14;    // first lane above the dot
+
+// Place each label in the first free lane, trying below the dot first and
+// then flipping above — so when two managers sit close enough for their text
+// to collide, one name moves over the circle instead of running through its
+// neighbour. Returns a dy per placement (index-aligned with `placements`).
+function labelOffsets(
+  cxs: number[],
+  cys: number[],
+  labels: string[],
+  plotTop: number,
+): number[] {
+  const halfW = labels.map((t) => (t.length * MC_CHAR_W + MC_LABEL_PAD) / 2);
+  const dys = new Array<number>(cxs.length).fill(MC_DY_BELOW);
+  const below: Array<Array<[number, number]>> = [];
+  const above: Array<Array<[number, number]>> = [];
+  const free = (lane: Array<[number, number]>, x0: number, x1: number) =>
+    lane.every(([a, b]) => x1 <= a || x0 >= b);
+
+  // Left→right keeps placement stable and makes the result deterministic.
+  const order = cxs.map((px, i) => ({ i, px })).sort((a, b) => a.px - b.px || a.i - b.i);
+
+  for (const { i } of order) {
+    const x0 = cxs[i] - halfW[i];
+    const x1 = cxs[i] + halfW[i];
+    let placed = false;
+    for (let row = 0; row < 6 && !placed; row++) {
+      below[row] = below[row] ?? [];
+      if (free(below[row], x0, x1)) {
+        below[row].push([x0, x1]);
+        dys[i] = MC_DY_BELOW + row * MC_ROW_H;
+        placed = true;
+        break;
+      }
+      above[row] = above[row] ?? [];
+      const dyAbove = MC_DY_ABOVE - row * MC_ROW_H;
+      // Near the wave peak there is no headroom; leave those stacked below
+      // rather than letting a label escape the plot frame.
+      if (cys[i] + dyAbove >= plotTop + 4 && free(above[row], x0, x1)) {
+        above[row].push([x0, x1]);
+        dys[i] = dyAbove;
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) dys[i] = MC_DY_BELOW + 6 * MC_ROW_H;
+  }
+  return dys;
 }
 
 function wrapText(text: string, maxChars: number): string[] {
@@ -248,7 +319,11 @@ export function MarketCycleChart({ placements, portfolioKey }: MarketCycleChartP
   }
   const wavePath = `M ${points.join(" L ")}`;
 
-  const offsets = labelOffsets(placements, xScale);
+  // Firm-only labels, and the collision pass that depends on their widths.
+  const mcLabels = placements.map((p) => mcFirmLabel(p.name));
+  const mcCx = placements.map((p) => xScale(p.x ?? 0));
+  const mcCy = placements.map((p) => yScale(waveY(p.x ?? 0)));
+  const offsets = labelOffsets(mcCx, mcCy, mcLabels, plotTop);
   const dotColor = portfolioKey === "current" ? "#2d5a90" : "#0077cc";
   const dotStroke = portfolioKey === "current" ? "#1a3856" : "#004a80";
   const gp = `mcg_${portfolioKey}_`;
@@ -512,12 +587,12 @@ export function MarketCycleChart({ placements, portfolioKey }: MarketCycleChartP
           {placements.map((p, idx) => {
             const cx = xScale(p.x ?? 0);
             const cy = yScale(waveY(p.x ?? 0));
-            const display = p.name.length > 18 ? `${p.name.slice(0, 18)}…` : p.name;
+            const display = mcLabels[idx];
             return (
               <text
                 key={`lbl-${idx}`}
                 x={cx}
-                y={cy + offsets[idx].dy}
+                y={cy + offsets[idx]}
                 textAnchor="middle"
                 fontSize="11"
                 fill="#2a2a2a"
@@ -532,15 +607,14 @@ export function MarketCycleChart({ placements, portfolioKey }: MarketCycleChartP
         placements.map((p, idx) => {
           const cx = xScale(p.x ?? 0);
           const cy = yScale(waveY(p.x ?? 0));
-          const off = offsets[idx];
           const tip = mcTip(p, portfolioKey);
-          const display = p.name.length > 18 ? `${p.name.slice(0, 18)}…` : p.name;
+          const display = mcLabels[idx];
           return (
             <g key={`mgr-${idx}`}>
               <circle cx={cx} cy={cy} r={9} fill={dotColor} stroke={dotStroke} strokeWidth="1.5">
                 <title>{tip}</title>
               </circle>
-              <text x={cx} y={cy + off.dy} textAnchor="middle" fontSize="11" fill="#2a2a2a" fontWeight="500">
+              <text x={cx} y={cy + offsets[idx]} textAnchor="middle" fontSize="11" fill="#2a2a2a" fontWeight="500">
                 {display}
               </text>
             </g>

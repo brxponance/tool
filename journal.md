@@ -4,6 +4,8 @@
 
 _Newest first. Add new entries directly below this index._
 
+- [2026-09-24 — Market cycle chart: firm-only labels and a real collision pass](#2026-09-24--market-cycle-chart-firm-only-labels-and-a-real-collision-pass)
+- [2026-09-24 — Exposures row dividers broke at the label column: `display: flex` on a `<td>`](#2026-09-24--exposures-row-dividers-broke-at-the-label-column-display-flex-on-a-td)
 - [2026-09-24 — Uploads over 10MB broke: the password gate's middleware silently truncates request bodies](#2026-09-24--uploads-over-10mb-broke-the-password-gates-middleware-silently-truncates-request-bodies)
 - [2026-09-24 — FactSet Risk Summary upload removed entirely; benchmark name aliases added](#2026-09-24--factset-risk-summary-upload-removed-entirely-benchmark-name-aliases-added)
 - [2026-09-24 — Benchmarks now derived from the security file's own MSCI sections (Risk Summary demoted to a stopgap)](#2026-09-24--benchmarks-now-derived-from-the-security-files-own-msci-sections-risk-summary-demoted-to-a-stopgap)
@@ -42,6 +44,149 @@ _Newest first. Add new entries directly below this index._
 - [2026-07-07 — Moved project off OneDrive to C:\dev\pc_tool (canonical working copy)](#2026-07-07-moved-project-off-onedrive-to-cdevpc_tool-canonical-working-copy)
 
 ---
+
+## 2026-09-24 — Market cycle chart: firm-only labels and a real collision pass
+
+### What changed
+
+Two display fixes in `features/portfolio/components/market-cycle-chart.tsx`,
+reported against CALSTRS where "Hillsdale EAFE Sma…" ran into "Foresight".
+
+**Labels now show the firm only.** New `mcFirmLabel()` walks the name's tokens
+left→right and cuts at the first sleeve descriptor, so
+`Hillsdale EAFE Small Cap` → `Hillsdale` and
+`Polen International EAFE + Canada Concentrated` → `Polen`, while
+`Gilman Hill` survives intact. `+` and `/` are treated as separators so
+`CastleArk EAFE+Canada` is recognised. The first token is always kept. The
+full, untouched name still shows in the dot's tooltip and in the table below
+the chart — only the chart label is shortened.
+
+This replaced a blind `name.slice(0, 18) + '…'`, which is what produced the
+mid-word "Hillsdale EAFE Sma…".
+
+**Labels now resolve collisions by flipping above the dot.** `labelOffsets()`
+was rewritten: it estimates each label's pixel width, then places labels
+left→right into the first free lane, trying below the dot first and flipping
+above when the lane is taken. Interval-overlap is tested for real rather than
+inferred from a fixed x-distance.
+
+### Why the old version didn't work
+
+The previous `labelOffsets` compared each label against `lastPx`, but `lastPx`
+was only updated in the non-colliding branch — so inside a cluster every label
+measured its distance from the *first* member, not its neighbour. It also used
+a flat 42px threshold regardless of how wide the text actually was, which is
+precisely the case that failed here: Foresight and Hillsdale sit 26px apart, so
+they were "detected", but both were still placed below (dy 20 and 34), and the
+19-character Hillsdale label simply ran back underneath Foresight.
+
+### Gotchas
+
+- **Descriptor vocabulary is a false-positive trap.** The first pass included
+  `equity`, `equities` and `alpha`, which turned `Select Equity Group` into
+  "Select" and `Global Alpha` into "Global". Both are real firm names. Those
+  three tokens are now deliberately excluded and the exclusion is commented in
+  place — resist re-adding them. Kept the rest (`eafe`, `small`, `cap`,
+  `concentrated`, `composite`, …), which are unambiguous sleeve words.
+- The token list intentionally does **not** include corporate forms
+  (`Capital`, `Partners`), so `Ballina Capital ISC` → `Ballina Capital`.
+- Deliberately a display-only copy of the idea in
+  `backend/holdings_resolver._CLASS_TOKENS`. It preserves casing and must never
+  be used for matching — the backend list is tuned for identity keys and drops
+  the size sleeve, which would be wrong here.
+- Labels flipped above are suppressed near the wave peak (`cy + dy` must clear
+  `plotTop + 4`), otherwise a label at x≈2.6 escapes the plot frame into the
+  MOMENTUM band.
+
+### Verified
+
+`tsc --noEmit` and eslint clean. In the running app (visible Chromium, per the
+repo rule), CALSTRS: labels render as Ballina, Foresight, Gilman Hill, Haven,
+Hillsdale, Martin, Polen; a pairwise bounding-box test across all seven found
+**zero** overlaps. Hillsdale flipped above its dot, Foresight stayed below;
+Gilman Hill and Ballina share an exact placement (both x=0.15) and split
+below/above. `mcFirmLabel` was also spot-checked against 21 name shapes
+including empty/null input.
+
+The Portfolio tab renders `portfolioKey="combined"` (the branch exercised
+above); `ReportMarketCycle` reuses the same component with `"current"`, so both
+picked the change up.
+
+## 2026-09-24 — Exposures row dividers broke at the label column: `display: flex` on a `<td>`
+
+### Symptom
+
+In the Portfolio tab's exposures table the horizontal row dividers did not run
+straight across. The line under the label column (Q1 (High), Cash, Unclassified,
+…) sat a few pixels higher than the line under the value columns, so every row
+boundary had a visible step/disconnect at the column edge. Reported as "an
+awkward gap", and correctly observed to be unique to the exposures tables — no
+other table in the app had it.
+
+### Root cause
+
+`#exp-table td.exp-label-cell` set `display: flex` **on the `<td>` itself**
+(globals.css). A `td` whose display is not `table-cell` stops being a table cell:
+the browser wraps it in an anonymous table-cell box, and the element that
+actually carries the `border-bottom` from `.data-table td` is now a flex
+container sized to its own content rather than stretched to the row height.
+Its border therefore lands above the sibling value cells' borders.
+
+The gap was amplified by the padding asymmetry — `.exp-cell` uses `8px 10px`
+while `.exp-label-cell` uses `6px 8px`. Real table cells equalize to the tallest
+cell in the row; a flex `td` does not. Measured misalignment: **2.5–3px per row**.
+
+The irony is that the correct pattern was already right there: the value cells
+are `<td class="exp-cell"><div class="exp-cell-inner">` — td stays a table cell,
+flex lives on an inner wrapper. The label cell just never followed it.
+
+### Fix
+
+Made the label cell match the value cells:
+
+- `globals.css` — `#exp-table td.exp-label-cell` is now `vertical-align: middle;
+  padding: 6px 8px;` (no `display`), and the flex moved to a new
+  `#exp-table .exp-label-inner`.
+- Wrapped the label cell contents in `<div className="exp-label-inner">` at the
+  four render sites — parent row + child row in both
+  `features/portfolio/components/portfolio-exposures-section.tsx` and
+  `features/manager-detail/components/manager-exposures-compare-table.tsx`.
+
+Both components share `#exp-table`, so Manager Detail had the same defect even
+though it was only noticed on Portfolio. Fixing the shared CSS fixed both.
+
+### Gotchas
+
+- **A CSS-only fix is available but riskier.** Dropping to `display: table-cell`
+  and replacing `gap: 6px` with margins works, but changes wrapping: in a flex
+  container the label span won't shrink below its content, whereas in normal
+  inline flow a long label wraps to two lines. The inner-wrapper approach
+  preserves the existing layout semantics exactly, so it was preferred.
+- **Turbopack serves a stale `globals.css` across `git stash` / `git stash pop`.**
+  While verifying before/after I got badly misled: the TSX hot-reloaded but the
+  CSS did not, so the browser reported the *fixed* computed style while the
+  reverted file sat on disk (and later the reverse). `touch`ing the file did not
+  help. Only `rm -rf frontend/.next` + a dev-server restart gave a truthful
+  render. If a CSS change appears to do nothing — or appears to work when you
+  have reverted it — restart the dev server before believing any measurement.
+- Verification that the mechanism was real came from a standalone A/B HTML page
+  driven by Playwright, which is immune to the dev-server cache: flex-on-td
+  measured 2.5–3px misalignment, inner-wrapper measured 0px on every row.
+
+### Verified
+
+`npx tsc --noEmit` clean. In the running app (visible Chromium, per the repo
+rule): Portfolio exposures in nested Sector × ROE mode — 13 parent rows plus
+expanded Q1–Q5 children, all `display: table-cell`, worst misalignment 0px, child
+indent (`padding-left: 34px`) and range labels intact; Manager Detail exposures —
+12 rows, all `table-cell`, 0px. A full `next build` was not run; the change is
+CSS plus four wrapper divs and typecheck passed.
+
+### Still open
+
+The pre-existing eslint error in `manager-exposures-compare-table.tsx:167`
+(React Compiler: "Existing memoization could not be preserved" on the
+`rows`/`lookups` `useMemo`) is untouched by this change and still there.
 
 ## 2026-09-24 — Uploads over 10MB broke: the password gate's middleware silently truncates request bodies
 
