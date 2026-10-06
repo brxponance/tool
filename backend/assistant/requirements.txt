@@ -1,0 +1,10 @@
+# Dependencies for the local MCP server ONLY.
+#
+# Deliberately separate from backend/requirements.txt, which the Dockerfile
+# installs into the production image — nothing here should ship. Install into
+# the same venv the backend uses:
+#
+#   cd backend && ./venv/Scripts/python.exe -m pip install -r assistant/requirements.txt
+#
+# The HTTP client is stdlib (urllib), so this is the only package needed.
+mcp>=2.3.0

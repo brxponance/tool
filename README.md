@@ -172,6 +172,29 @@ npx tsc --noEmit           # typecheck
 
 ---
 
+## Asking Claude Desktop about the data
+
+A local MCP server lets you query the tool in plain English from Claude Desktop
+— clients, portfolios, manager profiles, exposures, attribution.
+
+```bash
+cd backend
+./venv/Scripts/python.exe -m pip install -r assistant/requirements.txt
+./venv/Scripts/python.exe assistant/mcp_server.py --selftest
+```
+
+Then add an `mcpServers` entry via **Settings -> Developer -> Edit Config** in
+Claude Desktop (quit the app first — it rewrites that file on exit) and restart
+it. Do not guess the config path: a Microsoft Store install virtualizes
+`%APPDATA%`. Full setup, the tool list and the security notes are in
+[backend/assistant/README.md](backend/assistant/README.md).
+
+It is read-only, runs on your laptop, listens on no port, and defaults to
+`localhost:3001` — a non-loopback URL is refused unless you opt in explicitly.
+It is also **never deployed**: the backend Dockerfile copies `*.py` as a
+top-level glob plus `db/` and `migrations/`, so `assistant/` stays out of the
+image.
+
 ## Deploying
 
 **Nothing manual, and no AWS knowledge needed.** Either:

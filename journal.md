@@ -4,6 +4,8 @@
 
 _Newest first. Add new entries directly below this index._
 
+- [2026-10-06 — Local MCP server: query the tool from Claude Desktop](#2026-10-06--local-mcp-server-query-the-tool-from-claude-desktop)
+- [2026-10-06 — Attribution P1: benchmark theme discovery](#2026-10-06--attribution-p1-benchmark-theme-discovery)
 - [2026-09-24 — Market cycle chart: firm-only labels and a real collision pass](#2026-09-24--market-cycle-chart-firm-only-labels-and-a-real-collision-pass)
 - [2026-09-24 — Exposures row dividers broke at the label column: `display: flex` on a `<td>`](#2026-09-24--exposures-row-dividers-broke-at-the-label-column-display-flex-on-a-td)
 - [2026-09-24 — Uploads over 10MB broke: the password gate's middleware silently truncates request bodies](#2026-09-24--uploads-over-10mb-broke-the-password-gates-middleware-silently-truncates-request-bodies)
@@ -44,6 +46,299 @@ _Newest first. Add new entries directly below this index._
 - [2026-07-07 — Moved project off OneDrive to C:\dev\pc_tool (canonical working copy)](#2026-07-07-moved-project-off-onedrive-to-cdevpc_tool-canonical-working-copy)
 
 ---
+
+## 2026-10-06 — Local MCP server: query the tool from Claude Desktop
+
+`backend/assistant/` — a stdio MCP server exposing 11 read-only tools over the
+Flask API, so the tool's data can be queried conversationally from Claude
+Desktop. Designed 2026-09-25, built now.
+
+### Why it talks HTTP and not SQL
+
+The analytics are not in Postgres. Postgres holds `clients`,
+`client_managers`, `portfolio_presets` and nothing else; clone results,
+returns, weights, risk, exposures and attribution all live in the in-process
+`state` dict (measured at ~319 MB resident). So the server is a client of the
+HTTP API, which also means it inherits every existing guard for free and can
+never see data the API won't serve.
+
+### It does not ship, and that is structural rather than a convention
+
+The backend Dockerfile copies `*.py` — a **top-level glob** — plus `db/` and
+`migrations/`. Subdirectories are not matched. Reproducing those COPY lines
+against the build context: 37 files reach the image, **zero** from `assistant/`
+(and zero from the new `tests/`). No .dockerignore entry needed; nothing to
+remember at deploy time.
+
+Worth stating plainly because it was the question that prompted the build: an
+MCP server is not a server in the exposure sense. Claude Desktop launches it as
+a subprocess over a stdio pipe. It listens on no port. And it grants no access
+that doesn't already exist — the live boundary is one shared password in front
+of an internet-facing HTTP ALB open to `0.0.0.0/0`, so anyone with that
+password already has full read *and write* access via a browser.
+
+### Local by construction, not by configuration
+
+`PC_TOOL_URL` must resolve to loopback or the client refuses to start, unless
+`PC_TOOL_ALLOW_REMOTE=1` is set explicitly. Against `localhost:3001` no
+password exists at all — the gate is Next.js middleware and production-only, so
+local Flask is unauthenticated. Remote mode logs in once and re-logins at most
+once per 401: the login route allows 10 attempts per 15 minutes and then locks
+the IP out, so a retry loop would lock the user out of the tool itself.
+
+### Gotchas
+
+- **`mcp` 2.x renamed `FastMCP` to `MCPServer`** (`mcp.server.mcpserver`), and
+  importing the old path raises a migration error rather than failing silently.
+  Installed 2.3.0; the 2026-09-25 design had the right import.
+- **Stdlib `urllib`, not `requests`.** Keeps the user install to one package and
+  keeps a second HTTP library out of a repo that doesn't otherwise need one.
+- **Paths differ by target.** On loopback the Flask API is direct (`/clients`);
+  behind the ALB everything is under the Next proxy (`/api/backend/clients`).
+  The client switches on whether the host is loopback.
+- **`/holdings_overlap` returns `pairs`, not a matrix.** First implementation
+  guessed `matrix`/`labels`, got no rows, and *looked* fine — it rendered a
+  clean empty table. Shape-guessing against an endpoint produces plausible
+  emptiness, not an error; check the real response. It also needs
+  `weight_file_name` in the payload, which the first version dropped.
+- Claude Desktop gives the subprocess no useful cwd, hence the absolute-path
+  `sys.path` bootstrap and the doubled backslashes in the config.
+- **The documented config path was wrong for a Microsoft Store install.** MSIX
+  virtualizes `%APPDATA%`, so the file lives at `%LOCALAPPDATA%\Packages  Claude_<id>\LocalCache\Roaming\Claude\`. A file written to the plain
+  `%APPDATA%\Claude\` path is never read. `Settings -> Developer -> Edit
+  Config` is the install-agnostic instruction and is now what both READMEs say.
+- **A running Claude Desktop rewrites that config on exit**, discarding edits
+  made while it is open — and closing the window leaves it alive in the tray.
+  Quit it properly first.
+- **A config parse failure is invisible in the UI.** The only evidence is
+  `main.log`: it logs the exact path it read, then `Error reading or parsing
+  config file (SyntaxError)`, then refuses to write (which protects the
+  original rather than clobbering it). Worth remembering that `JSON.parse` is
+  stricter than Python's `json`: a UTF-8 BOM, `NaN` or `Infinity` all pass
+  Python and fail Electron.
+
+### Verified
+
+`--selftest` passes against a live local backend. Full JSON-RPC handshake over
+stdio: `initialize` → `pc-tool 0.1.0`, protocol `2025-06-18`; `tools/list` →
+11 tools with correct argument schemas; `tools/call list_clients` returns real
+data. Every parameterised tool exercised against CALSTRS. Output is 232–1,444
+characters where the raw JSON would be up to 79 KB.
+
+Loopback guard tested both ways: a remote URL is refused by default, and with
+`PC_TOOL_ALLOW_REMOTE=1` but no password it fails with a clear message rather
+than hanging.
+
+### Hardening pass against official MCP guidance (same day)
+
+Checked the implementation against modelcontextprotocol.io's current stdio-server
+guidance. Four changes, two of them real bugs:
+
+1. **URL-encode every path segment** (`_q()`, `safe=''`). Names carry spaces and
+   `+` — `get_manager_detail('EAFE', 'Polen International EAFE + Canada
+   Concentrated')` built an invalid request line and raised `http.client`
+   errors. Worse, `find_entity` hands out exactly those names, so the documented
+   happy path was broken. Also closes path traversal: `../../etc` now encodes
+   instead of escaping the route.
+2. **Error boundary on every tool.** Only `PCToolError` was caught, so anything
+   else escaped as a protocol-level failure. Official guidance is explicit —
+   *"Do NOT raise exceptions for tool execution errors"*; return text the model
+   can read and recover from. `tool_error_boundary` does that and names the
+   exception type so a genuine bug stays diagnosable.
+3. **Zero stdout writes, logging to stderr.** stdio transport carries JSON-RPC
+   on stdout, so any stray write corrupts the stream; the guidance is to keep
+   `print()` out of a stdio server entirely. The `--selftest` prints were
+   technically unreachable in server mode, but they are now `_emit()` to stderr
+   and the module writes 0 bytes to stdout under every path. Added
+   `logging.basicConfig(stream=sys.stderr, force=True)` plus per-call logging —
+   previously a misbehaving tool left no trace at all, and stderr is what
+   Claude Desktop captures into `mcp.log`.
+4. **`Args:` sections in every parameterised docstring.** The SDK derives the
+   tool description from the docstring, so parameter formats (which peer-group
+   codes are valid, that `grouping` wants the raw FactSet column name not its
+   display label) now reach the model.
+
+Deliberately NOT done: tool annotations (`readOnlyHint` et al). They are
+mentioned in the spec but not publicly specified, and clients must treat them as
+untrusted anyway — read-only status is stated in the server instructions and
+every docstring instead. Also kept plain-text tables rather than
+`structuredContent`: the guidance prefers structured output for machine-readable
+data, but it requires shipping the JSON *and* a text summary, roughly doubling
+payload for a local tool whose consumer only reads the answer. A considered
+trade-off, not an oversight.
+
+### Reach vs cost (same day)
+
+Asked to maximise what can be queried without wasting tokens. Measuring first
+inverted the obvious answer:
+
+| | Tokens |
+|---|---|
+| Tool definitions, re-sent **every message** | ~2,066 for 11 tools (~187 each) |
+| Answering two real questions end to end | ~250 |
+
+**Adding tools is the expensive move; answering questions is nearly free.** So
+the fix was to generalise parameters rather than multiply tools:
+
+- `get_exposures(grouping, client_name="", managers="")` now takes either a
+  client or 1-5 named managers. `/portfolio_exposures` already accepts a single
+  manager at `current_weight: 1.0`, so manager-level and multi-manager
+  comparison needed **no backend change** — only a pivot into one table.
+- Shared vocabulary (what style/skill/active mean, how to read impact and
+  intensity) moved out of per-tool docstrings into the server `instructions`,
+  which is sent **once per session** instead of every message.
+- Added `list_groupings` and `export_workbook`; trimmed the three fattest
+  descriptions to pay for them. Net **+116 tokens for +2 tools and a
+  generalised exposures tool** — 2,182 against a 2,200 budget.
+
+### Two things worth keeping
+
+**The silent-grouping bug is now loud.** `/portfolio_exposures` matches the raw
+FactSet column name and buckets everything as `Unclassified` when it does not
+recognise one, so `grouping="Sector"` produced a clean-looking, entirely wrong
+table — the 2026-09-22 bug, reachable again through the MCP server.
+`list_groupings` only helps if the model calls it, so `_check_grouping`
+validates against the menu and returns `'Sector' is a display label, not a
+column name. Use 'GICS Sector'.` A silent wrong answer became a corrective one.
+
+**`export_workbook` is the answer to "analyse the whole dataset".** It returns a
+path in ~78 tokens for ~80,000 cells; the same data inline would be ~100k
+tokens. Files written by an MCP server are *not* a documented input to Claude
+Desktop's code-execution sandbox, so the tool's job deliberately ends at
+producing the file and saying where it is — the user attaches it.
+
+Also: missing buckets in the multi-manager pivot render as `0`, not blank. The
+endpoint returns the full benchmark-derived bucket set per call, so a bucket
+present for one manager and absent for another means that manager genuinely
+holds none; blank read as "unknown" and invited a hedge where the answer is
+zero.
+
+### Still open
+
+`get_attribution_themes` wraps an endpoint that currently takes 30–80s (the
+O(n^2) nesting pass noted in the P1 entry). The tool works but is unpleasant to
+use; the docstring says so until the fix lands with the real FactSet pull.
+
+**No exposures history.** One snapshot at a time, so "as of <date>" is
+unanswerable; every exposures answer now names its source file so it cannot be
+silently mis-dated. Needs the historical-storage work from the attribution
+discussion.
+
+**Removability** (asked explicitly): the MCP work has *zero* coupling to the
+app. Nothing in `backend/*.py`, `db/`, `migrations/` or the frontend references
+`assistant/`; `backend/requirements.txt` was never touched (`mcp` lives in
+`assistant/requirements.txt`, which the Dockerfile does not read), so the
+production image is byte-identical with or without it. Removal = delete the
+directory, revert one additive README block, restore the Claude Desktop config
+backup. The first thing that would break this is adding backend endpoints
+*for* MCP — flag it at that point.
+
+## 2026-10-06 — Attribution P1: benchmark theme discovery
+
+Built the first real feature on the Attribution tab: upload a FactSet
+Contribution file, get a ranked list of the sector / industry / country /
+metric combinations that drove the benchmark's return.
+
+### The design was never written down
+
+`journal.md` (2026-08-13 entry) pointed at "the design plan + FactSet pull spec
+journaled earlier this month". **No such document existed** — not in the repo,
+not anywhere in git history. It lived in a PDF outside the repo and in a plan
+file that has since been cleaned up. It is now in
+[docs/attribution-theme-discovery.md](docs/attribution-theme-discovery.md).
+Also restored the `## 2026-08-13 — New Performance Attribution tab` heading,
+which commit `817ef81` deleted by accident, leaving its paragraphs dangling off
+the unrelated 127.0.0.1 entry and the index link at line 28 dead.
+
+### The metric, and why it is not a ratio
+
+Ranking is `E_G = w_G(R_G − R_b) = c_G − w_G·R_b`, in bps.
+
+The obvious formulation — share of performance ÷ share of weight — **breaks
+exactly where it matters**. The benchmark can return zero or go negative in a
+quarter, and that is precisely when "this one group carried everything" is most
+worth flagging; a `c_G/R_b` ratio divides by zero or silently inverts there.
+`E_G` never divides by `R_b`, so it survives every sign regime, and
+`Σ E_G = 0` over a complete partition gives a free correctness assertion
+(asserted on every request; measured residual ~1e-18).
+
+The "outsized" measure is `intensity = (|E_G|/dispersion) / w_G` where
+`dispersion = Σₛ|cₛ − wₛ·R_b|`. Always defined, grouping-independent. The
+`φ/w` ratio is still shown, but only when `|R_b| ≥ 50 bps` and never as a sort
+key — the flat-benchmark fixture renders ratios of ±30× while intensity stays
+at a sane 3–4, which is the whole argument in one screen.
+
+### Three views, because one ranking lies
+
+`E_G` favours big groups; `intensity` favours concentrated ones. Shipping only
+the first buried Energy (5 % weight, −22.5 % vs benchmark, 6.4× intensity)
+below a row of 33–45 %-weight quintile buckets at 1.4×. There are now separate
+**Top contributors** / **Top detractors** tables (signed `E_G`, so a strong
+detractor is never crowded out by winners) plus **Most outsized** (`intensity`).
+
+### Four things the first run got wrong
+
+1. **`Q1 (High) × Q1 (High)`** — labels showed the bucket but not the metric,
+   so ROE-Q1 and P/E-Q1 rendered identically. Quintile labels now carry the
+   metric name; categorical values still name themselves.
+2. **Nesting ate the list.** "Energy", "Oil Gas & Consumable Fuels" and
+   "Energy × Oil Gas & Consumable Fuels" took the top three detractor slots for
+   one finding. Groups ≥90 % explained by a stronger already-surfaced group are
+   now flagged and withheld from the headline.
+3. **Non-deterministic output across restarts.** `CATEGORICAL_COLS` is a
+   `set`, and Python salts string hashing per process, so candidate insertion
+   order changed between boots. Where two groups tie on `|E_G|` — 'Utilities'
+   and 'Spain' covering the same single stock — which one survived the nesting
+   filter flipped from one server start to the next. Caught only because a
+   test that had passed repeatedly suddenly failed. Candidates now iterate
+   `sorted(CATEGORICAL_COLS)` and every ranking has an explicit tie-break
+   (fewer parts first, then label), so a refresh shows the same table.
+4. **Pair explosion.** Naively crossing every single against every other is
+   ~27 k intersections. Applying the 1 % weight floor to singles *first* prunes
+   it hard — `w(A∩B) ≤ min(w_A, w_B)`, so a thin single cannot appear in any
+   qualifying pair. 2,568 securities → 6,588 candidates, well under a second.
+
+### Gotchas
+
+- **The existing uploads are unusable for this.** `Factset_Group_Exposure*.xlsx`
+  carry every grouping and metric column but no `Average Weight` and no
+  `Contribution To Return`. The parser raises a message naming both.
+- **`Port. Ending Weight` must not be renamed or moved.**
+  `exposures_engine.parse_section` reads weight positionally (`row[2]`) and its
+  header detection requires that literal column name. Swapping it for
+  `Average Weight` breaks the Exposures tab outright. The two columns answer
+  different questions — holdings now vs holdings across the period — so both
+  belong in the file.
+- **Quarterly average weight is the right pairing, not a monthly-derived one.**
+  Per-stock monthly contributions don't sum to the quarterly figure (FactSet
+  links geometrically), so the quarterly block is already FactSet's linked
+  answer and pairing it with that block's average weight is FactSet's own
+  convention. Averaging three monthly weights to synthesise a quarterly one
+  would be *further* from FactSet, not closer.
+- Attribution state is stored separately from `exposures_data` and persisted in
+  the cache pickle, so re-pulling one never invalidates the other.
+
+### Verified
+
+`tests/test_attribution_engine.py` (plain asserts — this repo has no test
+framework): all degenerate-`R_b` cases pass, including `R_b = 0` with a winner
+carrying a flat benchmark, `R_b < 0` where a flat group correctly reports
+positive `E_G`, and the worked example (5 % weight, 20 % of a +10 % return →
+`E_G = 150 bps`, ratio `4.00×`). Typecheck and lint clean (one pre-existing
+`set-state-in-effect` error in `attribution-route.tsx` left alone).
+
+End to end against fixtures built from the real 6/30 pull with synthetic
+contributions in three regimes (positive / flat / negative benchmark): upload →
+`/attribution_themes` → rendered tab, all reconciliation checks green
+(Σw = 1.0, Σc matches the reported section total, partition residual ~1e-18).
+Browser check with a visible Chromium, no console errors.
+
+### Still open
+
+P2 (manager positioning, Brinson tables) and P3 (persistence, narrative). Both
+need the sleeve contribution files and the monthly components weights file.
+Nothing here has been run against a real pull yet — the fixtures are synthetic
+on top of real groupings, so the first real file is still the acceptance test.
 
 ## 2026-09-24 — Market cycle chart: firm-only labels and a real collision pass
 
@@ -1269,9 +1564,14 @@ it told every future session to open `127.0.0.1:3000`. It now says
 killing the npm wrapper doesn't kill the child node process holding the port —
 check `netstat` and kill the actual PID.
 
+
+## 2026-08-13 — New Performance Attribution tab; contribution tables moved out of Portfolio
+
 New nav tab **Attribution** (`/attribution`, eyebrow "Performance") — the
 future home of the quarterly attribution / benchmark theme discovery work
-(see the design plan + FactSet pull spec journaled earlier this month). For
+(the design plan + FactSet pull spec referenced here were never actually
+committed; see the 2026-10-06 entry, which finally writes them down in
+`docs/attribution-theme-discovery.md`). For
 now it hosts the two tables moved from the Portfolio tab: **Current
 Portfolio Contribution** and **Contribution by Style Group**, with its own
 client dropdown (same pattern as Portfolio's selector, read-only — no
