@@ -36,9 +36,13 @@ function bps(value: number | null | undefined) {
 function ThemeTable({
   rows,
   ratioAvailable,
+  onPinTheme,
+  pinnedLabel,
 }: {
   rows: ThemeRow[];
   ratioAvailable: boolean;
+  onPinTheme?: (row: ThemeRow) => void;
+  pinnedLabel?: string | null;
 }) {
   if (!rows.length) {
     return (
@@ -67,15 +71,39 @@ function ThemeTable({
               Intensity
             </th>
             {ratioAvailable ? (
-              <th className="mono" title="Share of benchmark return ÷ share of weight">
-                Ratio
-              </th>
+              <>
+                <th
+                  className="mono"
+                  title="How much of the benchmark's total return this group accounted for. Can exceed 100% — winners and losers offset, so the survivors carry more than the net."
+                >
+                  Sh. of Ret
+                </th>
+                <th
+                  className="mono"
+                  title="Share of return minus share of weight, in percentage points. A group with 20% of the weight would account for 20% of the return if it were unremarkable; this is how far past that it landed."
+                >
+                  Excess
+                </th>
+              </>
             ) : null}
           </tr>
         </thead>
         <tbody>
           {rows.map((row, idx) => (
-            <tr key={`${row.label}-${idx}`}>
+            <tr
+              key={`${row.label}-${idx}`}
+              onClick={onPinTheme ? () => onPinTheme(row) : undefined}
+              style={
+                onPinTheme
+                  ? {
+                      cursor: "pointer",
+                      background:
+                        pinnedLabel === row.label ? "var(--row-active, rgba(127,127,127,0.12))" : undefined,
+                    }
+                  : undefined
+              }
+              title={onPinTheme ? "Click to see who held this theme" : undefined}
+            >
               <td className="mono" style={{ color: "var(--text3)" }}>{idx + 1}</td>
               <td title={`${row.detail} — ${row.members} securities`}>{row.label}</td>
               <td className="mono">{formatPercent(row.w, 2)}</td>
@@ -97,9 +125,16 @@ function ThemeTable({
                 {row.intensity == null ? "--" : `${row.intensity.toFixed(2)}×`}
               </td>
               {ratioAvailable ? (
-                <td className="mono">
-                  {row.ratio == null ? "--" : `${row.ratio.toFixed(2)}×`}
-                </td>
+                <>
+                  <td className="mono">
+                    {row.phi == null ? "--" : `${(row.phi * 100).toFixed(0)}%`}
+                  </td>
+                  <td className={`mono ${signClass(row.excess_share)}`}>
+                    {row.excess_share == null
+                      ? "--"
+                      : `${row.excess_share >= 0 ? "+" : ""}${(row.excess_share * 100).toFixed(0)}pp`}
+                  </td>
+                </>
               ) : null}
             </tr>
           ))}
@@ -114,6 +149,9 @@ type Props = {
   loading?: boolean;
   onSelectBenchmark?: (benchmark: string) => void;
   onSelectPeriod?: (period: string) => void;
+  /** Clicking a theme row pins it, opening the positioning panel below. */
+  onPinTheme?: (row: ThemeRow) => void;
+  pinnedLabel?: string | null;
   emptyHint?: string;
 };
 
@@ -122,13 +160,15 @@ export function ThemeDiscoverySection({
   loading,
   onSelectBenchmark,
   onSelectPeriod,
+  onPinTheme,
+  pinnedLabel,
   emptyHint,
 }: Props) {
   const [view, setView] = useState<View>("contributors");
 
   const hint =
     emptyHint ??
-    "Upload a FactSet Contribution file (with Average Weight and Contribution To Return) on the Setup tab.";
+    "Upload a FactSet Exposures file carrying Average Weight and Contribution To Return on the Setup tab.";
 
   if (!data || data.error) {
     return (
@@ -235,7 +275,12 @@ export function ThemeDiscoverySection({
         </span>
       </div>
 
-      <ThemeTable rows={data[view]} ratioAvailable={data.ratio_available} />
+      <ThemeTable
+        rows={data[view]}
+        ratioAvailable={data.ratio_available}
+        onPinTheme={onPinTheme}
+        pinnedLabel={pinnedLabel}
+      />
     </div>
   );
 }

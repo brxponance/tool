@@ -4,6 +4,7 @@
 
 _Newest first. Add new entries directly below this index._
 
+- [2026-10-06 — Attribution reads the Exposures upload; theme discovery 28–138× faster](#2026-10-06--attribution-reads-the-exposures-upload-theme-discovery-28138-faster)
 - [2026-10-06 — Local MCP server: query the tool from Claude Desktop](#2026-10-06--local-mcp-server-query-the-tool-from-claude-desktop)
 - [2026-10-06 — Attribution P1: benchmark theme discovery](#2026-10-06--attribution-p1-benchmark-theme-discovery)
 - [2026-09-24 — Market cycle chart: firm-only labels and a real collision pass](#2026-09-24--market-cycle-chart-firm-only-labels-and-a-real-collision-pass)
@@ -46,6 +47,370 @@ _Newest first. Add new entries directly below this index._
 - [2026-07-07 — Moved project off OneDrive to C:\dev\pc_tool (canonical working copy)](#2026-07-07-moved-project-off-onedrive-to-cdevpc_tool-canonical-working-copy)
 
 ---
+
+## 2026-10-06 — Attribution reads the Exposures upload; theme discovery 28–138× faster
+
+Theme discovery returned a bare **"Internal Server Error"** in the browser while
+the identical request to Flask returned 200. Same shape as the 10MB upload bug
+below: the Next proxy layer turning a backend condition into a 500. There it was
+body size; here it is **time**. `discover_themes` took 44–103s, and the Next dev
+proxy cuts a request off at exactly **30.0s**. Four runs, four cutoffs at 30.0s,
+never 29 or 31 — a timeout, not a logic fault. The proxy route's own failure path
+returns 503 JSON, so a plain-text 500 was the tell that Next itself gave up.
+
+### Why it was slow
+
+Not the candidate generation, which everyone assumes. Profiled on one benchmark:
+
+```
+singles      0.10s
+pair sweep   0.17s
+nesting     75.03s      ← 4,431,665 inner iterations
+```
+
+The nesting pass is quadratic in candidates (7,406 of them) and each iteration
+built two temporaries to compute one intersection weight. 99.6% of the runtime.
+
+### What replaced it
+
+Two changes, no change to any answer:
+
+1. One row's test is now a single BLAS matrix-vector product against every
+   stronger row at once — `matrix[:i] @ (matrix[i] * w)` — instead of a Python
+   loop. Ascending indices mean the first hit is the strongest container, which
+   is the row the old inner loop broke on.
+2. Rows are only tested when a ranking asks for them. `ordered` is sorted by
+   −|E_G|, so contributors and detractors come off the front of it and stop as
+   soon as they are full; `most_outsized` walks its own intensity order with the
+   same lazy resolution. A few hundred rows get tested instead of all 7,406.
+
+Verified by loading the pre-change module from git alongside the new one and
+diffing all three views (label, `e_g_bps` to 6dp, `nested_in`) across all eight
+fixture benchmarks: **identical everywhere**, 28× to 138× faster. On the real Q3
+pull, 44–57s became 0.93–2.49s.
+
+The mask matrix is float32 — 125MB at the widest benchmark, built on first use
+and dropped before return. float64 would be 250MB for a precision margin that
+cannot change a ranking.
+
+### One upload, not two
+
+The Setup tab's "FactSet Contribution (Attribution)" slot is gone, and
+`/upload_attribution` with it. The Exposures workbook already carries Average
+Weight and Contribution To Return on the same security rows, so
+`/upload_exposures` now parses both and theme discovery reads whatever that
+upload loaded. Two uploads meant the two tabs could sit a quarter apart with
+nothing saying so — which is exactly what had happened: Attribution was still
+serving `fixture_normal.xlsx` (Q2 synthetic test data) while Exposures held the
+real Q3 pull. The attribution parse is best effort; a pull without the
+contribution columns still loads the grid and `attribution_error` says why
+Attribution is empty.
+
+Caches written before the merge still name a file under `files['attribution']`;
+it is dropped on load so `/status` stops reporting a workbook nothing reads.
+
+### Gotchas this cost time on
+
+**`Port. Contribution To Return` did not match.** `_match_header` is exact
+equality on the normalised string and `CONTRIB_HEADERS` had no `port.` variant,
+so the real pull raised "no Average Weight and/or Contribution To Return column"
+even though the column was right there. Added as an alias.
+
+**The quarterly Total block was mislabelled as September.** The whole-quarter
+range sits in column A, left of the first block, but still counted toward
+`found` — which made `len(found) == len(block_bounds)` by coincidence and shifted
+the positional fallback one place, handing block 4 September's label. The
+widest-span rule then picked a *month* as the quarter, so `quarter_period`
+resolved to **July** and the tab's "quarterly" view was a monthly one. Labels
+left of the first block are now held apart as the report range, which is what the
+trailing `Total` block means.
+
+**Exposures read the holding weight positionally.** `row[2]` was the ending
+weight until the contribution export inserted `Port. Average Weight` ahead of it.
+Average weight still sums to 100, so nothing tripped — 3i Group simply read
+0.1598 (July average) where the truth was 0.1558 (September ending). Matched by
+name now, taking the last block (the quarterly Total) as the current snapshot.
+Attribution-only columns are kept out of the exposure records so they cannot
+surface as a grouping or quintile metric.
+
+### Share of return, in the units the question gets asked in
+
+The table ranks on `E_G` in bps, but the question people actually ask is *"this
+group is 20 % of the benchmark — did it account for more than 20 % of the
+return?"* Those are the same thing:
+
+```
+φ − w  =  c_G/R_b − w_G  =  (c_G − w_G·R_b)/R_b  =  E_G / R_b
+```
+
+An identity, verified to 4.4e-16, and since `R_b` is one number for the whole
+table it cannot reorder anything — ranking by excess share and ranking by `E_G`
+return the identical list. So no ranking changed. Two columns were added that
+restate the existing sort in those units: **Sh. of Ret** (`φ`) and **Excess**
+(`φ − w`, in percentage points). High-RSI names now read *18.7 % of the weight,
+240 % of the return, +221 pp* instead of only *+214 bps*.
+
+`Ratio` (`φ/w`) was dropped in the same change. Same idea, multiplicative, and
+strictly more distorted: it showed 12.8× for that row purely because `R_b` was
+small.
+
+**These are gated on `R_b ≥ +50 bps` — positive, not `|R_b|`.** This is the
+trap worth remembering. On a down benchmark the division flips the column's
+meaning rather than merely blurring it. EM's −303 bps July, before the gate:
+
+```
+China                      E_G +243bp   →  Sh.ofRet  -60%   Excess  -80pp
+1yr Momentum Q1 × Vol Q1   E_G -556bp   →  Sh.ofRet +208%   Excess +183pp
+```
+
+China cushioned the fall and reads worst; the pocket that drove the loss reads
+best. Anyone scanning the column left to right draws the opposite conclusion.
+The "share of the return" framing presumes there is a positive return to take a
+share of, so below zero the columns are withheld entirely and `E_G` carries it
+alone — which it does in every regime. `RATIO_FLOOR` now gates `r_b >=` rather
+than `abs(r_b) >=`.
+
+### RSI dropped from the metric vocabulary
+
+`RSI 63` and `RSI 252` are coming out of the FactSet pull, so they came out of
+`exposures_engine`: `CONTINUOUS_COLS`, `DISPLAY_LABELS`, `COL_GROUPS`, the
+value formatters, and the frontend's quintile-break table in
+`portfolio-exposures-section.tsx`. The **Momentum** group survives on
+`1-yr Momentum`, its remaining member. `attribution_engine` imports the
+vocabulary rather than redeclaring it, so theme discovery lost the RSI
+quintiles with no change of its own — candidates fell 7,436 → 6,261.
+
+Worth knowing: RSI quintiles were the strongest theme in Q3 by some distance
+(`RSI 63 Q1 (High)` +214 bps, `Q5 (Low)` −186 bps). With them gone the
+benchmark's headline becomes `Pacific Rim` at +130 bps. The quarter did not
+change; the vocabulary available to describe it did.
+
+**`INPUT_PARSER_VERSION` 3 → 4.** Three separate reasons, each of which a v3
+cache would serve wrongly and silently — the exact failure mode of the
+2026-09-04 entry below. The holding weight is now found by name rather than at
+`row[2]`; the exposures upload now also populates `attribution_data`; and RSI's
+quintile breaks are computed at parse time, so a v3 cache still carries them
+and would offer groupings the pull no longer contains.
+
+**`_reload_inputs_core` only re-parsed the exposures half.** Found while
+checking the bump actually recovers. It would have refreshed `exposures_data`
+and left `attribution_data` untouched — walking the two tabs back onto
+different parses of the same workbook, which is the drift merging the uploads
+was meant to end. Both are refreshed together now, attribution tolerated as
+`error` so a pull lacking contribution columns still yields a usable grid.
+Verified on boot: `{'exposures': 'ok', 'attribution': 'ok', ...}`.
+
+### Client composites: a hierarchy the flat parser was silently flattening
+
+The pull now carries client composites alongside the manager sleeves, three
+tiers deep — composite at 100 %, each manager sleeve at its weight **in the
+client**, each holding at its weight in the client:
+
+```
+lvl 0 | CALSTRS EAFE+Canada Composite |         | 100.00  | +2.4216%
+lvl 1 | CALSTRS - BALLINA EAFE+Canada |         |  17.1486| +0.8022%
+lvl 2 | Ai Holdings Corporation       | B1TK201 |   0.7484| +0.0942%
+```
+
+Both engines identified a section as "a name with an empty SEDOL", which is
+true at two of those depths. Read flat, that was quietly destructive: **59
+sleeve names appear twice**, once in manager space and once in client space,
+and sections are keyed by name, so the client-space copy overwrote the
+manager-space one. Every composite was dropped as well (nothing sits between
+its header and its first sleeve), and **87 of 120 sections stopped summing to
+100 %**. The reconciliation banner was the only thing saying so.
+
+**Hierarchy now comes from the outline levels**, read by scanning the sheet XML
+for `<row … outlineLevel=…>`. openpyxl exposes them only with
+`read_only=False`, which took a 52MB parse from 39s to 75s — and it is parsed
+twice per upload. The regex pass costs **2.4s** for an identical answer.
+
+A purely structural rule — a name row directly followed by another name row is
+a parent — agreed with the outline levels on **all 200 name rows**, so it is
+the fallback when a file carries no grouping (a re-save or a CSV round trip
+loses it). Structure also beats matching on the name: `St Louis Public Schools`
+is a composite without the word in it, and `M4RZ` is a component that looks
+like nothing.
+
+Three consequences worth remembering:
+
+- **A composite bounds a section even though it is not emitted as one.**
+  Dropping composites from the boundary list let the section above run on
+  through the whole composite region, and one manager's weights summed to 614
+  million.
+- **Duplicate SEDOLs now accumulate instead of overwriting.** Currency lines
+  repeat under one code (`AUD999999` and `Australian Dollar` are both
+  CASH_AUD), and a composite sums a holding across every sleeve that owns it.
+- **Residual components stay in the totals.** `M4RZ` carries 1.82 % weight, and
+  CALSTRS's fee and transition accounts are part of why its sleeves sum to
+  exactly 100.0000. Dropping them would break both that and Σc. They are
+  flagged as `residual_sleeves` so they never rank as managers.
+
+The Exposures grid takes depth-0, non-composite sections only: it answers "what
+does this manager hold", which is a manager-space question, while a composite's
+rows are shares of a client.
+
+### The composite blocks are July only
+
+Verified against the sleeve sections, holding by holding: a composite's values
+equal **manager July × sleeve weight**, not the quarter. Aurizon reads 0.000138
+in client space against 0.000142 for July and −0.000717 for the quarter.
+
+So the composite pull covers `30-JUN → 31-JUL` while the sleeves cover all
+three months plus the Total. Worse, the composite rows' later blocks are not
+empty but **misaligned** — that region's own columns run past one block's
+width, so block 2+ lands on grouping and metric columns and reads as
+contribution. Summed, CALSTRS produced **+18,034 %** against zero weight.
+
+`composites[name]['periods']` now lists only the blocks where Σw ≈ 1, which is
+what separates a real period from a misread one. Re-pull the composites over
+the same four blocks as the sleeves and the restriction lifts itself.
+
+### Uploads no longer 500
+
+`/upload_exposures` saves the file, starts a thread and returns. Both parses of
+the 52MB pull take ~95s against a 30s proxy limit, so the browser was shown a
+bare "Internal Server Error" while the upload was in fact succeeding — the user
+reloaded and found it had gone through. Through the proxy it is now **HTTP 200
+in 1.4s**. `/status` carries `exposures_parsing` and `exposures_parse_error`;
+the Setup card reads "parsing…" and polls every 2s until it clears.
+
+### The composite re-pull lands; picking a client drives theme discovery
+
+The re-pulled file carries **11 composites over all four blocks** (Atlantic
+Health gained its component breakdown), and every one reconciles on the
+quarter — Σw = 1.0000, and Σc equals the composite's own header row to
+**0.00 bps** on all eleven. CALSTRS comes out at +1.921 %, Atlantic Health at
++4.396 %.
+
+That last figure is worth keeping: it is the number the static-weight roll-up
+missed by 149 bps when it was the only way to reach client space. The weights
+file had Ballina at 17.91 %; FactSet's own average is 17.15 %. Nothing
+approximated any more — the client total, the per-manager split and the
+holding-level detail all come from the file.
+
+`composites[name]['periods']` needed no change to pick this up; it lists what
+reconciles, which was one period before and is four now.
+
+**Selecting a client now points theme discovery at that client's benchmark.**
+It could not before, because the two spellings never matched literally: the
+roster says `MSCI EAFE+CANADA`, the contribution file names the section
+`MSCI EAFE + Canada`. `/clients` resolves them through
+`holdings_resolver.match_index_sleeve` and returns `benchmark_sections`
+alongside the raw labels — done on the backend because both the section names
+and the alias rules live there.
+
+One normalisation was missing: `ex USA` and `ex US` are the same index written
+two ways (FactSet writes the first, the roster the second), which is why CIT's
+`MSCI ACWI ex-US SC` never found `MSCI AC World ex USA Small Cap`.
+
+The remaining miss was a data gap rather than a name problem: MD is measured
+against MSCI World ex US SC and the pull carries no such section. Benchmarks
+like that are named explicitly in `ATTRIBUTION_BENCHMARK_OVERRIDES` — MD uses
+MSCI EAFE + Canada Small Cap, agreed 2026-10-06. The override steers the
+Attribution tab only; the client's benchmark of record is untouched, and the
+label still shows the real one. **14 of 14 now resolve.**
+
+**The map goes stale if the page mounts before the backend is ready.** Reported
+as "every client says not in this pull", and the backend was serving all 13
+correctly at the time. `/clients` resolves against whatever contribution file
+is loaded, and the Attribution tab asked for it exactly once on mount — so a
+page opened during a restart or mid-upload got an empty map and kept it
+forever. It now re-asks once, when the themes response arrives and proves the
+attribution data is up. Worth remembering for any other one-shot fetch whose
+answer depends on a file the backend may still be parsing.
+
+The effect keys on the selected client alone, so changing the benchmark
+dropdown by hand afterwards still stands until the client changes again.
+
+### Manager-level attribution (P2, first cut)
+
+Clicking a theme in the discovery table pins it and opens a positioning panel
+beneath: what the benchmark held, what the client held against it, and which
+managers built that position.
+
+```
+POSITIONING — P/E NTM Q4        CALSTRS · 30-JUN-2026 to 30-SEP-2026
+  MSCI EAFE + Canada      18.14%   0.90%
+  CALSTRS                 22.02%   1.39%
+  Active                  +3.88pp  +49 bps
+  Manager split — shares of the client          ✓ sums to the client
+  1 Ballina        5.01%  22.7%  +39   own 28.3%  +10.21pp
+  2 Polen          4.49%  20.4%  +34   own 19.9%   +1.76pp
+  3 Gilman Hill    3.81%  17.3%  +12   own 33.9%  +15.76pp
+```
+
+`client_theme_detail` returns three readings and keeps each in its own space:
+the active position and the manager split are CLIENT space — the split's
+weights sum to the client's own and its bps to the client's contribution,
+which is what the ✓ asserts — while `own_weight` is MANAGER space, the
+sleeve's bet as a share of itself. Nothing is converted between them; that
+conversion is the ÷ avg-weight error measured at +912 bps.
+
+Gilman Hill above is why both columns are shown: third-smallest holder of the
+theme in the client at 3.81 %, yet the most committed manager to it in its own
+book at 33.9 % against the benchmark's 18.14 %. One number answers "who moved
+the client", the other "whose conviction was this".
+
+A theme is addressed by its **parts** (`[{column, value}]`), not its label. The
+label is for reading; the parts are what define membership, and quintile
+cut-points come from the benchmark being viewed, so "P/E NTM Q4" means Q4 of
+*that* benchmark's distribution for both sides of the comparison.
+
+Two details worth keeping:
+
+- **Composite → client needed a fallback.** `section_client` reads the name,
+  which works for 'CALSTRS EAFE+Canada Composite' but not 'Maryland Non US SC
+  Composite' or 'St Louis Public Schools'. The sleeves inside always carry the
+  coded prefix, so they vote — unanimously for all 11 composites.
+- **Residual components are labelled, not hidden.** Fee, transition and M4RZ
+  rows stay in the split (dropping them would break the ✓) and carry a
+  `· residual` tag so they are never read as a manager.
+
+Pinning without a client chosen says so rather than rendering an empty panel —
+the question is who in *this* portfolio held the theme, and only a composite
+carries client-space weights.
+
+### Metric themes are the extremes only
+
+`THEME_QUINTILES = ('Q1 (High)', 'Q5 (Low)')`. Q2–Q4 no longer become
+candidates.
+
+A theme should name something you could hold a view about. "High-ROE names beat
+the market" is one; "mid-ROE names beat the market" is not — the middle of a
+distribution has no economic direction, so a Q3 bucket topping the table says
+the cut-points landed somewhere, not that anything happened. They were also
+crowding out real findings: `P/E LTM Q4`, `ROE Q3`, `P/B Q4` and `Div Yield Q3`
+previously filled four of the top five contributors on EAFE + Canada.
+
+What the quarter reads as now, which is a story rather than an artefact:
+
+```
++ Pacific Rim          +130bp      - P/E NTM Q1 (High)    -171bp
++ P/E NTM Q5 (Low)     +102bp      - P/B Q1 (High)        -152bp
++ Beta Q5 (Low)         +98bp      - Europe Core          -148bp
+```
+
+Cheap and low-beta won, expensive lost.
+
+Candidates fall from **6,263 to 1,612** and a benchmark now ranks in 0.17s
+(0.49s for the 4,203-stock small-cap index). Reconciliation is unaffected — the
+Σ E_G = 0 assertion partitions on GICS Sector, not on quintiles.
+
+Categorical groupings are untouched: every sector, country and region value is
+a thing in itself. And `_theme_predicate` still resolves any quintile, so a
+theme pinned before this change keeps working.
+
+### Still open
+
+**Abandoned requests are never cancelled.** Four concurrent theme requests failed
+to finish inside 400s when one takes ~50s — BLAS thread oversubscription, most
+likely. At the new speed this stopped mattering, but nothing stops a reload from
+stacking work on a server still computing the last one.
+
+`Market Development` is derived from Country in `exposures_engine` and has no
+equivalent in `attribution_engine`, so it reads 0% there — four categoricals
+available to theme discovery instead of five.
 
 ## 2026-10-06 — Local MCP server: query the tool from Claude Desktop
 

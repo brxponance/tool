@@ -27,7 +27,14 @@ export type ContributionResponse = {
 
 export type ClientsResponse = {
   clients: string[];
+  /** The client's benchmark as the roster spells it ('MSCI EAFE+CANADA'). */
   benchmarks: Record<string, string>;
+  /**
+   * The same benchmark as the loaded contribution file names its section
+   * ('MSCI EAFE + Canada'). Resolved by the backend, and absent for a client
+   * whose benchmark has no section in the current pull.
+   */
+  benchmark_sections?: Record<string, string>;
   editable: boolean;
 };
 
@@ -54,10 +61,13 @@ export type ThemeRow = {
   e_g_bps: number;
   share: number | null;   // |E_G| / total active dispersion
   intensity: number | null; // share / w — the robust "outsized" measure
-  // phi and ratio are null whenever |R_b| sits below the server's floor, where
-  // a share-of-benchmark-return figure is meaningless. Never sort on them.
+  // Share of the benchmark's return, and that share minus the group's share of
+  // weight — the overshoot against "a 20% weight should be 20% of the return".
+  // Both null unless R_b is positive AND above the server's floor: excess_share
+  // is E_G / R_b, so on a down benchmark it reverses sign and reads as the
+  // opposite of what happened. Never sort on them; e_g_bps is the sort key.
   phi: number | null;
-  ratio: number | null;
+  excess_share: number | null;
   nested_in: string | null;
 };
 
@@ -88,5 +98,47 @@ export type ThemeDiscoveryResponse = {
   detractors: ThemeRow[];
   most_outsized: ThemeRow[];
   reconciliation: ThemeReconciliation;
+  error?: string;
+};
+
+// ── One pinned theme, benchmark → client → managers (P2) ────────────────
+// Mirrors backend/attribution_engine.client_theme_detail. Three readings in
+// two spaces: the active position and the manager split are CLIENT space (the
+// split sums to the client's own weight and contribution), while own_weight is
+// MANAGER space — the sleeve's bet as a share of itself. They are never
+// converted into one another.
+export type ThemeManagerRow = {
+  name: string;
+  /** Weight in the theme as a share of the CLIENT portfolio. */
+  weight: number;
+  contribution: number;
+  contribution_bps: number;
+  share_of_client: number | null;
+  /** The sleeve's own weight in the theme, as a share of itself. */
+  own_weight: number | null;
+  own_active_weight: number | null;
+  /** Fee / transition / residual plug — in the totals, never a manager. */
+  is_residual: boolean;
+};
+
+export type ThemeDetailResponse = {
+  benchmark: string;
+  period: string;
+  composite: string;
+  client: string | null;
+  theme: { label: string; parts: { column: string; value: string }[] };
+  benchmark_weight: number;
+  benchmark_contribution: number;
+  client_weight: number;
+  client_contribution: number;
+  active_weight: number;
+  impact: number;
+  impact_bps: number;
+  managers: ThemeManagerRow[];
+  reconciliation: {
+    manager_weight_sum: number;
+    manager_contribution_sum: number;
+    matches_client: boolean;
+  };
   error?: string;
 };

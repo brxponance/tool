@@ -57,8 +57,6 @@ const PREVIEW_QUINTILE_SPECS: Record<
     breaks: [1, 5, 25, 120],
     fmt: (v) => `$${v >= 1 ? v.toFixed(0) : v.toFixed(1)}B`,
   },
-  "RSI 63": { breaks: [35, 45, 55, 65], fmt: (v) => v.toFixed(0) },
-  "RSI 252": { breaks: [35, 45, 55, 65], fmt: (v) => v.toFixed(0) },
   "Earnings Growth - 3-5 Year Projected NEW": { breaks: [2, 7, 12, 20], fmt: (v) => `${v.toFixed(1)}%` },
   "Earnings Growth - 3 Year Historical NEW": { breaks: [-3, 5, 12, 22], fmt: (v) => `${v.toFixed(1)}%` },
   "Hist 3Yr Sales Growth": { breaks: [-1, 4, 9, 16], fmt: (v) => `${v.toFixed(1)}%` },

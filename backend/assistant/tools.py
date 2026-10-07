@@ -584,9 +584,10 @@ def get_attribution_themes(benchmark: str = "", period: str = "") -> str:
         ("securities", d.get("n_securities")),
         ("groups tested", d.get("n_candidates")),
         ("reconciled", "yes" if ok else "NO — treat rankings as unverified"),
-        ("share-of-return ratio available",
+        ("share-of-return figures available",
          "yes" if d.get("ratio_available") else
-         "no (benchmark return too close to zero for a ratio to mean anything)"),
+         "no (benchmark return is negative or too close to zero — a share of it "
+         "would reverse or diverge; read impact_bps instead)"),
     ], note="Benchmark theme discovery")
 
     def block(key, title):

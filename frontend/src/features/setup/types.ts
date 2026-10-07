@@ -6,6 +6,10 @@ export type BackendStatus = {
   universe_tabs: string[];
   universe_files_staged: string[];
   has_exposures: boolean;
+  // The exposures upload returns before parsing finishes — a large pull takes
+  // around 95s, far past the proxy's patience. Poll these instead.
+  exposures_parsing: boolean;
+  exposures_parse_error: string | null;
   exposures_benchmark: string;
   exposures_managers: string[];
   has_attribution: boolean;

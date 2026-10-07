@@ -64,7 +64,15 @@ os.makedirs(os.path.dirname(app.config['CACHE_FILE']), exist_ok=True)
 #       changes, not just its input format. Also covers '1-yr Momentum'
 #       joining CONTINUOUS_COLS (its quintile breaks are computed at parse
 #       time, so an old cached parse has none).
-INPUT_PARSER_VERSION = 3
+#   v4: three changes to the exposures parse, each of which an old cache
+#       would serve wrongly and silently. The holding weight is now located
+#       by NAME rather than at row[2] (a v3 cache of a contribution-layout
+#       pull holds average weights where ending weights belong). The same
+#       upload now also populates 'attribution_data' (a v3 cache has none,
+#       or has one parsed from a different workbook). And RSI 63 / RSI 252
+#       left CONTINUOUS_COLS, so a v3 cache still carries their quintile
+#       breaks and would offer groupings the pull no longer contains.
+INPUT_PARSER_VERSION = 4
 
 state = {
     'clone_results': None, 'manager_dfs': None, 'weights': None,
@@ -86,6 +94,9 @@ state = {
     'client_aum': {},
     'universe_clone_results': None, 'universe_dfs': None,
     'exposures_data': None,
+    # /upload_exposures returns before parsing finishes; these report it.
+    'exposures_parsing': False,
+    'exposures_parse_error': None,
     'norm_skill_by_tab': {},
     'progress': [], 'running': False, 'error': None, 'files': {},
     'progress_current': 0, 'progress_total': 0, 'progress_phase': '',
@@ -109,11 +120,12 @@ state = {
     # capture computation). Precomputed at /run_universe, consumed by
     # /market_cycle, invalidated when a new factor_returns file is uploaded.
     'mc_universe_cache': {},
-    # Parsed FactSet contribution file carrying per-security Average Weight and
-    # Contribution To Return — the input to benchmark theme discovery on the
-    # Attribution tab. Distinct from 'exposures_data': that file describes
-    # current positioning (ending weight), this one describes what happened
-    # over a period. Populated by /upload_attribution.
+    # The same FactSet Exposures workbook as 'exposures_data', parsed for its
+    # per-security Average Weight and Contribution To Return columns — the
+    # input to benchmark theme discovery on the Attribution tab. Where
+    # 'exposures_data' describes current positioning (ending weight), this
+    # describes what happened over the period. Both are populated by
+    # /upload_exposures, so they can never be a quarter apart.
     'attribution_data': None,
 }
 
@@ -389,7 +401,14 @@ def load_cache():
         state['qualitative_data']       = data.get('qualitative_data')
         state['mc_universe_cache']      = data.get('mc_universe_cache') or {}
         state['attribution_data']       = data.get('attribution_data')
-        cached_files                    = data.get('files', {})
+        cached_files                    = dict(data.get('files') or {})
+
+        # Attribution used to be its own upload. Caches written before that
+        # merge still name a separate contribution workbook under 'attribution'
+        # — a file nothing reads any more, which would keep showing up in
+        # /status as if it were loaded. Drop it; the Exposures upload is the
+        # single source for both tabs now.
+        cached_files.pop('attribution', None)
 
         # Resolve each cached path. Drop entries whose files can no longer be
         # located; rewrite survivors to their new absolute paths. This keeps
@@ -719,6 +738,8 @@ def status():
         'universe_tabs': uni_tabs_cached,
         'universe_files_staged': uni_files_staged,
         'has_exposures': state['exposures_data'] is not None,
+        'exposures_parsing':     bool(state.get('exposures_parsing')),
+        'exposures_parse_error': state.get('exposures_parse_error'),
         'exposures_benchmark': (state['exposures_data'] or {}).get('benchmark_name', ''),
         'exposures_managers':  (state['exposures_data'] or {}).get('manager_names', []),
         'has_attribution': state.get('attribution_data') is not None,
@@ -912,7 +933,8 @@ def _reload_inputs_core():
     """Core of /reload_inputs — returns a plain dict rather than a Response, so
     the startup auto-refresh (see _auto_reload_stale_inputs) can reuse it."""
     status = {'weights': 'skipped', 'risk': 'skipped', 'exposures': 'skipped',
-              'security_risk': 'skipped', 'qualitative': 'skipped'}
+              'attribution': 'skipped', 'security_risk': 'skipped',
+              'qualitative': 'skipped'}
     errors = {}
 
     # Weights
@@ -930,7 +952,12 @@ def _reload_inputs_core():
             status['weights'] = 'error'
             errors['weights'] = str(e)
 
-    # Exposures
+    # Exposures — and attribution, which is the SAME workbook read for its
+    # average-weight and contribution columns. Both are refreshed here or
+    # neither: refreshing only the exposures half would walk the two tabs back
+    # onto different parses of the file, which is the drift that merging the
+    # uploads removed. Attribution staying 'error' is not fatal — a pull
+    # without the contribution columns still gives a usable exposures grid.
     _p = _input_path('exposures')
     if _p:
         try:
@@ -940,6 +967,14 @@ def _reload_inputs_core():
         except Exception as e:
             status['exposures'] = 'error'
             errors['exposures'] = str(e)
+        try:
+            from attribution_engine import parse_attribution_file
+            state['attribution_data'] = parse_attribution_file(_p)
+            status['attribution'] = 'ok'
+        except Exception as e:
+            state['attribution_data'] = None
+            status['attribution'] = 'error'
+            errors['attribution'] = str(e)
 
     # Security-level risk DNA (was the one input /reload_inputs never
     # refreshed — a workbook updated in place kept serving its stale parse
@@ -1021,14 +1056,44 @@ def progress():
         'progress_sub_pct':     sub_pct,
     })
 
+# Where a client's roster benchmark has no section in the contribution pull,
+# name the one theme discovery should use instead. MD is measured against
+# MSCI World ex US SC, which this export does not carry; EAFE + Canada Small
+# Cap is the agreed stand-in (2026-10-06). This steers the Attribution tab
+# ONLY — the client's benchmark of record, and every other tab's use of it,
+# is untouched.
+ATTRIBUTION_BENCHMARK_OVERRIDES = {
+    'MD': 'MSCI EAFE + Canada Small Cap',
+}
+
+
 @app.route('/clients')
 def clients():
     # Always report `editable` (even for an empty roster) so a reachable-but-
     # empty DB still shows the "+ Add Client" control and the first client can
     # be created.
+    # `benchmarks` is the client's benchmark as the roster writes it
+    # ('MSCI EAFE+CANADA'); `benchmark_sections` is the section that label
+    # resolves to inside the loaded contribution file ('MSCI EAFE + Canada').
+    # The two spellings never matched literally, so picking a client could not
+    # drive theme discovery. Resolved here rather than in the browser: the
+    # section names and the alias rules both live on this side.
+    from holdings_resolver import match_index_sleeve
+    labels = state.get('client_benchmarks') or {}
+    names = (state.get('attribution_data') or {}).get('benchmark_names') or []
+    resolved = {}
+    for client, label in labels.items():
+        want = ATTRIBUTION_BENCHMARK_OVERRIDES.get(client, label)
+        hit = match_index_sleeve(want, names)
+        if not hit and want != label:
+            hit = match_index_sleeve(label, names)
+        if hit:
+            resolved[client] = hit
+
     return jsonify({
         'clients':    list((state.get('weights') or {}).keys()),
-        'benchmarks': state.get('client_benchmarks') or {},
+        'benchmarks': labels,
+        'benchmark_sections': resolved,
         'editable':   db_enabled(),
     })
 
@@ -3646,69 +3711,69 @@ def market_cycle():
 # ── Exposures endpoints ──────────────────────────────────────────────────
 @app.route('/upload_exposures', methods=['POST'])
 def upload_exposures():
-    """Accept a FactSet-style contribution XLSX, parse it, cache it."""
+    """Accept a FactSet-style contribution XLSX, parse it, cache it.
+
+    One workbook feeds two tabs. The exposures grid reads the ending weight
+    and the characteristic columns; attribution theme discovery reads the
+    average weight and contribution columns out of the same rows. They used to
+    be separate uploads, which meant the two tabs could silently disagree
+    about which quarter they were showing. The attribution parse is best
+    effort: a pull without the contribution columns still loads the exposures
+    grid, and `attribution_error` says why the Attribution tab is empty.
+    """
     from exposures_engine import parse_exposures_file
+    from attribution_engine import parse_attribution_file
     f = request.files.get('exposures')
     if not f:
         return jsonify({'status': 'error', 'message': 'No file provided.'})
     fname = secure_filename(f.filename)
     path  = save_uploaded_file(f, fname, app.config['UPLOAD_FOLDER'])
     state['files']['exposures'] = path
-    try:
-        local = resolve_path(path, app.config['UPLOAD_FOLDER'], suffix='.xlsx')
-        data = parse_exposures_file(local)
-        state['exposures_data'] = data
-        save_cache()
-        return jsonify({
-            'status':    'ok',
-            'benchmark': data['benchmark_name'],
-            'managers':  data['manager_names'],
-            'n_benchmark': len(data['benchmark']),
-        })
-    except Exception as e:
-        import traceback
-        return jsonify({'status': 'error', 'message': str(e),
-                        'traceback': traceback.format_exc()})
+    state['exposures_parsing'] = True
+    state['exposures_parse_error'] = None
+
+    # Parsing runs in the background and the request returns at once. Both
+    # parses of a 52MB workbook take ~95s, and the Next proxy in front of this
+    # gives up at 30s — so the browser saw a bare "Internal Server Error"
+    # while the upload was in fact succeeding, finishing, and saving. /status
+    # carries `exposures_parsing` for the Setup tab to poll instead.
+    def _parse_worker(stored_path):
+        try:
+            local = resolve_path(stored_path, app.config['UPLOAD_FOLDER'],
+                                 suffix='.xlsx')
+            state['exposures_data'] = parse_exposures_file(local)
+        except Exception as e:
+            state['exposures_parse_error'] = str(e)
+            state['exposures_parsing'] = False
+            return
+        try:
+            state['attribution_data'] = parse_attribution_file(local)
+        except Exception as e:
+            # A pull without the contribution columns is still a usable
+            # exposures grid; only the Attribution tab goes quiet.
+            state['attribution_data'] = None
+            state['exposures_parse_error'] = (
+                'Exposures loaded. Attribution unavailable: %s' % e)
+        try:
+            save_cache()
+        finally:
+            state['exposures_parsing'] = False
+
+    threading.Thread(target=_parse_worker, args=(path,), daemon=True,
+                     name='exposures-parse').start()
+    return jsonify({
+        'status':  'parsing',
+        'message': f'{fname} uploaded. Parsing in the background — the card '
+                   f'updates when it finishes (about a minute for a large pull).',
+    })
 
 
 # ── Attribution: benchmark theme discovery (P1) ───────────────────────────
-@app.route('/upload_attribution', methods=['POST'])
-def upload_attribution():
-    """Accept a FactSet Contribution XLSX that carries per-security Average
-    Weight and Contribution To Return, parse it, cache it.
-
-    This is a SEPARATE upload from /upload_exposures on purpose. The exposures
-    file answers 'what do we hold now' (ending weight); this one answers 'what
-    happened over the period' (average weight + contribution). One workbook can
-    legitimately serve both if it carries all the columns, but they are stored
-    and versioned independently so re-pulling one never invalidates the other.
-    """
-    from attribution_engine import parse_attribution_file
-    f = request.files.get('attribution')
-    if not f:
-        return jsonify({'status': 'error', 'message': 'No file provided.'})
-    fname = secure_filename(f.filename)
-    path  = save_uploaded_file(f, fname, app.config['UPLOAD_FOLDER'])
-    try:
-        local = resolve_path(path, app.config['UPLOAD_FOLDER'], suffix='.xlsx')
-        data = parse_attribution_file(local)
-    except Exception as e:
-        import traceback
-        return jsonify({'status': 'error', 'message': str(e),
-                        'traceback': traceback.format_exc()})
-
-    state['files']['attribution'] = path
-    state['attribution_data'] = data
-    save_cache()
-    return jsonify({
-        'status':          'ok',
-        'periods':         data['periods'],
-        'quarter_period':  data['quarter_period'],
-        'benchmarks':      data['benchmark_names'],
-        'managers':        data['manager_names'],
-        'n_blocks':        data['n_blocks'],
-        'n_benchmark_securities': {b: len(v) for b, v in data['benchmarks'].items()},
-    })
+# There is no separate attribution upload. The FactSet Exposures workbook
+# carries the average-weight and contribution columns on the same security
+# rows, so /upload_exposures parses both and theme discovery reads whatever
+# that upload loaded — one file, one period, no way for the two tabs to drift
+# onto different quarters.
 
 
 @app.route('/attribution_themes')
@@ -3723,8 +3788,8 @@ def attribution_themes():
     data = state.get('attribution_data')
     if not data:
         return jsonify({'error': 'No attribution data loaded. Upload a FactSet '
-                                 'Contribution file (with Average Weight and '
-                                 'Contribution To Return) on the Setup tab.'})
+                                 'Exposures file carrying Average Weight and '
+                                 'Contribution To Return on the Setup tab.'})
 
     def _num(name, default, cast=float):
         raw = request.args.get(name)
@@ -3751,6 +3816,58 @@ def attribution_themes():
         return jsonify({'error': str(e), 'traceback': traceback.format_exc()})
 
     result['available_benchmarks'] = data['benchmark_names']
+    return jsonify(result)
+
+
+@app.route('/attribution_theme_detail')
+def attribution_theme_detail():
+    """One pinned theme, read from the benchmark down to the managers.
+
+    Query: benchmark, period, client (or composite), parts (JSON array of
+    {column, value}). `parts` rather than a label because a label is for
+    reading — the parts are what actually define membership.
+    """
+    from attribution_engine import client_theme_detail, composite_client
+    data = state.get('attribution_data')
+    if not data:
+        return jsonify({'error': 'No attribution data loaded. Upload a FactSet '
+                                 'Exposures file on the Setup tab.'})
+
+    raw = request.args.get('parts') or '[]'
+    try:
+        parts = json.loads(raw)
+        if not isinstance(parts, list) or not parts:
+            raise ValueError
+    except Exception:
+        return jsonify({'error': 'Bad "parts" — expected a non-empty JSON array '
+                                 'of {column, value}.'})
+
+    composite = request.args.get('composite')
+    if not composite:
+        client = request.args.get('client') or ''
+        matches = [c for c in (data.get('composites') or {})
+                   if composite_client(data, c) == client]
+        if not matches:
+            known = sorted({composite_client(data, c) or '?'
+                            for c in (data.get('composites') or {})})
+            return jsonify({'error': f"No client composite for '{client}'. The "
+                                     f"pull carries: {', '.join(known)}."})
+        composite = matches[0]
+
+    try:
+        result = client_theme_detail(
+            data,
+            benchmark_name=request.args.get('benchmark') or None,
+            period=request.args.get('period') or None,
+            composite_name=composite,
+            parts=parts,
+        )
+    except ValueError as e:
+        return jsonify({'error': str(e)})
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'traceback': traceback.format_exc()})
+
     return jsonify(result)
 
 

@@ -34,6 +34,65 @@ from rapidfuzz import fuzz, process
 # loaded file rendered a 100%-Unclassified table.)
 COLUMN_ALIASES = {'MSCI Region': 'Region', 'MSCI Country': 'Country'}
 
+# Header spellings for the holding weight, and for the columns that exist only
+# to feed attribution. Both are matched by name so the grid survives FactSet
+# reordering its columns — see parse_exposures_file.
+_ROW_OUTLINE_RE = re.compile(rb'<row[^>]*\br="(\d+)"[^>]*\boutlineLevel="(\d+)"')
+_SSML = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+_SSREL = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}'
+
+
+def _row_outline_levels(path, sheet_name):
+    """{1-based spreadsheet row: outline level} for one sheet.
+
+    This is how a client composite's three tiers are told apart: the composite
+    sits at level 0, its manager sleeves at 1, their holdings at 2. Without it
+    a sleeve header and a composite header are indistinguishable — both are a
+    name with an empty SEDOL — and the flat reading silently let client-space
+    sleeves overwrite the same-named manager-space sections.
+
+    Read by scanning the sheet XML for row tags rather than through openpyxl:
+    outline levels need read_only=False, which doubled a 52MB parse from 39s
+    to 75s, and this pass costs 2.4s for an identical answer. Returns {} if
+    the file carries no grouping, and the caller falls back to structure.
+    """
+    import zipfile
+    from xml.etree import ElementTree as ET
+    try:
+        with zipfile.ZipFile(path) as z:
+            book = ET.fromstring(z.read('xl/workbook.xml'))
+            rels = {r.get('Id'): r.get('Target')
+                    for r in ET.fromstring(z.read('xl/_rels/workbook.xml.rels'))}
+            target = None
+            for sheet in book.iter(_SSML + 'sheet'):
+                if sheet.get('name') == sheet_name:
+                    target = rels.get(sheet.get(_SSREL + 'id'))
+                    break
+            if not target:
+                return {}
+            if not target.startswith('xl/'):
+                target = 'xl/' + target.lstrip('/')
+            levels, tail = {}, b''
+            with z.open(target) as fh:
+                while True:
+                    chunk = fh.read(4 << 20)
+                    if not chunk:
+                        break
+                    buf = tail + chunk
+                    for m in _ROW_OUTLINE_RE.finditer(buf):
+                        levels[int(m.group(1))] = int(m.group(2))
+                    # A row tag can straddle a chunk boundary.
+                    tail = buf[-512:]
+            return levels
+    except Exception:
+        return {}
+
+
+WEIGHT_HEADERS = ('Port. Ending Weight', 'Ending Weight')
+ATTRIBUTION_ONLY_HEADERS = ('Port. Average Weight', 'Average Weight',
+                            'Port. Contribution To Return',
+                            'Contribution To Return')
+
 CATEGORICAL_COLS = {'Region', 'Country',
                     'GICS Sector', 'GICS Industry',
                     # Developed/Emerging/Other split. The FactSet file has no such
@@ -54,7 +113,7 @@ CONTINUOUS_COLS = [
     'New Custom ROE', 'ROIC', 'Gross Margin NEW', 'Net Margin', 'ROA',
     'New Price to Earnings LTM', 'Price to Earnings - Next Twelve Months NEW',
     'Price to Book', 'Price to FCF NEW', 'Dividend Yield',
-    'RSI 63', 'RSI 252', '1-yr Momentum',
+    '1-yr Momentum',
     'Earnings Growth - 3-5 Year Projected NEW',
     'Earnings Growth - 3 Year Historical NEW', 'Hist 3Yr Sales Growth',
     'Beta (3 yr)', 'Return Vol - 252D', 'Skewness - 252D', 'Kurtosis - 252D',
@@ -73,8 +132,6 @@ DISPLAY_LABELS = {
     'Price to Book':                             'P/B',
     'Price to FCF NEW':                          'P/FCF',
     'Dividend Yield':                            'Div Yield',
-    'RSI 63':                                    'RSI 63',
-    'RSI 252':                                   'RSI 252',
     '1-yr Momentum':                             '1yr Momentum',
     'Earnings Growth - 3-5 Year Projected NEW':  'EPS Growth 3-5yr',
     'Earnings Growth - 3 Year Historical NEW':   'EPS Growth 3yr',
@@ -107,8 +164,6 @@ COL_GROUPS = {
     'Price to Book': 'Value',
     'Price to FCF NEW': 'Value',
     'Dividend Yield': 'Value',
-    'RSI 63': 'Momentum',
-    'RSI 252': 'Momentum',
     '1-yr Momentum': 'Momentum',
     'Earnings Growth - 3-5 Year Projected NEW': 'Growth',
     'Earnings Growth - 3 Year Historical NEW': 'Growth',
@@ -182,14 +237,69 @@ def parse_exposures_file(path):
                  for c in headers]
     data_start = header_row_idx + 1
 
+    # Ending weight is located BY NAME, never by position. The contribution
+    # export that now feeds this tab inserts 'Port. Average Weight' ahead of
+    # it, so the old positional row[2] read returned the average weight as the
+    # holding weight — same shape, still sums to 100, quietly wrong. When the
+    # file carries repeated period blocks the LAST one is the quarterly Total
+    # block, whose ending weight is the most recent snapshot.
+    weight_idx = None
+    for i, raw in enumerate(headers):
+        if isinstance(raw, str) and raw.strip() in WEIGHT_HEADERS:
+            weight_idx = i
+    if weight_idx is None:
+        raise ValueError("Could not find a 'Port. Ending Weight' column — "
+                         "the exposures grid needs it to size each holding.")
+
+    # Period-specific attribution columns ride along in the same workbook but
+    # are not security characteristics; keep them out of the exposure records
+    # so they cannot surface as a grouping or a quintile metric.
+    skip_cols = set(WEIGHT_HEADERS) | set(ATTRIBUTION_ONLY_HEADERS)
+
     # ── Find portfolio section headers: col A set, col B empty, past header row
-    sections = []
+    #
+    # Since the client-composite pull that is true at two depths — the
+    # composite, and each manager sleeve nested inside it — and the two carry
+    # DIFFERENT weights for the same name: a sleeve is 100 % of itself at
+    # depth 0 and ~17 % of the client at depth 1. Read flat, the nested copy
+    # silently overwrote the manager-space section (59 names collided, and 87
+    # of 120 sections stopped summing to 100 %). Outline level separates them;
+    # only depth-0 sections belong in this grid, which is about what a manager
+    # or benchmark holds, not what share of a client it is.
+    levels = _row_outline_levels(path, 'Contribution')
+
+    def _is_name_row(r_idx):
+        row = all_rows[r_idx] if 0 <= r_idx < len(all_rows) else None
+        return bool(row) and row[0] is not None and row[1] is None
+
+    # Every depth-0 name row BOUNDS a section, but a composite is not emitted
+    # as one. The two must stay separate: dropping a composite from the
+    # boundary list let the section above it run on through the whole
+    # composite region, and that region's later blocks are misaligned, so one
+    # manager's weights summed to 614 million.
+    boundaries, sections = [], []
     for r_idx, row in enumerate(all_rows):
         if r_idx < data_start:
             continue
-        if row[0] is not None and row[1] is None:
-            sections.append((r_idx, str(row[0]).strip()))
-    sections.append((len(all_rows), '__END__'))
+        if row[0] is None or row[1] is not None:
+            continue
+        if levels.get(r_idx + 1, 0) > 0:
+            continue            # a sleeve inside a composite — client space
+        boundaries.append(r_idx)
+        # A composite bounds but does not appear. This grid answers "what does
+        # this manager or benchmark hold", which is a manager-space question;
+        # a composite's rows are shares of a client. They are parsed for the
+        # Attribution tab instead, where client space is the point.
+        if _is_name_row(r_idx + 1) and levels.get(r_idx + 2, 0) > 0:
+            continue
+        sections.append((r_idx, str(row[0]).strip()))
+    boundaries.append(len(all_rows))
+
+    def _section_end(start):
+        for b in boundaries:
+            if b > start:
+                return b
+        return len(all_rows)
 
     def parse_section(start, end):
         """Return {sedol: {name, weight, ...col_values}} for rows (start, end)."""
@@ -199,12 +309,12 @@ def parse_exposures_file(path):
                 continue
             name   = str(row[0])
             sedol  = str(row[1])
-            weight = _safe_float(row[2])
+            weight = _safe_float(row[weight_idx]) if weight_idx < len(row) else None
             if weight is None:
                 weight = 0.0
             record = {'name': name, 'weight': weight}
             for i, col in enumerate(col_names):
-                if col is None or col in ('Port. Ending Weight',):
+                if col is None or col in skip_cols:
                     continue
                 record[col] = row[i] if col in CATEGORICAL_COLS else _safe_float(row[i])
             # 'Market Development' isn't a column in the FactSet file — derive it
@@ -213,7 +323,17 @@ def parse_exposures_file(path):
             # categorical column.
             record['Market Development'] = _classify_market_development(
                 record.get('Country') or record.get('MSCI Country'))
-            securities[sedol] = record
+            # One SEDOL can appear more than once inside a span: currency
+            # lines repeat under a single code ('AUD999999' and 'Australian
+            # Dollar' are both CASH_AUD), and a composite span covers every
+            # sleeve that holds the name. Add the weights rather than letting
+            # the last row win — the characteristics are identical, so only
+            # the weight needs combining.
+            existing = securities.get(sedol)
+            if existing is not None:
+                existing['weight'] += record['weight']
+            else:
+                securities[sedol] = record
         return securities
 
     # ── Split sections into benchmarks vs managers ─────────────────────────
@@ -232,8 +352,8 @@ def parse_exposures_file(path):
     managers = {}
     manager_names = []
 
-    for i, (s_idx, s_name) in enumerate(sections[:-1]):
-        e_idx = sections[i + 1][0]
+    for s_idx, s_name in sections:
+        e_idx = _section_end(s_idx)
         parsed = parse_section(s_idx, e_idx)
         if is_benchmark_name(s_name):
             benchmarks[s_name]    = parsed
@@ -344,8 +464,6 @@ _RANGE_FMT = {
     'Price to Book':                               lambda v: f"{v:.2f}x",
     'Price to FCF NEW':                            lambda v: f"{v:.1f}x",
     'Dividend Yield':                              lambda v: f"{v:.1f}%",
-    'RSI 63':                                      lambda v: f"{v:.0f}",
-    'RSI 252':                                     lambda v: f"{v:.0f}",
     '1-yr Momentum':                               lambda v: f"{v:.1f}%",
     'Earnings Growth - 3-5 Year Projected NEW':    lambda v: f"{v:.1f}%",
     'Earnings Growth - 3 Year Historical NEW':     lambda v: f"{v:.1f}%",

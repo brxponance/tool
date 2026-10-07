@@ -77,7 +77,6 @@ type UploadSlot = {
     | "weights"
     | "security_risk"
     | "exposures"
-    | "attribution"
     | "qualitative"
     | "universe_returns";
   endpoint: string;
@@ -125,16 +124,8 @@ const UPLOAD_SLOTS: UploadSlot[] = [
     endpoint: "upload_exposures",
     field: "exposures",
     label: "FactSet Exposures",
-    hint: "Optional — portfolio characteristic exposures",
+    hint: "Characteristics + Average Weight / Contribution To Return",
     icon: "📊",
-  },
-  {
-    key: "attribution",
-    endpoint: "upload_attribution",
-    field: "attribution",
-    label: "FactSet Contribution (Attribution)",
-    hint: "Needs Average Weight + Contribution To Return columns",
-    icon: "🎯",
   },
   {
     key: "qualitative",
@@ -167,10 +158,6 @@ function hasStagedFile(status: BackendStatus | undefined, key: UploadSlot["key"]
     return status.has_exposures || Boolean(status.files[key]);
   }
 
-  if (key === "attribution") {
-    return status.has_attribution || Boolean(status.files[key]);
-  }
-
   if (key === "qualitative") {
     return status.has_qualitative || Boolean(status.files[key]);
   }
@@ -195,14 +182,25 @@ function fileLabel(status: BackendStatus | undefined, key: UploadSlot["key"]) {
     return "";
   }
 
-  if (key === "exposures" && status.has_exposures && status.exposures_benchmark) {
-    return `${status.exposures_benchmark} — ${status.exposures_managers.length} managers loaded`;
+  // Lead with the filename, the way every other slot does, so the pull that is
+  // actually loaded can be checked at a glance — this one workbook drives both
+  // the Exposures grid and Attribution theme discovery, so "is the right file
+  // in?" is the question worth answering. The period follows it when the
+  // attribution columns parsed, since a stale quarter is the other way this
+  // goes wrong quietly.
+  if (key === "exposures" && status.exposures_parsing) {
+    const name = typeof status.files.exposures === "string" ? status.files.exposures : "";
+    return `${name} — parsing…`;
   }
 
-  if (key === "attribution" && status.has_attribution) {
-    const n = status.attribution_benchmarks?.length ?? 0;
-    const per = status.attribution_quarter || `${status.attribution_periods?.length ?? 0} periods`;
-    return `${per} — ${n} benchmark${n === 1 ? "" : "s"} loaded`;
+  if (key === "exposures" && status.has_exposures) {
+    const name = typeof status.files.exposures === "string" ? status.files.exposures : "";
+    const detail =
+      status.attribution_quarter ||
+      (status.exposures_benchmark
+        ? `${status.exposures_managers.length} managers loaded`
+        : "");
+    return [name, detail].filter(Boolean).join(" — ");
   }
 
   if (key === "qualitative" && status.has_qualitative) {
@@ -390,6 +388,20 @@ export function SetupRoute() {
       stopPolling();
     };
   }, []);
+
+  // The exposures upload answers immediately and parses behind the request,
+  // so the card is stale until the backend says it has stopped. Poll only
+  // while that is true, and refresh once more on the edge so the finished
+  // filename and period land without the user reloading the page.
+  useEffect(() => {
+    if (!status?.exposures_parsing) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void reload(false);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [status?.exposures_parsing]);
 
   useEffect(() => {
     let cancelled = false;

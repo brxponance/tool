@@ -3,6 +3,7 @@ import { backendJson } from "@/lib/backend";
 import type {
   ClientsResponse,
   ContributionResponse,
+  ThemeDetailResponse,
   ThemeDiscoveryResponse,
 } from "../types";
 
@@ -31,4 +32,18 @@ export async function getThemes(params: {
   return backendJson<ThemeDiscoveryResponse>(
     `attribution_themes${qs ? `?${qs}` : ""}`,
   );
+}
+
+export async function getThemeDetail(params: {
+  benchmark: string;
+  client: string;
+  parts: { column: string; value: string }[];
+  period?: string;
+}) {
+  const q = new URLSearchParams();
+  q.set("benchmark", params.benchmark);
+  q.set("client", params.client);
+  q.set("parts", JSON.stringify(params.parts));
+  if (params.period) q.set("period", params.period);
+  return backendJson<ThemeDetailResponse>(`attribution_theme_detail?${q.toString()}`);
 }

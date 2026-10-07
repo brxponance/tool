@@ -58,9 +58,27 @@ dispersion than its size alone implies. This is the robust form of the "20 % of
 return on 5 % of weight" intuition, and unlike the ratio it is defined at every
 `R_b`.
 
-`φ_G = c_G/R_b` and `ratio = φ_G/w_G` are computed **only** when
-`|R_b| ≥ 50 bps` and are returned as nullable fields. They are intuition aids
-for the ordinary case. **They must never rank, gate, or headline anything.**
+`φ_G = c_G/R_b` and `excess_share = φ_G − w_G` are computed **only** when
+`R_b ≥ +50 bps` — above the floor *and positive* — and are returned as nullable
+fields. They answer the question in the form it is usually asked — *a group
+holding 20 % of the benchmark should account for 20 % of its return; how far
+past that did it land?* — and are shown beside `E_G` in the table.
+
+They are a restatement of `E_G`, not a second measure: **`φ_G − w_G = E_G/R_b`
+exactly**. Since `R_b` is one number for the whole table, ranking on either is
+the same ranking — *while `R_b > 0`*.
+
+**Why positive-only, not `|R_b|`.** Dividing by a negative `R_b` does not make
+the figure noisy, it reverses it. Measured on EM's −303 bps July: China
+cushioned the fall (`E_G` **+243 bps**) and reports **−80 pp**, while the
+momentum pocket that drove the loss (`E_G` **−556 bps**) reports **+183 pp**.
+Read left to right the column states the opposite of what happened. The framing
+itself presumes a positive return to take a share of. **They must never rank,
+gate, or headline anything; `E_G` is the sort key in every regime.**
+
+(`ratio = φ_G/w_G` was the earlier multiplicative form of this. It was dropped:
+it carries the same meaning as the difference but distorts it, reading 12.8× on
+a group whose overshoot is +221 pp purely because `R_b` was small.)
 
 ### Three views, not one list
 
@@ -80,10 +98,18 @@ quarter means *cushioned the decline*.
 
 ## Candidates
 
-- **Singles** — every value of each categorical column, every quintile of each
-  continuous metric. Vocabulary is reused wholesale from
-  `exposures_engine.CATEGORICAL_COLS` / `CONTINUOUS_COLS`, so the groupings
-  offered here are exactly those the Exposures tab shows.
+- **Singles** — every value of each categorical column, and the **top and
+  bottom quintile only** of each continuous metric (`THEME_QUINTILES`).
+  Vocabulary is reused wholesale from `exposures_engine.CATEGORICAL_COLS` /
+  `CONTINUOUS_COLS`, so the groupings offered here are exactly those the
+  Exposures tab shows.
+- **Why not Q2–Q4.** A theme should name something you could hold a view
+  about. "High-ROE names beat the market" is one; "mid-ROE names beat the
+  market" is not — the middle of a distribution has no economic direction, so a
+  Q3 bucket topping the table says the cut-points landed somewhere, not that
+  anything happened. They also crowded out real findings, filling four of the
+  top five contributors on EAFE + Canada before being dropped. Cutting them
+  takes candidates from ~6,300 to ~1,600.
 - **Pairs** — intersections across different columns. Capped at pairs.
 - **Weight floor** 1 %. Applied to singles *first*: since
   `w(A∩B) ≤ min(w_A, w_B)`, a single below the floor cannot appear in any
@@ -107,12 +133,16 @@ The existing group-exposures template **plus two columns**:
 Keep `SEDOL`, `Port. Ending Weight`, all grouping columns and all metric
 columns.
 
-**Do not rename or move `Port. Ending Weight`.** `exposures_engine.parse_section`
-reads weight positionally (`row[2]`) and its header detection requires a column
-literally named `Port. Ending Weight` / `Ending Weight`. Renaming it to
-`Average Weight` breaks the Exposures tab outright. Append the new columns.
-They answer different questions anyway: ending weight = what we hold now,
-average weight = what we held across the period.
+**Do not rename `Port. Ending Weight`.** `exposures_engine` locates it by name
+(`WEIGHT_HEADERS`), taking the last occurrence so the quarterly Total block's
+ending weight is the current snapshot. Moving it is now safe; renaming it is
+not. The two weights answer different questions: ending weight = what we hold
+now, average weight = what we held across the period.
+
+Until 2026-10-06 that read was positional (`row[2]`) and this spec said the
+column must not move. The Q3 pull then inserted `Port. Average Weight` ahead of
+it, and the Exposures tab silently reported July average weights as holdings —
+same shape, still summing to 100, no error. Hence matching by name.
 
 No total-return column is needed: `R_b = Σc`, and the section header row
 already carries FactSet's own portfolio total, used as a checksum.
@@ -194,10 +224,11 @@ carries a `reconciliation` block and the UI shows a red banner when it fails:
 Plus the degenerate cases, covered by the test script:
 
 - `R_b = 0` exactly, one strong group, rest negative → it ranks top; `E_G` and
-  `share` finite; ratio suppressed, not `NaN`/`Infinity`.
+  `share` finite; `phi`/`excess_share` suppressed, not `NaN`/`Infinity`.
 - `R_b < 0` → a group with `c_G = 0` reports **positive** `E_G`.
 - `R_b > 0` with a large detractor → it appears in the detractor table.
-- `|R_b|` inside the floor → ratio blank, every other column populated.
+- `R_b` inside the floor **or negative** → share-of-return columns blank,
+  every other column populated.
 
 Monthly contributions will **not** sum to the quarterly block. Expected —
 FactSet links geometrically. Do not "fix" it.

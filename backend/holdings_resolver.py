@@ -236,6 +236,10 @@ def _norm_bench(s):
     t = re.sub(r'\bac\s+world\b', 'acwi', t)
     t = re.sub(r'\bex[- ]?united\s+states\b', 'ex us', t)
     t = re.sub(r'\bexus\b|\bx\s*us\b', 'ex us', t)
+    # 'ex USA' and 'ex US' are the same index written two ways — FactSet uses
+    # the first ('MSCI AC World ex USA Small Cap'), the client roster the
+    # second ('MSCI ACWI ex-US SC'), and without this they never matched.
+    t = re.sub(r'\bex\s+usa\b', 'ex us', t)
     return re.sub(r'\s+', ' ', t).strip()
 
 

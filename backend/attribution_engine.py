@@ -38,6 +38,7 @@ from exposures_engine import (
     DISPLAY_LABELS,
     N_QUINTILES,
     _assign_quintile,
+    _row_outline_levels,
     _safe_float,
 )
 
@@ -45,20 +46,45 @@ from exposures_engine import (
 # whitespace-insensitively because FactSet header text drifts between pulls
 # ('Market Cap' vs 'Market Capitalization' was a real instance).
 AVG_WEIGHT_HEADERS = ('average weight', 'avg weight', 'port. average weight')
-CONTRIB_HEADERS = ('contribution to return', 'contrib to return', 'contribution')
+CONTRIB_HEADERS = ('contribution to return', 'contrib to return', 'contribution',
+                   'port. contribution to return')
 END_WEIGHT_HEADERS = ('port. ending weight', 'ending weight')
 
-# Below this |R_b| the share-of-benchmark-return ratio is not reported. 50 bps.
+# Share-of-benchmark-return figures are reported only when R_b clears this, and
+# only when it is positive — below it they diverge, below zero they reverse.
+# 50 bps.
 RATIO_FLOOR = 0.005
 
 # Groups thinner than this are dropped before ranking: a 0.1 % group can post a
 # spectacular ratio on noise and would crowd out everything that matters.
 DEFAULT_MIN_WEIGHT = 0.01
 
+# Only the extremes of a metric are offered as themes. A theme is meant to name
+# something you could hold a view about — "high-ROE names beat the market" is
+# one, "mid-ROE names beat the market" is not: the middle of a distribution has
+# no economic direction, so a Q3 bucket topping the table says the cut-points
+# landed somewhere, not that anything happened. Dropping Q2–Q4 also removes
+# three fifths of the metric candidates, which makes the pair sweep cheaper and
+# stops middling buckets displacing real findings in the top ten.
+#
+# Categorical groupings (sector, country, region) are untouched — every value
+# of those is a thing in itself.
+THEME_QUINTILES = ('Q1 (High)', 'Q5 (Low)')
+
 # A pair whose weight is ≥ this fraction of a stronger already-surfaced group's
 # weight is flagged as nested rather than presented as an independent finding
 # (Japan × Semiconductors inside Japan × Info Tech).
 NEST_THRESHOLD = 0.90
+
+
+# Components that are not managers: FactSet's residual plug and the fee /
+# transition accounts a client composite carries. They hold real weight and
+# real contribution, so they MUST stay in the client totals — dropping them
+# breaks Σw = 100 and Σc = the composite's own return. They are flagged
+# instead, so they never surface as a manager in a ranking.
+def _is_residual_component(name):
+    low = str(name or '').strip().lower()
+    return (low == 'm4rz' or 'transition' in low or 'fee account' in low)
 
 
 def _norm_header(v):
@@ -156,16 +182,31 @@ def parse_attribution_file(path):
             if parsed:
                 found.append((c_idx, parsed))
 
+    # A label sitting to the LEFT of the first block is the report-wide range
+    # ('30-JUN-2026 to 30-SEP-2026' in column A), not any one block's period.
+    # It must be held apart from the per-block labels: counting it among them
+    # made len(found) == len(block_bounds) by coincidence, which sent the
+    # positional fallback one place off and handed the quarterly Total block
+    # September's label. The widest-span rule then picked a MONTH as the
+    # quarter, so the tab silently reported July as the quarterly view.
+    first_block_start = block_bounds[0][0] if block_bounds else 0
+    span_labels = [(c, p) for c, p in found if c >= first_block_start]
+    report_label = next((p for c, p in found if c < first_block_start), None)
+
     def label_for_block(b_idx, start, end):
         # Prefer a label whose cell sits within this block's column span.
-        for c_idx, parsed in found:
+        for c_idx, parsed in span_labels:
             if start <= c_idx < end:
                 return parsed
+        # The trailing block of a FactSet contribution export is headed
+        # 'Total' rather than a date range: it is the whole reporting period.
+        if report_label is not None and b_idx == len(block_bounds) - 1:
+            return report_label
         # Otherwise fall back positionally, then to a synthetic label.
-        if len(found) == len(block_bounds):
-            return found[b_idx][1]
-        if len(block_bounds) == 1 and found:
-            return found[0][1]
+        if len(span_labels) == len(block_bounds):
+            return span_labels[b_idx][1]
+        if len(block_bounds) == 1 and span_labels:
+            return span_labels[0][1]
         return (f'Period {b_idx + 1}', None, None)
 
     periods, period_spans = [], {}
@@ -215,18 +256,55 @@ def parse_attribution_file(path):
             "This file has no 'Average Weight' and/or 'Contribution To Return' "
             f"column for: {', '.join(map(str, missing))}. Attribution needs both. "
             "Re-pull the FactSet Contribution report with those two columns "
-            "ADDED (keep 'Port. Ending Weight' where it is — the Exposures tab "
-            "reads it positionally).")
+            "ADDED, keeping 'Port. Ending Weight' under that name — the "
+            "Exposures grid finds it by name, so it can move but not be "
+            "renamed.")
 
-    # ── Sections: name in col A with col B empty, below the header row ────
+    # ── Sections, and the composite hierarchy ─────────────────────────────
+    # A name with an empty SEDOL starts a section. Since the client-composite
+    # pull, that is true at two depths: the composite itself, and each manager
+    # sleeve inside it. Outline level separates them — composite 0, sleeve 1,
+    # holding 2 — and a section runs until the next name row at its own depth
+    # or shallower. A composite therefore spans all of its sleeves, which is
+    # what makes its aggregate the client portfolio.
     first_sedol = block_bounds[0][0]
-    sections = []
-    for r_idx in range(header_idx + 1, len(all_rows)):
+    outline = _row_outline_levels(path, sheet)
+
+    def depth(r_idx):
+        return outline.get(r_idx + 1, 0)
+
+    def is_name_row(r_idx):
         row = all_rows[r_idx]
-        name = row[0] if row else None
-        if name is not None and (first_sedol >= len(row) or row[first_sedol] is None):
-            sections.append((r_idx, str(name).strip()))
-    sections.append((len(all_rows), '__END__'))
+        if not row:
+            return False
+        name = row[0]
+        if name is None or not str(name).strip():
+            return False
+        return first_sedol >= len(row) or row[first_sedol] is None
+
+    name_idxs = [r for r in range(header_idx + 1, len(all_rows)) if is_name_row(r)]
+    name_set = set(name_idxs)
+
+    def is_parent(r_idx):
+        """True when this section's children are sleeves, not holdings."""
+        nxt = r_idx + 1
+        if nxt not in name_set:
+            return False
+        # With grouping present the depths settle it. Without it, a name row
+        # directly followed by another name row can only be a parent — the
+        # structural reading, which agreed with the outline levels on all 200
+        # name rows of the 2026-10-06 pull.
+        return depth(nxt) > depth(r_idx) if outline else True
+
+    def section_end(pos):
+        """Row index one past this section, i.e. the next sibling or shallower."""
+        here = depth(name_idxs[pos])
+        for j in range(pos + 1, len(name_idxs)):
+            if depth(name_idxs[j]) <= here:
+                return name_idxs[j]
+            if not outline and not is_parent(name_idxs[pos]):
+                return name_idxs[j]
+        return len(all_rows)
 
     def is_benchmark_name(nm):
         low = nm.lower()
@@ -252,12 +330,20 @@ def parse_attribution_file(path):
                 ct = _safe_float(row[roles['contribution']]) if roles['contribution'] < len(row) else None
                 ew = (_safe_float(row[roles['end_weight']])
                       if roles['end_weight'] is not None and roles['end_weight'] < len(row) else None)
-                rec['periods'][label] = {
-                    # FactSet writes percents; store decimals.
-                    'avg_weight': (aw / 100.0) if aw is not None else None,
-                    'contribution': (ct / 100.0) if ct is not None else None,
-                    'end_weight': (ew / 100.0) if ew is not None else None,
-                }
+                # FactSet writes percents; store decimals. Values ACCUMULATE
+                # rather than replace, because one SEDOL legitimately appears
+                # more than once in a span: currency lines repeat under a
+                # single code ('AUD999999' and 'Australian Dollar' are both
+                # CASH_AUD), and a composite aggregates a holding across every
+                # sleeve that owns it. Overwriting silently dropped both.
+                slot = rec['periods'].setdefault(
+                    label, {'avg_weight': None, 'contribution': None,
+                            'end_weight': None})
+                for key, val in (('avg_weight', aw), ('contribution', ct),
+                                 ('end_weight', ew)):
+                    if val is None:
+                        continue
+                    slot[key] = (slot[key] or 0.0) + val / 100.0
                 # Groupings are identical across blocks — take the first that
                 # supplies a value so a sparse block can't blank them out.
                 for col, c_idx in roles['groups'].items():
@@ -279,16 +365,64 @@ def parse_attribution_file(path):
             out[block_periods[b_idx]] = (val / 100.0) if val is not None else None
         return out
 
-    benchmarks, managers = {}, {}
-    benchmark_names, manager_names = [], []
+    benchmarks, managers, composites = {}, {}, {}
+    benchmark_names, manager_names, composite_names = [], [], []
     totals = {}
 
-    for i, (s_idx, s_name) in enumerate(sections[:-1]):
-        secs = parse_section(s_idx, sections[i + 1][0])
+    for pos, s_idx in enumerate(name_idxs):
+        if depth(s_idx) > 0:
+            continue          # a sleeve — collected with its composite below
+        s_name = str(all_rows[s_idx][0]).strip()
+        end = section_end(pos)
+        secs = parse_section(s_idx, end)
         if not secs:
             continue
         totals[s_name] = section_totals(s_idx)
-        if is_benchmark_name(s_name):
+
+        if is_parent(s_idx):
+            # A client composite. `secs` is already every holding across every
+            # sleeve, summed — the client portfolio in client space. The
+            # sleeves are kept beside it, each in CLIENT space too: their
+            # weights are shares of the client, not of the manager. The
+            # same-named entries under `managers` are the manager-space
+            # sections, and the two must never be conflated — rebasing one
+            # into the other is the ÷ avg-weight error that measured +912 bps.
+            sleeves, sleeve_totals, residual = {}, {}, []
+            for j in range(pos + 1, len(name_idxs)):
+                c_idx = name_idxs[j]
+                if depth(c_idx) <= depth(s_idx):
+                    break
+                if depth(c_idx) != depth(s_idx) + 1:
+                    continue
+                c_name = str(all_rows[c_idx][0]).strip()
+                sleeves[c_name] = parse_section(c_idx, section_end(j))
+                sleeve_totals[c_name] = section_totals(c_idx)
+                if _is_residual_component(c_name):
+                    residual.append(c_name)
+            # Which periods this composite actually carries. A composite can
+            # be pulled over a different span than the sleeve sections it sits
+            # beside — the 2026-10-06 file had composites for July only, while
+            # the sleeves ran all three months plus the quarter. The unpulled
+            # blocks are not empty, they are MISALIGNED: the composite's own
+            # columns run past one block's width, so block 2+ lands on
+            # grouping and metric columns and reads as contribution. Summed,
+            # that produced +18,034 % with zero weight behind it. Σw ≈ 1 is the
+            # test that tells a real period from a misread one.
+            usable = []
+            for per in block_periods:
+                tw = sum((r['periods'].get(per, {}).get('avg_weight') or 0.0)
+                         for r in secs.values())
+                if abs(tw - 1.0) < 0.02:
+                    usable.append(per)
+            composites[s_name] = {
+                'securities': secs,
+                'sleeves': sleeves,
+                'sleeve_totals': sleeve_totals,
+                'residual_sleeves': residual,
+                'periods': usable,
+            }
+            composite_names.append(s_name)
+        elif is_benchmark_name(s_name):
             benchmarks[s_name] = secs
             benchmark_names.append(s_name)
         else:
@@ -323,6 +457,13 @@ def parse_attribution_file(path):
         'benchmark_names': benchmark_names,
         'managers': managers,
         'manager_names': manager_names,
+        # Client composites, in CLIENT space: 'securities' is the client
+        # portfolio (every sleeve's holdings summed), 'sleeves' each manager's
+        # slice of it, 'sleeve_totals' their client weights and contributions,
+        # 'residual_sleeves' the fee/transition/M4RZ components that belong in
+        # the totals but are not managers.
+        'composites': composites,
+        'composite_names': composite_names,
         'section_totals': totals,
         'quintile_breaks_by_benchmark': qb_by_bmk,
         'n_blocks': len(block_bounds),
@@ -362,8 +503,9 @@ def discover_themes(parsed, benchmark_name=None, period=None,
 
     Every row carries: label, detail, members, w (decimal), r_g, excess
     (R_G − R_b), e_g (decimal), e_g_bps, share (of active dispersion),
-    phi (share of R_b, or None when |R_b| < RATIO_FLOOR), ratio (phi/w, or
-    None), nested_in (label of a dominating group, or None).
+    phi (share of R_b) and excess_share (phi − w, the overshoot against the
+    group's own weight) — both None when |R_b| < RATIO_FLOOR —
+    nested_in (label of a dominating group, or None).
     """
     bname = benchmark_name or (parsed['benchmark_names'][0]
                                if parsed['benchmark_names'] else None)
@@ -397,7 +539,7 @@ def discover_themes(parsed, benchmark_name=None, period=None,
         if not br:
             continue
         labels = [_assign_quintile(s.get(col), br) for s in secs]
-        for v in ('Q1 (High)', 'Q2', 'Q3', 'Q4', 'Q5 (Low)'):
+        for v in THEME_QUINTILES:
             mask = np.array([lb == v for lb in labels])
             if mask.any():
                 singles[(col, v)] = mask
@@ -457,48 +599,111 @@ def discover_themes(parsed, benchmark_name=None, period=None,
             '_mask': mask,
         })
 
-    ratio_available = abs(r_b) >= RATIO_FLOOR
+    # Share of the benchmark's return (φ) against share of its weight. A group
+    # holding 20 % of the benchmark would, if it were unremarkable, account for
+    # 20 % of the return; φ − w is how far from that it landed, in percentage
+    # points of the benchmark's return.
+    #
+    # This is the same quantity as E_G, rescaled: φ − w = E_G / R_b exactly. So
+    # it never becomes the sort key, and it is reported ONLY when R_b is both
+    # above the floor and POSITIVE.
+    #
+    # Negative R_b does not merely make it noisy, it reverses it. Measured on
+    # EM's −303 bps July: China cushioned the fall (+243 bps E_G) and reads
+    # −80pp, while the momentum pocket that drove the loss (−556 bps E_G) reads
+    # +183pp. Read left to right, the column says the exact opposite of what
+    # happened — the whole "a 20 % weight should be 20 % of the return" framing
+    # presumes there is a positive return to take a share of. E_G keeps one
+    # meaning in every regime; this is only its restatement where the
+    # restatement is safe.
+    ratio_available = r_b >= RATIO_FLOOR
     for row in rows:
         if ratio_available:
             phi = row['c'] / r_b
             row['phi'] = phi
-            row['ratio'] = (phi / row['w']) if row['w'] else None
+            row['excess_share'] = phi - row['w']
         else:
             row['phi'] = None
-            row['ratio'] = None
+            row['excess_share'] = None
 
     # ── Nesting: flag a group mostly contained in a stronger one ──────────
     ordered = sorted(
         rows, key=lambda r: (-abs(r['e_g']), r['cardinality'], r['label']))
-    for i, row in enumerate(ordered):
-        row['nested_in'] = None
-        for stronger in ordered[:i]:
-            inter = float(w[row['_mask'] & stronger['_mask']].sum())
-            if row['w'] and inter / row['w'] >= NEST_THRESHOLD:
-                row['nested_in'] = stronger['label']
-                break
 
-    for row in rows:
-        row.pop('_mask', None)
+    # Resolving nesting for every candidate is quadratic in the candidate
+    # count (7k+ on a real pull) and used to BE the endpoint's runtime: 75.0s
+    # of a 75.3s call, 4.4M Python-level iterations each allocating two
+    # temporaries. Two changes remove it without changing any answer:
+    #
+    #   1. One row's test is a single BLAS matrix-vector product against
+    #      every stronger row at once, instead of a Python loop.
+    #   2. Rows are only tested when a ranking actually asks for them. Each
+    #      ranking below walks a sorted list and stops as soon as it is full,
+    #      so a few hundred rows get tested rather than all of them.
+    #
+    # The mask matrix is float32 (125MB at the widest benchmark, freed on
+    # return) and built on first use, so include_nested=True barely pays.
+    w_f32 = w.astype(np.float32)
+    nest_state = {'matrix': None, 'cache': {}}
+
+    def nested_label(i):
+        """Label of the strongest group containing ≥ NEST_THRESHOLD of row i."""
+        cache = nest_state['cache']
+        if i in cache:
+            return cache[i]
+        row = ordered[i]
+        label = None
+        if i and row['w']:
+            if nest_state['matrix'] is None:
+                nest_state['matrix'] = np.array(
+                    [r['_mask'] for r in ordered], dtype=np.float32)
+            matrix = nest_state['matrix']
+            # inter_j = Σ_s w_s · mask_i,s · mask_j,s over every stronger j < i.
+            # Ascending indices, so the first hit is the strongest container —
+            # the same row the old inner loop broke on.
+            inter = matrix[:i] @ (matrix[i] * w_f32)
+            hit = np.flatnonzero(inter >= NEST_THRESHOLD * row['w'])
+            if hit.size:
+                label = ordered[int(hit[0])]['label']
+        cache[i] = label
+        return label
 
     # Nested rows are redundant findings ('Energy', 'Oil Gas & Consumable
     # Fuels', 'Energy × Oil Gas & Consumable Fuels' are one story, not three)
-    # and would otherwise eat the whole top-N. They stay in `all_rows` so the
-    # UI can expand a parent, but they do not consume a headline slot.
-    headline = ordered if include_nested else [r for r in ordered
-                                               if not r['nested_in']]
+    # and would otherwise eat the whole top-N. They do not consume a headline
+    # slot, but they keep their nested_in label so the UI can explain why.
+    def take(indices, limit):
+        """Walk indices in rank order, resolving nesting only as far as needed."""
+        picked = []
+        for i in indices:
+            label = nested_label(i)
+            if label is not None and not include_nested:
+                continue
+            ordered[i]['nested_in'] = label
+            picked.append(ordered[i])
+            if len(picked) >= limit:
+                break
+        return picked
 
-    contributors = sorted([r for r in headline if r['e_g'] > 0],
-                          key=lambda r: (-r['e_g'], r['cardinality'], r['label']))[:top_n]
-    detractors = sorted([r for r in headline if r['e_g'] < 0],
-                        key=lambda r: (r['e_g'], r['cardinality'], r['label']))[:top_n]
+    # `ordered` is sorted by -|E_G|, so within the positives that is already
+    # -E_G descending and within the negatives it is E_G ascending — the exact
+    # orders the two tables want, tie-breaks included.
+    contributors = take([i for i, r in enumerate(ordered) if r['e_g'] > 0], top_n)
+    detractors = take([i for i, r in enumerate(ordered) if r['e_g'] < 0], top_n)
     # Most outsized relative to weight, the user's framing of the question.
     # Ranked on intensity, not E_G, and reported alongside rather than instead:
     # a big group with a modest tilt and a tiny group with a violent one are
     # both worth knowing about, and neither ranking surfaces the other.
-    most_outsized = sorted(
-        [r for r in headline if r['intensity'] is not None and r['w'] >= min_weight],
-        key=lambda r: (-r['intensity'], r['cardinality'], r['label']))[:top_n]
+    most_outsized = take(
+        sorted((i for i, r in enumerate(ordered)
+                if r['intensity'] is not None and r['w'] >= min_weight),
+               key=lambda i: (-ordered[i]['intensity'], ordered[i]['cardinality'],
+                              ordered[i]['label'])),
+        top_n)
+
+    nest_state['matrix'] = None
+    for row in rows:
+        row.pop('_mask', None)
 
     return {
         'benchmark': bname,
@@ -516,6 +721,148 @@ def discover_themes(parsed, benchmark_name=None, period=None,
         'detractors': detractors,
         'most_outsized': most_outsized,
         'reconciliation': reconcile(parsed, bname, per),
+    }
+
+
+def composite_client(parsed, composite_name):
+    """Which client a composite belongs to.
+
+    `section_client` reads the name, which works for 'CALSTRS EAFE+Canada
+    Composite' but not for 'Maryland Non US SC Composite' or 'St Louis Public
+    Schools'. The sleeves inside always carry the coded prefix, so they vote —
+    unanimously, for all 11 composites in the 2026-10-06 pull.
+    """
+    from collections import Counter
+    from holdings_resolver import section_client
+    direct = section_client(composite_name)
+    if direct:
+        return direct
+    comp = (parsed.get('composites') or {}).get(composite_name) or {}
+    votes = Counter(c for c in (section_client(s) for s in comp.get('sleeves') or {})
+                    if c)
+    return votes.most_common(1)[0][0] if votes else None
+
+
+def _theme_predicate(parts, qbreaks):
+    """A membership test for one theme, in the benchmark's own quintile space.
+
+    Quintile cut-points come from the benchmark, so 'high P/E' means high
+    relative to THAT benchmark — the same convention discover_themes uses, and
+    the reason a client's exposure to a theme is comparable to the
+    benchmark's.
+    """
+    checks = []
+    for part in parts:
+        col = part.get('column')
+        val = str(part.get('value', ''))
+        if col in CATEGORICAL_COLS:
+            checks.append((col, val, None))
+        else:
+            breaks = (qbreaks or {}).get(col)
+            if not breaks:
+                return None          # metric absent from this pull
+            checks.append((col, val, breaks))
+
+    def match(sec):
+        for col, val, breaks in checks:
+            if breaks is None:
+                if str(sec.get(col) or '').strip() != val:
+                    return False
+            elif _assign_quintile(sec.get(col), breaks) != val:
+                return False
+        return True
+
+    return match
+
+
+def _theme_totals(securities, period, match):
+    w = c = 0.0
+    for sec in securities.values():
+        if not match(sec):
+            continue
+        d = sec['periods'].get(period) or {}
+        w += d.get('avg_weight') or 0.0
+        c += d.get('contribution') or 0.0
+    return w, c
+
+
+def client_theme_detail(parsed, benchmark_name, period, composite_name, parts):
+    """One theme, read down from the benchmark to the managers who built it.
+
+    Three readings, each in its own space and never converted between:
+      * benchmark vs client — the active position,
+      * the manager split, in CLIENT space, which sums to the client's own
+        weight and contribution,
+      * each sleeve against the benchmark in MANAGER space, which is the
+        separate question of whether that manager's own bet paid.
+    Rebasing one into the other is the ÷ avg-weight error measured at +912 bps.
+    """
+    comps = parsed.get('composites') or {}
+    if composite_name not in comps:
+        raise ValueError(f"No composite '{composite_name}' in the uploaded file.")
+    if benchmark_name not in (parsed.get('benchmarks') or {}):
+        raise ValueError(f"Benchmark '{benchmark_name}' not found in the uploaded file.")
+    comp = comps[composite_name]
+    per = period or parsed.get('quarter_period')
+    if per not in (comp.get('periods') or []):
+        available = ', '.join(comp.get('periods') or []) or 'none'
+        raise ValueError(
+            f"'{composite_name}' has no reconciled data for '{per}'. "
+            f"Periods available for this composite: {available}.")
+
+    qbreaks = (parsed.get('quintile_breaks_by_benchmark') or {}).get(benchmark_name, {})
+    match = _theme_predicate(parts, qbreaks)
+    if match is None:
+        raise ValueError(
+            "This theme uses a metric that is not in the current pull.")
+
+    bsecs = parsed['benchmarks'][benchmark_name]
+    b_w, b_c = _theme_totals(bsecs, per, match)
+    c_w, c_c = _theme_totals(comp['securities'], per, match)
+
+    residual = set(comp.get('residual_sleeves') or [])
+    managers = []
+    for name, secs in comp['sleeves'].items():
+        w, c = _theme_totals(secs, per, match)
+        if w <= 0 and abs(c) < 1e-12:
+            continue
+        own = parsed['managers'].get(name)
+        own_w = _theme_totals(own, per, match)[0] if own else None
+        managers.append({
+            'name': name,
+            'weight': w,                 # share of the CLIENT
+            'contribution': c,
+            'contribution_bps': c * 10000.0,
+            'share_of_client': (w / c_w) if c_w else None,
+            # The sleeve's own weight in the theme, as a share of itself, next
+            # to the benchmark's — the manager's bet in manager space.
+            'own_weight': own_w,
+            'own_active_weight': (own_w - b_w) if own_w is not None else None,
+            'is_residual': name in residual,
+        })
+    managers.sort(key=lambda m: -m['weight'])
+
+    return {
+        'benchmark': benchmark_name,
+        'period': per,
+        'composite': composite_name,
+        'client': composite_client(parsed, composite_name),
+        'theme': {'label': _group_label(tuple(
+                      (p['column'], p['value']) for p in parts)),
+                  'parts': parts},
+        'benchmark_weight': b_w,
+        'benchmark_contribution': b_c,
+        'client_weight': c_w,
+        'client_contribution': c_c,
+        'active_weight': c_w - b_w,
+        'impact': c_c - b_c,
+        'impact_bps': (c_c - b_c) * 10000.0,
+        'managers': managers,
+        'reconciliation': {
+            'manager_weight_sum': sum(m['weight'] for m in managers),
+            'manager_contribution_sum': sum(m['contribution'] for m in managers),
+            'matches_client': abs(sum(m['weight'] for m in managers) - c_w) < 5e-6,
+        },
     }
 
 

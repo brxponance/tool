@@ -11,7 +11,8 @@ The degenerate-R_b cases below are not edge-case trivia — they are the
 requirement. The benchmark can return zero or go negative in a quarter, and a
 grouping must still be flagged when it is an outsized contributor OR an
 outsized detractor. Anything that divides by R_b breaks exactly there, which is
-why E_G (= c_G − w_G·R_b) ranks and the ratio is only ever decoration.
+why E_G (= c_G − w_G·R_b) ranks and the share-of-return columns are
+only ever decoration.
 """
 
 import math
@@ -104,9 +105,9 @@ def test_flat_benchmark():
     check(top['e_g_bps'] > 0, f"its E_G is positive ({top['e_g_bps']:.0f} bps)")
     check(top['share'] is not None and 0 < top['share'] <= 1.0,
           f"share of dispersion is a usable fraction ({top['share']})")
-    check(all(r['phi'] is None and r['ratio'] is None
+    check(all(r['phi'] is None and r['excess_share'] is None
               for r in res['contributors'] + res['detractors']),
-          "phi/ratio are None rather than NaN or Infinity")
+          "phi/excess_share are None rather than NaN or Infinity")
     check(finite(res['contributors'] + res['detractors'],
                  'w', 'r_g', 'excess', 'e_g', 'e_g_bps', 'share'),
           "no NaN/Inf anywhere in the returned rows")
@@ -170,7 +171,8 @@ def test_ratio_floor():
     check(abs(res['r_b']) < RATIO_FLOOR,
           f"|R_b| is inside the floor ({res['r_b'] * 10000:.0f} bps)")
     check(res['ratio_available'] is False, "ratio_available is False")
-    check(all(r['ratio'] is None for r in rows), "ratio column is blank")
+    check(all(r['excess_share'] is None for r in rows),
+          "share-of-return columns are blank")
     check(all(r['e_g_bps'] is not None and r['w'] is not None for r in rows),
           "w and E_G are still fully populated")
     check(finite(rows, 'w', 'r_g', 'excess', 'e_g', 'e_g_bps', 'share'),
@@ -218,8 +220,13 @@ def test_japan_semis_example():
         # E_G = c_G − w_G·R_b = 0.02 − 0.05(0.10) = 0.015 → 150 bps
         check(abs(jp['e_g_bps'] - 150.0) < 1e-6,
               f"E_G = {jp['e_g_bps']:.1f} bps (expected 150.0)")
-        check(res['ratio_available'] and abs(jp['ratio'] - 4.0) < 1e-9,
-              f"ratio = {jp['ratio']:.2f}× (20% of return on 5% of weight)")
+        # phi = c_G/R_b = 0.02/0.10 = 20% of the return on 5% of the weight,
+        # so the overshoot against its own weight is 20 − 5 = +15pp.
+        check(res['ratio_available'] and abs(jp['phi'] - 0.20) < 1e-9,
+              f"phi = {jp['phi']:.0%} of the benchmark's return")
+        check(abs(jp['excess_share'] - 0.15) < 1e-9,
+              f"excess share = {jp['excess_share'] * 100:+.0f}pp "
+              f"(20% of return on 5% of weight)")
 
 
 # ── 7. Parser rejects a file without the two required columns ────────────
@@ -239,7 +246,7 @@ def test_parser_requires_new_columns():
         check('Average Weight' in msg and 'Contribution To Return' in msg,
               "error names both missing columns")
         check('Port. Ending Weight' in msg,
-              "error warns not to move Port. Ending Weight")
+              "error says not to rename Port. Ending Weight")
     except Exception as e:  # noqa: BLE001
         check(False, f"raised the wrong error type: {type(e).__name__}: {e}")
 
